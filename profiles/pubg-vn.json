@@ -40,10 +40,16 @@
   ],
   "relays":  [
     {
-      "id":  "sg-1",
-      "name":  "Singapore #1",
-      "location":  "Singapore",
+      "id":  "hk-1",
+      "name":  "Hong Kong #1",
+      "location":  "Hong Kong",
       "endpoint":  "203.0.113.10:51820"
+    },
+    {
+      "id":  "sg-2",
+      "name":  "Singapore #2",
+      "location":  "Singapore",
+      "endpoint":  "139.99.73.90:51820"
     }
   ]
 }

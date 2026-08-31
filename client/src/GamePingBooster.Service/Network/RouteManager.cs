@@ -30,6 +30,12 @@ internal sealed class RouteManager
     public int ActiveRouteCount => _installedPrefixes.Count + (_pinnedRelayPrefix is null ? 0 : 1);
 
     /// <summary>
+    /// Game routes only, excluding the pinned relay route. The reconnect path uses this to tell
+    /// whether it pulled the game off the tunnel and therefore owes it a reinstall on success.
+    /// </summary>
+    public int ActiveGameRouteCount => _installedPrefixes.Count;
+
+    /// <summary>
     /// Assigns the inner IP and MTU to the virtual adapter. Call this after the relay has
     /// handed out an address during the handshake.
     /// </summary>
@@ -102,6 +108,19 @@ internal sealed class RouteManager
                 "No network adapter with a default gateway was found - is the machine offline?");
 
         var prefix = $"{relayIp}/32";
+
+        // Failing over to another relay pins a different address, and _pinnedRelayPrefix only
+        // holds one. Overwriting it without deleting first would strand the previous /32 in the
+        // routing table forever: RemoveAll can only delete the prefix it still remembers, so the
+        // old entry would outlive the service and keep sending that address down a stale path.
+        // Delete without interface= on purpose - the physical adapter may have changed since the
+        // pin was made (Wi-Fi to Ethernet), and naming the wrong index makes the delete a no-op.
+        if (_pinnedRelayPrefix is not null && _pinnedRelayPrefix != prefix)
+        {
+            RunNetsh($"interface ipv4 delete route prefix={_pinnedRelayPrefix} store=active",
+                ignoreErrors: true);
+            _pinnedRelayPrefix = null;
+        }
 
         // Always delete before adding. This route goes through the PHYSICAL adapter, so unlike
         // the game routes it does not disappear when the virtual adapter goes away - a service

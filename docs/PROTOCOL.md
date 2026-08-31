@@ -1,4 +1,4 @@
-# GPB Tunnel Protocol v1
+# GPB Tunnel Protocol v2
 
 The protocol between the **Windows client** and the **Linux relay**. This document is the single
 source of truth - any change has to be made here, in `relay/internal/protocol/protocol.go`, and
@@ -11,14 +11,14 @@ in `client/src/GamePingBooster.Core/Protocol/` together.
   into its own TUN device and lets the Linux kernel handle NAT and forwarding. Layer 4 is never
   parsed in userspace.
 - The **handshake is authenticated with HMAC-SHA256** over a pre-shared key, so the relay cannot
-  be used as an open proxy. Data packets are **not encrypted** in v1 - see the security section
+  be used as an open proxy. Data packets are **not encrypted** - see the security section
   of `docs/ARCHITECTURE.md` for the reasoning and the upgrade path.
 - Fixed headers, no TLV. The goal is the smallest possible per-packet overhead.
 
 ## The first byte
 
 ```
-bits 7..4 : version  (currently 1)
+bits 7..4 : version  (currently 2)
 bits 3..0 : message type
 ```
 
@@ -31,28 +31,41 @@ bits 3..0 : message type
 | 0x5  | Pong           | relay -> client |
 | 0x6  | Disconnect     | client -> relay |
 
-So the first byte is `0x11` for HandshakeReq, `0x13` for Data, and so on.
+So the first byte is `0x21` for HandshakeReq, `0x23` for Data, and so on.
 
-## HandshakeReq - 49 bytes
+## HandshakeReq - 57 bytes
 
 ```
 off  len  field
-0    1    header (0x11)
+0    1    header (0x21)
 1    8    client nonce (random)
 9    8    unix timestamp in seconds, big-endian
-17   32   HMAC-SHA256(psk, bytes[0..17))
+17   8    client id
+25   32   HMAC-SHA256(psk, bytes[0..25))
 ```
 
 The relay rejects the packet if `|now - timestamp| > 120s` (a coarse replay guard) or if the
 HMAC does not verify. Rejection is **silent** - no reply is sent, so the relay cannot be used as
 a scanning oracle.
 
+The **client id** is a random 64-bit value generated once per installation. The relay remembers
+which inner address each client id last held and hands the same one back on reconnect, so a
+client that loses its network for a few seconds does not have to re-address its virtual adapter
+and reinstall every route - during the exact moment the network is least reliable. It sits inside
+the signed range, so it cannot be swapped in transit; it is not an account or a licence key, and
+means nothing outside one relay's session table.
+
+Reservations are a convenience, not a promise. A relay whose pool runs dry releases unused
+reservations rather than refusing a live client, and an explicit Disconnect gives the address up
+immediately. Only an idle timeout - the case that usually means "came back later" - keeps it.
+
 ## HandshakeResp - 52 bytes
 
 ```
 off  len  field
-0    1    header (0x12)
-1    1    status (0 = OK, 1 = address pool full, 2 = server shutting down)
+0    1    header (0x22)
+1    1    status (0 = OK, 1 = address pool full, 2 = server shutting down,
+                  3 = protocol version mismatch)
 2    8    session id (random, assigned by the relay)
 10   4    inner IPv4 assigned to the client (e.g. 10.77.0.5)
 14   4    inner IPv4 of the relay, i.e. the gateway (e.g. 10.77.0.1)
@@ -62,11 +75,18 @@ off  len  field
 
 The client must verify the HMAC before trusting any field.
 
+**Version mismatch is answered, not ignored.** When the relay receives a handshake whose version
+is not its own, it replies with status 3 and puts the **client's** version in the header, not its
+own. That is deliberate: a reply the other side cannot parse teaches it nothing, and silence is
+indistinguishable from a dead relay or a blocked port. The HandshakeResp layout has not changed
+between v1 and v2, so a v1 client parses this and reports a refusal instead of timing out after
+four attempts. Clients must therefore read the status byte before rejecting on version.
+
 ## Data - 9-byte header plus payload
 
 ```
 off  len  field
-0    1    header (0x13)
+0    1    header (0x23)
 1    8    session id
 9    N    a whole IPv4 packet (starts with nibble 0x4)
 ```
@@ -83,7 +103,7 @@ the same roaming behaviour WireGuard has.
 
 ```
 off  len  field
-0    1    header (0x14 or 0x15)
+0    1    header (0x24 or 0x25)
 1    8    session id
 9    8    client timestamp (uint64, client's own tick unit; the relay only echoes it)
 ```
@@ -96,7 +116,7 @@ after 90 seconds without a packet.
 
 ```
 off  len  field
-0    1    header (0x16)
+0    1    header (0x26)
 1    8    session id
 ```
 

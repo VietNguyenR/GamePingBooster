@@ -12,7 +12,7 @@ public static class IpcConstants
     public const string PipeName = "GamePingBooster";
 
     /// <summary>Bump on contract changes so an old UI and a new service fail loudly instead of behaving oddly.</summary>
-    public const int ProtocolVersion = 1;
+    public const int ProtocolVersion = 2;
 }
 
 public enum TunnelState
@@ -52,11 +52,17 @@ public sealed class StatusMessage
     [JsonPropertyName("relayId")] public string? RelayId { get; set; }
     [JsonPropertyName("relayName")] public string? RelayName { get; set; }
 
-    /// <summary>Round-trip time through the tunnel in milliseconds; null until measured.</summary>
+    /// <summary>
+    /// Round-trip time to the relay in milliseconds; null until measured.
+    ///
+    /// This is the RTT to the relay over the physical path, not through the tunnel: the pinned
+    /// /32 route keeps relay traffic off the virtual adapter, so keepalives never enter it. The
+    /// before/after number a player actually cares about - latency to the game server with and
+    /// without the tunnel - cannot be produced here, because the relay-to-server leg is only
+    /// measurable from the relay and those servers do not answer probes. Use the game's own
+    /// in-game ping for that, and mtr from the VPS for choosing where to put a relay.
+    /// </summary>
     [JsonPropertyName("tunnelPingMs")] public double? TunnelPingMs { get; set; }
-
-    /// <summary>Direct RTT to the relay with the tunnel off, for a before/after comparison.</summary>
-    [JsonPropertyName("directPingMs")] public double? DirectPingMs { get; set; }
 
     /// <summary>Packet loss estimated from pings, 0..1.</summary>
     [JsonPropertyName("lossRatio")] public double? LossRatio { get; set; }

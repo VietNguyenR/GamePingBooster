@@ -11,15 +11,22 @@ var psk = []byte("test-psk-0123456789abcdef")
 
 func TestHandshakeRoundTrip(t *testing.T) {
 	now := time.Now()
-	req, _, err := BuildHandshakeReq(psk, now)
+	clientID := ClientID{1, 2, 3, 4, 5, 6, 7, 8}
+
+	req, _, err := BuildHandshakeReq(psk, clientID, now)
 	if err != nil {
 		t.Fatalf("BuildHandshakeReq: %v", err)
 	}
 	if len(req) != HandshakeReqLen {
 		t.Fatalf("HandshakeReq length = %d, want %d", len(req), HandshakeReqLen)
 	}
-	if err := VerifyHandshakeReq(psk, req, now); err != nil {
+
+	gotID, err := VerifyHandshakeReq(psk, req, now)
+	if err != nil {
 		t.Fatalf("VerifyHandshakeReq: %v", err)
+	}
+	if gotID != clientID {
+		t.Fatalf("client id = %v, want %v", gotID, clientID)
 	}
 
 	sid := SessionID{1, 2, 3, 4, 5, 6, 7, 8}
@@ -42,20 +49,47 @@ func TestHandshakeRoundTrip(t *testing.T) {
 
 func TestHandshakeRejectsBadKeyAndSkew(t *testing.T) {
 	now := time.Now()
-	req, _, _ := BuildHandshakeReq(psk, now)
+	req, _, _ := BuildHandshakeReq(psk, ClientID{9}, now)
 
-	if err := VerifyHandshakeReq([]byte("wrong-key-wrong-key-wrong"), req, now); err != ErrBadAuth {
+	if _, err := VerifyHandshakeReq([]byte("wrong-key-wrong-key-wrong"), req, now); err != ErrBadAuth {
 		t.Fatalf("wrong PSK should return ErrBadAuth, got %v", err)
 	}
-	if err := VerifyHandshakeReq(psk, req, now.Add(5*time.Minute)); err != ErrClockSkew {
+	if _, err := VerifyHandshakeReq(psk, req, now.Add(5*time.Minute)); err != ErrClockSkew {
 		t.Fatalf("clock skew should return ErrClockSkew, got %v", err)
 	}
 
-	// Flipping a single bit in the payload must break the HMAC.
+	// The client id is inside the signed range, so tampering with it must break the HMAC.
 	tampered := append([]byte(nil), req...)
-	tampered[3] ^= 0x01
-	if err := VerifyHandshakeReq(psk, tampered, now); err != ErrBadAuth {
-		t.Fatalf("tampered packet should return ErrBadAuth, got %v", err)
+	tampered[20] ^= 0x01
+	if _, err := VerifyHandshakeReq(psk, tampered, now); err != ErrBadAuth {
+		t.Fatalf("tampered client id should return ErrBadAuth, got %v", err)
+	}
+}
+
+func TestVersionMismatchResponseIsReadableByTheOtherVersion(t *testing.T) {
+	// The whole point of this message is that a client on a different version can still parse it.
+	// The reply therefore carries the client's version, not ours.
+	const clientVersion = 1
+	resp := BuildVersionMismatchResp(psk, clientVersion)
+
+	if len(resp) != HandshakeRespLen {
+		t.Fatalf("length = %d, want %d", len(resp), HandshakeRespLen)
+	}
+	v, msgType := ParseHeader(resp[0])
+	if v != clientVersion {
+		t.Fatalf("header version = %d, want the client's %d", v, clientVersion)
+	}
+	if msgType != TypeHandshakeResp {
+		t.Fatalf("type = %d, want TypeHandshakeResp", msgType)
+	}
+	if resp[1] != StatusVersionMismatch {
+		t.Fatalf("status = %d, want StatusVersionMismatch", resp[1])
+	}
+
+	// Our own parser rejects it precisely because the version is not ours - which is correct,
+	// and is why the field has to be read before the version check on the receiving side.
+	if _, err := ParseHandshakeResp(psk, resp); err != ErrBadVersion {
+		t.Fatalf("expected ErrBadVersion from our own parser, got %v", err)
 	}
 }
 

@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	Version = 1
+	Version = 2
 
 	TypeHandshakeReq  = 0x1
 	TypeHandshakeResp = 0x2
@@ -26,7 +26,8 @@ const (
 
 // Fixed sizes for each message type (see docs/PROTOCOL.md).
 const (
-	HandshakeReqLen  = 49
+	// HandshakeReqLen grew from 49 to 57 in v2 with the addition of the client id.
+	HandshakeReqLen  = 57
 	HandshakeRespLen = 52
 	DataHeaderLen    = 9
 	PingLen          = 17
@@ -41,9 +42,10 @@ const (
 
 // Status codes carried in HandshakeResp.
 const (
-	StatusOK       = 0
-	StatusPoolFull = 1
-	StatusShutdown = 2
+	StatusOK              = 0
+	StatusPoolFull        = 1
+	StatusShutdown        = 2
+	StatusVersionMismatch = 3
 )
 
 var (
@@ -54,6 +56,12 @@ var (
 	ErrClockSkew   = errors.New("timestamp too far out of range")
 	ErrNotIPv4     = errors.New("payload is not an IPv4 packet")
 )
+
+// ClientID identifies a client across reconnects so the relay can hand back the same inner IP.
+// It is random, generated once per installation, and carries no personal information - its only
+// job is to let a returning client keep its address so the routing table does not have to be
+// rebuilt on every blip.
+type ClientID [8]byte
 
 // SessionID is the 8-byte identifier the relay assigns after a handshake.
 type SessionID [8]byte
@@ -72,8 +80,8 @@ func sign(psk, data []byte) []byte {
 // ---------------------------------------------------------------- Handshake
 
 // BuildHandshakeReq builds a signed HandshakeReq. It also returns the nonce so the
-// client can log it (the relay does not echo it back in v1).
-func BuildHandshakeReq(psk []byte, now time.Time) (pkt []byte, nonce [8]byte, err error) {
+// client can log it (the relay does not echo it back).
+func BuildHandshakeReq(psk []byte, clientID ClientID, now time.Time) (pkt []byte, nonce [8]byte, err error) {
 	if _, err = rand.Read(nonce[:]); err != nil {
 		return nil, nonce, err
 	}
@@ -81,30 +89,46 @@ func BuildHandshakeReq(psk []byte, now time.Time) (pkt []byte, nonce [8]byte, er
 	pkt[0] = header(TypeHandshakeReq)
 	copy(pkt[1:9], nonce[:])
 	binary.BigEndian.PutUint64(pkt[9:17], uint64(now.Unix()))
-	copy(pkt[17:], sign(psk, pkt[:17]))
+	copy(pkt[17:25], clientID[:])
+	copy(pkt[25:], sign(psk, pkt[:25]))
 	return pkt, nonce, nil
 }
 
-// VerifyHandshakeReq checks the HMAC and the clock skew.
-func VerifyHandshakeReq(psk, pkt []byte, now time.Time) error {
+// VerifyHandshakeReq checks the HMAC and the clock skew, and returns the client id.
+func VerifyHandshakeReq(psk, pkt []byte, now time.Time) (ClientID, error) {
+	var id ClientID
 	if len(pkt) != HandshakeReqLen {
-		return ErrShortPacket
+		return id, ErrShortPacket
 	}
 	v, t := ParseHeader(pkt[0])
 	if v != Version {
-		return ErrBadVersion
+		return id, ErrBadVersion
 	}
 	if t != TypeHandshakeReq {
-		return ErrBadType
+		return id, ErrBadType
 	}
-	if !hmac.Equal(pkt[17:], sign(psk, pkt[:17])) {
-		return ErrBadAuth
+	if !hmac.Equal(pkt[25:], sign(psk, pkt[:25])) {
+		return id, ErrBadAuth
 	}
 	ts := time.Unix(int64(binary.BigEndian.Uint64(pkt[9:17])), 0)
 	if d := now.Sub(ts); d > HandshakeSkew || d < -HandshakeSkew {
-		return ErrClockSkew
+		return id, ErrClockSkew
 	}
-	return nil
+	copy(id[:], pkt[17:25])
+	return id, nil
+}
+
+// BuildVersionMismatchResp answers a handshake from a client speaking a different protocol
+// version. The reply deliberately carries the CLIENT's version in its header, not ours: a client
+// that cannot parse the answer learns nothing, and silence is indistinguishable from a dead
+// relay or a blocked port. The HandshakeResp layout has not changed since v1, so a v1 client
+// parses this and reports a refusal instead of timing out.
+func BuildVersionMismatchResp(psk []byte, clientVersion byte) []byte {
+	pkt := make([]byte, HandshakeRespLen)
+	pkt[0] = clientVersion<<4 | TypeHandshakeResp
+	pkt[1] = StatusVersionMismatch
+	copy(pkt[20:], sign(psk, pkt[:20]))
+	return pkt
 }
 
 // BuildHandshakeResp packs the handshake result and signs it with the PSK.

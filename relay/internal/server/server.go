@@ -32,9 +32,11 @@ type Config struct {
 
 type session struct {
 	id       protocol.SessionID
+	clientID protocol.ClientID
 	innerIP  netip.Addr
 	addr     atomic.Pointer[netip.AddrPort] // current client UDP address (changes on roaming)
 	lastSeen atomic.Int64                   // unix nanoseconds
+	resumed  bool                           // true if this session reclaimed a previously held address
 }
 
 func (s *session) touch() { s.lastSeen.Store(time.Now().UnixNano()) }
@@ -51,6 +53,12 @@ type Server struct {
 	bySession map[protocol.SessionID]*session
 	byIP      map[netip.Addr]*session
 	freeIPs   []netip.Addr
+
+	// reservedIPs remembers which inner address a client id last held. A client that drops and
+	// comes back gets the same address, so it does not have to tear down and rebuild its whole
+	// routing table over a two-second network blip. Entries survive the session they came from
+	// and are only given up when the pool runs dry.
+	reservedIPs map[protocol.ClientID]netip.Addr
 
 	relayIP netip.Addr
 
@@ -77,10 +85,11 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		cfg:       cfg,
-		log:       cfg.Log,
-		bySession: make(map[protocol.SessionID]*session),
-		byIP:      make(map[netip.Addr]*session),
+		cfg:         cfg,
+		log:         cfg.Log,
+		bySession:   make(map[protocol.SessionID]*session),
+		byIP:        make(map[netip.Addr]*session),
+		reservedIPs: make(map[protocol.ClientID]netip.Addr),
 	}
 
 	// .1 of the subnet is the relay's own address on the TUN device; the rest is the pool.
@@ -196,6 +205,14 @@ func (s *Server) loopUDP() error {
 
 		version, msgType := protocol.ParseHeader(buf[0])
 		if version != protocol.Version {
+			// Answer a mismatched handshake rather than dropping it. Silence here is
+			// indistinguishable from a dead relay or a firewalled port, and that ambiguity
+			// costs hours the first time a client and a relay drift apart in version.
+			if msgType == protocol.TypeHandshakeReq {
+				s.sendTo(protocol.BuildVersionMismatchResp(s.cfg.PSK, version), from)
+				s.log.Warn("handshake from a different protocol version",
+					"from", from.String(), "client_version", version, "our_version", protocol.Version)
+			}
 			s.stats.dropped.Add(1)
 			continue
 		}
@@ -216,14 +233,15 @@ func (s *Server) loopUDP() error {
 }
 
 func (s *Server) handleHandshake(pkt []byte, from netip.AddrPort) {
-	if err := protocol.VerifyHandshakeReq(s.cfg.PSK, pkt, time.Now()); err != nil {
+	clientID, err := protocol.VerifyHandshakeReq(s.cfg.PSK, pkt, time.Now())
+	if err != nil {
 		// Stay silent: never answer a bad packet, so scanners cannot fingerprint us.
 		s.log.Debug("handshake rejected", "from", from.String(), "err", err)
 		s.stats.dropped.Add(1)
 		return
 	}
 
-	sess, ok := s.allocSession(from)
+	sess, ok := s.allocSession(from, clientID)
 	if !ok {
 		resp := protocol.BuildHandshakeResp(s.cfg.PSK, protocol.StatusPoolFull,
 			protocol.SessionID{}, netip.Addr{}, netip.Addr{}, 0)
@@ -235,7 +253,8 @@ func (s *Server) handleHandshake(pkt []byte, from netip.AddrPort) {
 	resp := protocol.BuildHandshakeResp(s.cfg.PSK, protocol.StatusOK,
 		sess.id, sess.innerIP, s.relayIP, uint16(s.cfg.MTU))
 	s.sendTo(resp, from)
-	s.log.Info("client connected", "from", from.String(), "inner_ip", sess.innerIP.String())
+	s.log.Info("client connected",
+		"from", from.String(), "inner_ip", sess.innerIP.String(), "resumed", sess.resumed)
 }
 
 func (s *Server) handleData(pkt []byte, from netip.AddrPort) {
@@ -297,7 +316,7 @@ func (s *Server) handleDisconnect(pkt []byte, _ netip.AddrPort) {
 		return
 	}
 	if sess := s.lookup(sid); sess != nil {
-		s.releaseSession(sess)
+		s.releaseSession(sess, true)
 		s.log.Info("client disconnected", "inner_ip", sess.innerIP.String())
 	}
 }
@@ -363,7 +382,7 @@ func (s *Server) loopJanitor(done <-chan struct{}) {
 			s.mu.RUnlock()
 
 			for _, sess := range expired {
-				s.releaseSession(sess)
+				s.releaseSession(sess, false)
 				s.log.Info("session expired", "inner_ip", sess.innerIP.String())
 			}
 			s.log.Info("stats",
@@ -379,32 +398,81 @@ func (s *Server) loopJanitor(done <-chan struct{}) {
 
 // ------------------------------------------------------------ session table
 
-func (s *Server) allocSession(from netip.AddrPort) (*session, bool) {
+func (s *Server) allocSession(from netip.AddrPort, clientID protocol.ClientID) (*session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.freeIPs) == 0 {
-		return nil, false
-	}
-	ip := s.freeIPs[len(s.freeIPs)-1]
-	s.freeIPs = s.freeIPs[:len(s.freeIPs)-1]
 
 	var sid protocol.SessionID
 	if _, err := rand.Read(sid[:]); err != nil {
-		s.freeIPs = append(s.freeIPs, ip)
 		return nil, false
 	}
 
-	sess := &session{id: sid, innerIP: ip}
+	ip, resumed := s.claimAddress(clientID)
+	if !ip.IsValid() {
+		return nil, false
+	}
+
+	sess := &session{id: sid, clientID: clientID, innerIP: ip, resumed: resumed}
 	f := from
 	sess.addr.Store(&f)
 	sess.touch()
 
 	s.bySession[sid] = sess
 	s.byIP[ip] = sess
+	s.reservedIPs[clientID] = ip
 	return sess, true
 }
 
-func (s *Server) releaseSession(sess *session) {
+// claimAddress returns the inner address for a client id, preferring the one it held before.
+// Caller must hold s.mu.
+func (s *Server) claimAddress(clientID protocol.ClientID) (netip.Addr, bool) {
+	if previous, ok := s.reservedIPs[clientID]; ok {
+		if old, inUse := s.byIP[previous]; inUse {
+			// The same client reconnected before its old session timed out - most likely it lost
+			// the network rather than shutting down cleanly. Retire the stale session and take
+			// the address back; its inner IP is what the client's routing table already points at.
+			delete(s.bySession, old.id)
+			delete(s.byIP, previous)
+			return previous, true
+		}
+		// The address is free and still reserved for this client. Take it out of the pool.
+		for i, free := range s.freeIPs {
+			if free == previous {
+				s.freeIPs = append(s.freeIPs[:i], s.freeIPs[i+1:]...)
+				return previous, true
+			}
+		}
+	}
+
+	if len(s.freeIPs) == 0 {
+		// Pool exhausted. Reservations are a convenience, not a promise: drop the oldest ones
+		// rather than refuse a live client.
+		s.evictReservations()
+		if len(s.freeIPs) == 0 {
+			return netip.Addr{}, false
+		}
+	}
+	ip := s.freeIPs[len(s.freeIPs)-1]
+	s.freeIPs = s.freeIPs[:len(s.freeIPs)-1]
+	return ip, false
+}
+
+// evictReservations releases addresses that are reserved but not in use by any live session.
+// Caller must hold s.mu.
+func (s *Server) evictReservations() {
+	for clientID, ip := range s.reservedIPs {
+		if _, inUse := s.byIP[ip]; inUse {
+			continue
+		}
+		delete(s.reservedIPs, clientID)
+	}
+}
+
+// releaseSession returns the address to the pool. dropReservation distinguishes the two ways a
+// session can end: an explicit Disconnect means the client is done and its address can go to
+// anyone, whereas an idle timeout usually means it vanished mid-game and will be back shortly -
+// so the reservation is kept and it can resume on the same address.
+func (s *Server) releaseSession(sess *session, dropReservation bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.bySession[sess.id]; !ok {
@@ -413,6 +481,9 @@ func (s *Server) releaseSession(sess *session) {
 	delete(s.bySession, sess.id)
 	delete(s.byIP, sess.innerIP)
 	s.freeIPs = append(s.freeIPs, sess.innerIP)
+	if dropReservation {
+		delete(s.reservedIPs, sess.clientID)
+	}
 }
 
 func (s *Server) lookup(sid protocol.SessionID) *session {

@@ -30,6 +30,8 @@ internal sealed class TunnelEngine : IAsyncDisposable
     private RouteManager? _routes;
     private GameProcessWatcher? _watcher;
     private CancellationTokenSource? _cts;
+    private Task? _supervisor;
+    private readonly ulong _clientId = ClientIdentity.Load();
 
     private GameEntry? _game;
     private RelayEntry? _relay;
@@ -113,18 +115,20 @@ internal sealed class TunnelEngine : IAsyncDisposable
             if (_profile is null) await LoadProfileAsync(token).ConfigureAwait(false);
 
             _game = FindGame(gameId ?? _config.DefaultGameId);
-            _relay = FindRelay(relayId ?? _config.DefaultRelayId);
+            var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
+
+            // Choose the relay before creating anything. Probing is pure UDP - no adapter, no
+            // routes - so a relay that turns out to be unreachable costs nothing but a timeout.
+            SetState(TunnelState.Connecting, "Measuring relays...");
+            (_relay, _tunnel) = await SelectRelayAsync(relayId ?? _config.DefaultRelayId, psk, token)
+                .ConfigureAwait(false);
             var endpoint = ParseEndpoint(_relay.Endpoint);
+            var session = _tunnel.Session;
 
             SetState(TunnelState.Connecting, "Creating the virtual adapter...");
             _adapter = WintunAdapter.Create(_config.AdapterName);
             _adapter.StartSession();
             _log($"Virtual adapter '{_config.AdapterName}' is ready, interface index {_adapter.InterfaceIndex}");
-
-            SetState(TunnelState.Connecting, $"Connecting to {_relay.Name}...");
-            var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
-            _tunnel = new TunnelClient(endpoint, psk, _log);
-            var session = await _tunnel.HandshakeAsync(attempts: 4, token).ConfigureAwait(false);
 
             // Pin the relay to the physical adapter BEFORE installing any route into the tunnel.
             _routes = new RouteManager();
@@ -144,6 +148,8 @@ internal sealed class TunnelEngine : IAsyncDisposable
                 InstallRoutes();
             }
 
+            StartSupervisor(token);
+
             SetState(TunnelState.Connected,
                 _watcher.IsGameRunning
                     ? $"Connected to {_relay.Name} - accelerating {_game.Name}"
@@ -159,12 +165,285 @@ internal sealed class TunnelEngine : IAsyncDisposable
         }
     }
 
+    // ------------------------------------------------------- relay selection
+
+    /// <summary>
+    /// Picks a relay by measuring it. The handshake is a single round trip over the physical
+    /// path, so it doubles as a latency probe - no adapter, no routes, nothing to undo.
+    ///
+    /// Probing is sequential on purpose. Running the probes in parallel would have them compete
+    /// for the same uplink and inflate each other's numbers, which defeats the point.
+    /// </summary>
+    private async Task<(RelayEntry Relay, TunnelClient Tunnel)> SelectRelayAsync(
+        string? preferredId, byte[] psk, CancellationToken ct)
+    {
+        var candidates = _profile!.Relays;
+        if (candidates.Count == 0) throw new InvalidOperationException("The profile declares no relays.");
+
+        if (preferredId is not null)
+        {
+            var pinned = candidates.FirstOrDefault(r => r.Id.Equals(preferredId, StringComparison.OrdinalIgnoreCase));
+            if (pinned is not null)
+            {
+                var client = new TunnelClient(ParseEndpoint(pinned.Endpoint), psk, _clientId, _log);
+                await client.HandshakeAsync(attempts: 4, ct).ConfigureAwait(false);
+                return (pinned, client);
+            }
+            _log($"The profile has no relay '{preferredId}' - measuring all of them instead.");
+        }
+
+        if (candidates.Count == 1)
+        {
+            var only = candidates[0];
+            var client = new TunnelClient(ParseEndpoint(only.Endpoint), psk, _clientId, _log);
+            await client.HandshakeAsync(attempts: 4, ct).ConfigureAwait(false);
+            return (only, client);
+        }
+
+        var probes = new List<(RelayEntry Relay, TunnelClient Client, double Rtt)>();
+        foreach (var relay in candidates)
+        {
+            ct.ThrowIfCancellationRequested();
+            TunnelClient? client = null;
+            try
+            {
+                client = new TunnelClient(ParseEndpoint(relay.Endpoint), psk, _clientId, _log);
+                await client.HandshakeAsync(attempts: 2, ct).ConfigureAwait(false);
+                probes.Add((relay, client, client.HandshakeRttMs));
+                _log($"  {relay.Name} ({relay.Location}): {client.HandshakeRttMs:F0} ms");
+            }
+            catch (OperationCanceledException)
+            {
+                client?.Dispose();
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _log($"  {relay.Name} ({relay.Location}): unreachable - {ex.Message}");
+                client?.Dispose();
+            }
+        }
+
+        if (probes.Count == 0)
+        {
+            throw new InvalidOperationException(
+                $"None of the {candidates.Count} relays in the profile answered. Check the network, " +
+                "the endpoints in the profile, and that the PSK matches.");
+        }
+
+        var best = probes.OrderBy(p => p.Rtt).First();
+        foreach (var probe in probes)
+        {
+            if (!ReferenceEquals(probe.Client, best.Client)) probe.Client.Dispose();
+        }
+        _log($"Chose {best.Relay.Name} at {best.Rtt:F0} ms.");
+        return (best.Relay, best.Client);
+    }
+
+    // ---------------------------------------------------------- reconnection
+
+    /// <summary>
+    /// How long the relay may stay silent before the tunnel is presumed dead. Keepalives go out
+    /// every 3 seconds, so this is five missed answers - long enough to ride out a hiccup, short
+    /// enough that a player notices the reconnect rather than a dead game.
+    /// </summary>
+    private static readonly TimeSpan SilenceBeforeDead = TimeSpan.FromSeconds(15);
+
+    private void StartSupervisor(CancellationToken ct) => _supervisor = Task.Run(() => SuperviseAsync(ct), ct);
+
+    /// <summary>
+    /// Watches for a tunnel that has gone quiet. Without this, a relay restart or a brief loss of
+    /// connectivity leaves the UI reporting "Connected" over a tunnel that carries nothing - the
+    /// worst possible failure, because it looks like the game's fault.
+    /// </summary>
+    private async Task SuperviseAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
+            {
+                if (_state != TunnelState.Connected) continue;
+
+                var tunnel = _tunnel;
+                if (tunnel is null) continue;
+
+                var silence = tunnel.SinceLastPong;
+                if (silence < SilenceBeforeDead) continue;
+
+                _log($"No answer from the relay for {silence.TotalSeconds:F0}s - reconnecting.");
+                await ReconnectAsync(ct).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Normal shutdown.
+        }
+    }
+
+    /// <summary>
+    /// Re-establishes a tunnel that has gone silent, over any relay in the profile.
+    ///
+    /// Two things here exist because of a failure seen on real hardware (2026-09-01: the relay's
+    /// service was stopped to simulate a dead VPS).
+    ///
+    /// First, the game routes come out of the routing table immediately. While the tunnel is
+    /// down those routes point at a virtual adapter with nothing behind it, so the game's packets
+    /// are not merely slow - they are dropped on the floor. The player is worse off than if the
+    /// booster had never been switched on, which is the one outcome this project must never
+    /// produce. Pulling the routes hands the traffic back to the normal ISP path: higher ping,
+    /// but a playable game while we sort ourselves out.
+    ///
+    /// Second, every relay in the profile is tried, not just the one we were on. The old code
+    /// captured the relay once and hammered that single address forever, so a relay that stayed
+    /// down left the client stuck permanently.
+    ///
+    /// The relay we were using is always tried FIRST in each round. That is what keeps a brief
+    /// loss of the player's own connectivity - which takes every relay down at once - from
+    /// causing a pointless switch: when the network returns, the original relay answers first and
+    /// we resume on it, usually on the same inner IP.
+    /// </summary>
+    private async Task ReconnectAsync(CancellationToken ct)
+    {
+        var adapter = _adapter;
+        var routes = _routes;
+        var previous = _relay;
+        if (previous is null || adapter is null || routes is null) return;
+
+        var previousIp = _tunnel?.Session.ClientIp;
+        var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
+
+        _tunnel?.Dispose();
+        _tunnel = null;
+
+        // Fall back to the direct path before the first handshake, not after a few failures.
+        // There is no such thing as a fast recovery here - the supervisor already waited 15
+        // seconds of silence before calling us - so there is no quick success worth protecting
+        // these routes for, and every second they stay in place is a second of no game traffic.
+        var hadGameRoutes = routes.ActiveGameRouteCount > 0;
+        if (hadGameRoutes)
+        {
+            _log("Tunnel is down - removing game routes so traffic falls back to the normal path.");
+            routes.RemoveGameRoutes(adapter.InterfaceIndex);
+        }
+
+        var candidates = FailoverOrder(previous);
+        var delay = TimeSpan.FromSeconds(2);
+
+        // Which relay the pinned /32 currently points at. This is NOT the same question as
+        // "are we switching relay", and conflating the two is a routing loop waiting to happen:
+        // an attempt that pins relay B and then fails later on (ConfigureAdapter throwing, say)
+        // leaves the pin on B, so a subsequent success on relay A must re-pin even though A is
+        // the relay we originally came from.
+        var pinned = previous;
+
+        for (var round = 1; !ct.IsCancellationRequested; round++)
+        {
+            foreach (var relay in candidates)
+            {
+                if (ct.IsCancellationRequested) return;
+
+                SetState(TunnelState.Reconnecting,
+                    $"Reconnecting via {relay.Name} (attempt {round}) - traffic is on the normal path");
+
+                TunnelClient? client = null;
+                try
+                {
+                    client = new TunnelClient(ParseEndpoint(relay.Endpoint), psk, _clientId, _log);
+                    var session = await client.HandshakeAsync(attempts: 3, ct).ConfigureAwait(false);
+
+                    // Pin the relay through the physical adapter BEFORE anything can point into
+                    // the tunnel again - same rule as the initial connect, and the reason the
+                    // game routes are reinstalled only after this line.
+                    if (!ReferenceEquals(relay, pinned))
+                    {
+                        _log($"{pinned.Name} did not answer; failing over to {relay.Name}.");
+                        routes.PinRelayRoute(ParseEndpoint(relay.Endpoint).Address);
+                        pinned = relay;
+                        _relay = relay;
+                    }
+
+                    _tunnel = client;
+
+                    if (previousIp is not null && session.ClientIp.Equals(previousIp))
+                    {
+                        // The client id earned its keep: the relay handed back the same address,
+                        // so the adapter is still configured correctly.
+                        _log($"Resumed on the same inner IP ({session.ClientIp}).");
+                    }
+                    else
+                    {
+                        _log($"Got a different inner IP ({session.ClientIp}) - reconfiguring the adapter.");
+                        routes.ConfigureAdapter(adapter.InterfaceIndex, session.ClientIp, prefixLength: 24, session.Mtu);
+                    }
+
+                    if (hadGameRoutes || _config.RouteWithoutGame || (_watcher?.IsGameRunning ?? false))
+                    {
+                        InstallRoutes();
+                    }
+
+                    client.StartPumping(adapter, ct);
+                    _error = null;
+                    SetState(TunnelState.Connected, $"Reconnected to {relay.Name}");
+                    return;
+                }
+                catch (OperationCanceledException)
+                {
+                    // Dispose here too: the socket is ours until StartPumping takes it over, and
+                    // a reconnect loop that runs for hours would otherwise leak one per attempt.
+                    client?.Dispose();
+                    _tunnel = null;
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    client?.Dispose();
+                    _tunnel = null;
+                    _error = ex.Message;
+                    _log($"  {relay.Name}: {ex.Message}");
+                }
+            }
+
+            // Every relay failed this round. Back off before sweeping them again, but never give
+            // up: the usual cause is the player's own network being down, and it comes back
+            // without anyone pressing a button. Waiting here is safe now that the game is on the
+            // normal path rather than pointed at a dead adapter.
+            try { await Task.Delay(delay, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
+            delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 30));
+        }
+    }
+
+    /// <summary>
+    /// Relays to try during a reconnect: the one we were on first, then the rest of the profile
+    /// in order. Relays that failed are not struck off - a VPS that is rebooting comes back.
+    /// </summary>
+    private List<RelayEntry> FailoverOrder(RelayEntry current)
+    {
+        var order = new List<RelayEntry> { current };
+        foreach (var relay in _profile?.Relays ?? [])
+        {
+            if (!relay.Id.Equals(current.Id, StringComparison.OrdinalIgnoreCase)) order.Add(relay);
+        }
+        return order;
+    }
+
     private void OnGameStateChanged(bool running, string? processName)
     {
         try
         {
             if (running)
             {
+                // The game can start while the tunnel is down and the reconnect loop is sweeping
+                // relays. Installing routes then would push the game's packets into an adapter
+                // with nothing behind it - the exact blackhole the reconnect path just undid.
+                // ReconnectAsync reinstalls them itself as soon as a relay answers.
+                if (_tunnel is null)
+                {
+                    _log($"Detected {processName}.exe, but the tunnel is down - leaving it on the normal path.");
+                    return;
+                }
+
                 _log($"Detected {processName}.exe running - installing routes.");
                 InstallRoutes();
                 SetState(TunnelState.Connected, $"Accelerating {_game?.Name} through {_relay?.Name}");
@@ -173,7 +452,11 @@ internal sealed class TunnelEngine : IAsyncDisposable
             {
                 _log("The game exited - removing routes, other traffic returns to the normal path.");
                 if (_adapter is not null) _routes?.RemoveGameRoutes(_adapter.InterfaceIndex);
-                SetState(TunnelState.Connected, $"Connected to {_relay?.Name} - waiting for {_game?.Name} to start");
+                // Do not claim Connected while a reconnect is still in progress.
+                if (_tunnel is not null)
+                {
+                    SetState(TunnelState.Connected, $"Connected to {_relay?.Name} - waiting for {_game?.Name} to start");
+                }
             }
         }
         catch (Exception ex)
@@ -230,6 +513,14 @@ internal sealed class TunnelEngine : IAsyncDisposable
 
         _tunnel?.Dispose();
         _tunnel = null;
+
+        if (_supervisor is not null)
+        {
+            _cts?.Cancel();
+            try { await _supervisor.ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+            _supervisor = null;
+        }
 
         // Deleting the adapter comes last, and it is also the safety brake: any route still
         // pointing at it disappears along with it.

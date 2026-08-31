@@ -10,7 +10,7 @@ namespace GamePingBooster.Core.Protocol;
 /// </summary>
 public static class GpbProtocol
 {
-    public const byte Version = 1;
+    public const byte Version = 2;
 
     public const byte TypeHandshakeReq = 0x1;
     public const byte TypeHandshakeResp = 0x2;
@@ -19,7 +19,8 @@ public static class GpbProtocol
     public const byte TypePong = 0x5;
     public const byte TypeDisconnect = 0x6;
 
-    public const int HandshakeReqLen = 49;
+    // Grew from 49 to 57 in v2 with the addition of the client id.
+    public const int HandshakeReqLen = 57;
     public const int HandshakeRespLen = 52;
     public const int DataHeaderLen = 9;
     public const int PingLen = 17;
@@ -29,19 +30,27 @@ public static class GpbProtocol
     public const byte StatusOk = 0;
     public const byte StatusPoolFull = 1;
     public const byte StatusShutdown = 2;
+    public const byte StatusVersionMismatch = 3;
 
     private static byte Header(byte msgType) => (byte)((Version << 4) | (msgType & 0x0f));
 
     public static (byte Version, byte Type) ParseHeader(byte b) => ((byte)(b >> 4), (byte)(b & 0x0f));
 
-    /// <summary>Builds a HandshakeReq signed with HMAC-SHA256 using the PSK.</summary>
-    public static byte[] BuildHandshakeReq(byte[] psk, DateTimeOffset now)
+    /// <summary>
+    /// Builds a HandshakeReq signed with HMAC-SHA256 using the PSK.
+    ///
+    /// <paramref name="clientId"/> is what lets a reconnecting client keep the inner address it
+    /// already has, so a brief network drop does not force the routing table to be rebuilt. It
+    /// sits inside the signed range, so it cannot be swapped in transit.
+    /// </summary>
+    public static byte[] BuildHandshakeReq(byte[] psk, ulong clientId, DateTimeOffset now)
     {
         var pkt = new byte[HandshakeReqLen];
         pkt[0] = Header(TypeHandshakeReq);
         RandomNumberGenerator.Fill(pkt.AsSpan(1, 8));
         BinaryPrimitives.WriteUInt64BigEndian(pkt.AsSpan(9, 8), (ulong)now.ToUnixTimeSeconds());
-        HMACSHA256.HashData(psk, pkt.AsSpan(0, 17)).CopyTo(pkt.AsSpan(17));
+        BinaryPrimitives.WriteUInt64BigEndian(pkt.AsSpan(17, 8), clientId);
+        HMACSHA256.HashData(psk, pkt.AsSpan(0, 25)).CopyTo(pkt.AsSpan(25));
         return pkt;
     }
 
@@ -63,7 +72,12 @@ public static class GpbProtocol
         if (pkt.Length != HandshakeRespLen) return false;
 
         var (version, type) = ParseHeader(pkt[0]);
-        if (version != Version || type != TypeHandshakeResp) return false;
+        if (type != TypeHandshakeResp) return false;
+
+        // A relay speaking a different version answers with OUR version in the header and
+        // StatusVersionMismatch in the body, precisely so this parser can read it. Rejecting it
+        // on the version check would turn a clear diagnosis back into a silent timeout.
+        if (version != Version && pkt[1] != StatusVersionMismatch) return false;
 
         Span<byte> expected = stackalloc byte[32];
         HMACSHA256.HashData(psk, pkt[..20], expected);

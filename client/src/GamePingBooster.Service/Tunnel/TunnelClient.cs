@@ -18,6 +18,7 @@ internal sealed class TunnelClient : IDisposable
 {
     private readonly IPEndPoint _relayEndpoint;
     private readonly byte[] _psk;
+    private readonly ulong _clientId;
     private readonly Action<string> _log;
 
     private Socket? _socket;
@@ -35,6 +36,24 @@ internal sealed class TunnelClient : IDisposable
     private long _pingsSent;
     private long _pongsReceived;
     private double _lastRttMs = -1;
+    private long _lastPongTicks;
+
+    /// <summary>Round-trip time of the handshake itself, measured before any traffic flows.</summary>
+    public double HandshakeRttMs { get; private set; } = -1;
+
+    /// <summary>
+    /// How long since the relay last answered. The reconnect supervisor watches this: it is the
+    /// only evidence available that a tunnel carrying no game traffic is still alive.
+    /// </summary>
+    public TimeSpan SinceLastPong
+    {
+        get
+        {
+            var ticks = Interlocked.Read(ref _lastPongTicks);
+            if (ticks == 0) return TimeSpan.Zero;
+            return TimeSpan.FromSeconds((double)(_clock.ElapsedTicks - ticks) / Stopwatch.Frequency);
+        }
+    }
 
     public long PacketsSent => Interlocked.Read(ref _packetsSent);
     public long PacketsReceived => Interlocked.Read(ref _packetsReceived);
@@ -54,10 +73,11 @@ internal sealed class TunnelClient : IDisposable
 
     public GpbProtocol.HandshakeResult Session { get; private set; }
 
-    public TunnelClient(IPEndPoint relayEndpoint, byte[] psk, Action<string> log)
+    public TunnelClient(IPEndPoint relayEndpoint, byte[] psk, ulong clientId, Action<string> log)
     {
         _relayEndpoint = relayEndpoint;
         _psk = psk;
+        _clientId = clientId;
         _log = log;
     }
 
@@ -81,7 +101,8 @@ internal sealed class TunnelClient : IDisposable
         {
             ct.ThrowIfCancellationRequested();
 
-            var req = GpbProtocol.BuildHandshakeReq(_psk, DateTimeOffset.UtcNow);
+            var req = GpbProtocol.BuildHandshakeReq(_psk, _clientId, DateTimeOffset.UtcNow);
+            var sentAt = _clock.ElapsedTicks;
             await _socket.SendAsync(req, SocketFlags.None, ct).ConfigureAwait(false);
             _log($"Sent handshake to {_relayEndpoint} (attempt {attempt}/{attempts})");
 
@@ -101,13 +122,22 @@ internal sealed class TunnelClient : IDisposable
                     {
                         GpbProtocol.StatusPoolFull => "The relay is full, try another one.",
                         GpbProtocol.StatusShutdown => "The relay is shutting down for maintenance.",
+                        GpbProtocol.StatusVersionMismatch =>
+                            $"The relay speaks a different protocol version than this client (we are v{GpbProtocol.Version}). Update whichever is older.",
                         _ => $"The relay refused the connection (status {result.Status})."
                     });
                 }
 
+                // The handshake is one clean round trip over the physical path, which makes it
+                // the cheapest honest measurement of client-to-relay latency available - no
+                // session needed, nothing to tear down, and it is exactly the number that
+                // decides which relay to use.
+                HandshakeRttMs = (_clock.ElapsedTicks - sentAt) * 1000.0 / Stopwatch.Frequency;
+
                 _sessionId = result.SessionId;
                 Session = result;
-                _log($"Handshake succeeded. Tunnel IP: {result.ClientIp}, MTU {result.Mtu}");
+                Interlocked.Exchange(ref _lastPongTicks, _clock.ElapsedTicks);
+                _log($"Handshake succeeded in {HandshakeRttMs:F0} ms. Tunnel IP: {result.ClientIp}, MTU {result.Mtu}");
                 return result;
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
@@ -214,6 +244,7 @@ internal sealed class TunnelClient : IDisposable
                         {
                             var now = (ulong)_clock.ElapsedTicks;
                             _lastRttMs = (now - stamp) * 1000.0 / Stopwatch.Frequency;
+                            Interlocked.Exchange(ref _lastPongTicks, (long)now);
                             Interlocked.Increment(ref _pongsReceived);
                         }
                         break;
