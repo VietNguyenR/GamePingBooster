@@ -1,0 +1,37 @@
+[Unit]
+Description=Game Ping Booster relay
+Documentation=https://github.com/gamepingbooster
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/relayd \
+  -listen :51820 \
+  -tun gpb0 \
+  -subnet 10.77.0.0/24 \
+  -mtu 1400 \
+  -psk-file /etc/gpb/psk \
+  -log-level info
+
+# relayd needs CAP_NET_ADMIN to open the TUN device and to run `ip addr/link`.
+# Running as root keeps it simple; everything else is locked down.
+#
+# The directives below deliberately stick to what systemd 219 (CentOS/RHEL 7) understands.
+# ProtectSystem=strict, ReadOnlyPaths= and DevicePolicy= all need systemd >= 232 and will
+# make the service fail on older distros - do not add them unless the VPS runs a recent systemd.
+User=root
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+# The relay is latency sensitive - give it priority over other background work.
+Nice=-10
+LimitNOFILE=65535
+
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,42 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+
+# Go
+relay/relayd
+relay/relayd.arm64
+relay/gpb-relay.tar.gz
+relay/dist/
+
+# Thư viện native tải về, không commit (xem client/native/wintun/README.md)
+client/native/wintun/*.dll
+
+# Bí mật: PSK, profile đã điền IP thật, cấu hình có endpoint thật
+client/config.json
+**/psk
+*.pem
+*.key
+
+# Bản build installer
+installer/output/
+
+# Capture khi phân tích traffic game
+*.pcapng
+*.pcap
+tools/profile-builder/.cache/
+tools/profile-builder/observed.txt
+tools/profile-builder/observed-unverified.txt
+profiles/*.bak
+CLAUDE.md
+
+.vs
+installer/README.md
+docs/pubg-ip-ranges.md
+docs/ROADMAP.md
+docs/virtual-adapter.md
+
+# Profile test cuc bo: giu endpoint that, khong public
+profiles/test-stage1.json
+profiles/*.local.json

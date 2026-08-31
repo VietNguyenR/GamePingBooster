@@ -1,0 +1,104 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:GamePingBooster.App.ViewModels"
+        x:Class="GamePingBooster.App.Views.MainWindow"
+        x:DataType="vm:MainViewModel"
+        Title="Game Ping Booster"
+        Width="420" Height="520"
+        MinWidth="380" MinHeight="480"
+        WindowStartupLocation="CenterScreen"
+        Background="#0F172A">
+
+  <Window.Styles>
+    <Style Selector="TextBlock.label">
+      <Setter Property="Foreground" Value="#94A3B8" />
+      <Setter Property="FontSize" Value="13" />
+    </Style>
+    <Style Selector="TextBlock.value">
+      <Setter Property="Foreground" Value="#E2E8F0" />
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="HorizontalAlignment" Value="Right" />
+    </Style>
+    <Style Selector="Border.card">
+      <Setter Property="Background" Value="#1E293B" />
+      <Setter Property="CornerRadius" Value="12" />
+      <Setter Property="Padding" Value="16" />
+    </Style>
+  </Window.Styles>
+
+  <Grid RowDefinitions="Auto,Auto,*,Auto" Margin="24">
+
+    <!-- Header -->
+    <StackPanel Grid.Row="0" Spacing="4">
+      <TextBlock Text="Game Ping Booster"
+                 Foreground="#F8FAFC" FontSize="20" FontWeight="Bold" />
+      <TextBlock Text="PUBG - Southeast Asia servers"
+                 Foreground="#64748B" FontSize="12" />
+    </StackPanel>
+
+    <!-- Primary status -->
+    <Border Grid.Row="1" Classes="card" Margin="0,20,0,0">
+      <StackPanel Spacing="8" HorizontalAlignment="Center">
+        <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Center">
+          <Ellipse Width="12" Height="12" VerticalAlignment="Center"
+                   Fill="{Binding StatusBrush}" />
+          <TextBlock Text="{Binding StatusText}"
+                     Foreground="{Binding StatusBrush}"
+                     FontSize="22" FontWeight="Bold" />
+        </StackPanel>
+
+        <TextBlock Text="{Binding Detail}"
+                   Foreground="#94A3B8" FontSize="12"
+                   TextWrapping="Wrap" TextAlignment="Center"
+                   MaxWidth="320" />
+
+        <ProgressBar IsIndeterminate="True" Height="3" Margin="0,4,0,0"
+                     IsVisible="{Binding IsBusy}" />
+      </StackPanel>
+    </Border>
+
+    <!-- Details -->
+    <StackPanel Grid.Row="2" Spacing="12" Margin="0,16,0,0">
+      <Border Classes="card">
+        <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" >
+          <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="Ping through relay" />
+          <TextBlock Grid.Row="0" Grid.Column="1" Classes="value" Text="{Binding PingText}" />
+
+          <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="Packet loss" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="1" Grid.Column="1" Classes="value" Text="{Binding LossText}" Margin="0,10,0,0" />
+
+          <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="Relay server" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="2" Grid.Column="1" Classes="value" Text="{Binding RelayText}" Margin="0,10,0,0" />
+
+          <TextBlock Grid.Row="3" Grid.Column="0" Classes="label" Text="Game" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="3" Grid.Column="1" Classes="value" Text="{Binding GameText}" Margin="0,10,0,0" />
+
+          <TextBlock Grid.Row="4" Grid.Column="0" Classes="label" Text="Routing" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="4" Grid.Column="1" Classes="value" Text="{Binding RouteText}" Margin="0,10,0,0" />
+
+          <TextBlock Grid.Row="5" Grid.Column="0" Classes="label" Text="Packets" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="5" Grid.Column="1" Classes="value" Text="{Binding PacketsText}" Margin="0,10,0,0" />
+        </Grid>
+      </Border>
+
+      <!-- Error banner, only shown when something went wrong -->
+      <Border Background="#7F1D1D" CornerRadius="8" Padding="12"
+              IsVisible="{Binding HasError}">
+        <TextBlock Text="{Binding Error}" Foreground="#FEE2E2"
+                   FontSize="12" TextWrapping="Wrap" />
+      </Border>
+    </StackPanel>
+
+    <!-- Primary action -->
+    <Button Grid.Row="3"
+            Content="{Binding ActionButtonText}"
+            IsEnabled="{Binding CanPressAction}"
+            Click="OnActionClick"
+            HorizontalAlignment="Stretch"
+            HorizontalContentAlignment="Center"
+            Height="46" FontSize="15" FontWeight="SemiBold"
+            Background="#2563EB" Foreground="White"
+            CornerRadius="10" Margin="0,20,0,0" />
+  </Grid>
+</Window>

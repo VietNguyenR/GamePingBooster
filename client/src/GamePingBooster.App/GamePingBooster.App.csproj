@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>GamePingBooster</AssemblyName>
+    <RootNamespace>GamePingBooster.App</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <!-- Native AOT: no .NET Runtime needed on the user machine, and the app starts almost instantly. -->
+    <PublishAot>true</PublishAot>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+
+    <!-- Required for AOT: bindings must be compiled, not resolved by reflection at runtime.
+         Every Window/UserControl must declare x:DataType or the build fails. -->
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <EnableAotAnalyzer>true</EnableAotAnalyzer>
+    <TrimMode>full</TrimMode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\GamePingBooster.Core\GamePingBooster.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
+  </ItemGroup>
+
+</Project>
