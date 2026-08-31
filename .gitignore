@@ -40,3 +40,8 @@ docs/virtual-adapter.md
 # Profile test cuc bo: giu endpoint that, khong public
 profiles/test-stage1.json
 profiles/*.local.json
+
+# Ngu canh lam viec, khong public
+HANDOFF.md
+profiles/pubg-vn.json
+.gitignore
