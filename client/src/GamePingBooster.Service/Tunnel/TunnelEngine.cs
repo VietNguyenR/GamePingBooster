@@ -313,7 +313,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
         var previousIp = _tunnel?.Session.ClientIp;
         var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
 
-        _tunnel?.Dispose();
+        Abandon(_tunnel);
         _tunnel = null;
 
         // Fall back to the direct path before the first handshake, not after a few failures.
@@ -367,9 +367,15 @@ internal sealed class TunnelEngine : IAsyncDisposable
 
                     if (previousIp is not null && session.ClientIp.Equals(previousIp))
                     {
-                        // The client id earned its keep: the relay handed back the same address,
-                        // so the adapter is still configured correctly.
-                        _log($"Resumed on the same inner IP ({session.ClientIp}).");
+                        // Same address, but for two very different reasons - say which, because
+                        // reading "resumed" after a failover invites the conclusion that the
+                        // address reservation worked across two independent relays, which is
+                        // impossible: each relay has its own session table.
+                        _log(ReferenceEquals(relay, previous)
+                            ? $"Resumed on the same inner IP ({session.ClientIp}) - the reservation held."
+                            : $"{relay.Name} happened to hand out the same inner IP ({session.ClientIp}) " +
+                              "the previous relay had. Convenient - the adapter needs no change - but it is " +
+                              "the two address pools coinciding, not a resumed session.");
                     }
                     else
                     {
@@ -389,15 +395,15 @@ internal sealed class TunnelEngine : IAsyncDisposable
                 }
                 catch (OperationCanceledException)
                 {
-                    // Dispose here too: the socket is ours until StartPumping takes it over, and
+                    // Abandon here too: the socket is ours until StartPumping takes it over, and
                     // a reconnect loop that runs for hours would otherwise leak one per attempt.
-                    client?.Dispose();
+                    Abandon(client);
                     _tunnel = null;
                     return;
                 }
                 catch (Exception ex)
                 {
-                    client?.Dispose();
+                    Abandon(client);
                     _tunnel = null;
                     _error = ex.Message;
                     _log($"  {relay.Name}: {ex.Message}");
@@ -412,6 +418,20 @@ internal sealed class TunnelEngine : IAsyncDisposable
             catch (OperationCanceledException) { return; }
             delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 30));
         }
+    }
+
+    /// <summary>
+    /// Drops a tunnel that is being REPLACED rather than shut down, without telling the relay we
+    /// are leaving. A Disconnect would make the relay drop this client's address reservation, and
+    /// that reservation is the entire reason a reconnect can keep its inner IP and leave the
+    /// routing table alone. Reconnecting used to announce its own departure and then wonder why
+    /// it always came back on a different address.
+    /// </summary>
+    private static void Abandon(TunnelClient? client)
+    {
+        if (client is null) return;
+        client.AnnounceDisconnect = false;
+        client.Dispose();
     }
 
     /// <summary>

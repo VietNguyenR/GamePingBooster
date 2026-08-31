@@ -42,6 +42,17 @@ internal sealed class TunnelClient : IDisposable
     public double HandshakeRttMs { get; private set; } = -1;
 
     /// <summary>
+    /// Whether <see cref="Dispose"/> should tell the relay this client is leaving for good.
+    ///
+    /// A Disconnect makes the relay release the session AND drop the address reservation held for
+    /// this client id. That is right when the user switches the booster off, and actively harmful
+    /// during a reconnect: the reservation is the only reason a returning client keeps its inner
+    /// IP, and therefore the only reason its routing table survives. A tunnel that is being
+    /// replaced rather than shut down must be disposed with this set to false.
+    /// </summary>
+    public bool AnnounceDisconnect { get; set; } = true;
+
+    /// <summary>
     /// How long since the relay last answered. The reconnect supervisor watches this: it is the
     /// only evidence available that a tunnel carrying no game traffic is still alive.
     /// </summary>
@@ -66,8 +77,12 @@ internal sealed class TunnelClient : IDisposable
         {
             var sent = Interlocked.Read(ref _pingsSent);
             if (sent < 5) return null;
-            var lost = sent - Interlocked.Read(ref _pongsReceived);
-            return Math.Clamp((double)lost / sent, 0, 1);
+            // Discount the most recent ping: it is normally still in flight, and counting it as
+            // lost puts a permanent floor under this number - a perfectly healthy tunnel would
+            // report several percent loss and send someone hunting a problem that is not there.
+            var answered = Interlocked.Read(ref _pongsReceived);
+            var outstanding = sent - 1;
+            return Math.Clamp((double)(outstanding - answered) / outstanding, 0, 1);
         }
     }
 
@@ -202,6 +217,11 @@ internal sealed class TunnelClient : IDisposable
             {
                 // ICMP port-unreachable from the relay, or a packet over the MTU: drop it, keep the tunnel alive.
             }
+            catch (SocketException ex) when (ex.SocketErrorCode is SocketError.Interrupted or SocketError.OperationAborted)
+            {
+                // Normal shutdown - see the matching case in DownlinkLoop.
+                return;
+            }
             catch (ObjectDisposedException)
             {
                 return;
@@ -254,6 +274,15 @@ internal sealed class TunnelClient : IDisposable
             {
                 // The relay is not up yet or just restarted - keep reading.
             }
+            catch (SocketException ex) when (ex.SocketErrorCode is SocketError.Interrupted or SocketError.OperationAborted)
+            {
+                // Dispose() closed the socket while Receive was blocking on it. That is how this
+                // loop is meant to end, so it is not an error: logging it as one ("a blocking
+                // operation was interrupted by a call to WSACancelBlockingCall") puts a scary
+                // line in the middle of every reconnect and sends whoever reads the log next
+                // hunting a fault that is not there.
+                return;
+            }
             catch (ObjectDisposedException)
             {
                 return;
@@ -292,7 +321,7 @@ internal sealed class TunnelClient : IDisposable
     {
         try
         {
-            if (_socket is { Connected: true } && _sessionId != 0)
+            if (AnnounceDisconnect && _socket is { Connected: true } && _sessionId != 0)
             {
                 _socket.Send(GpbProtocol.BuildDisconnect(_sessionId));
             }

@@ -26,6 +26,11 @@ internal sealed class RouteManager
     private readonly List<string> _installedPrefixes = [];
     private string? _pinnedRelayPrefix;
 
+    // The interface the pin was made through. Deleting a route REQUIRES naming its interface, and
+    // the physical adapter can change between pinning and unpinning (Wi-Fi to Ethernet), so the
+    // index has to be remembered rather than looked up again at delete time.
+    private uint _pinnedRelayInterface;
+
     /// <summary>Number of routes currently installed.</summary>
     public int ActiveRouteCount => _installedPrefixes.Count + (_pinnedRelayPrefix is null ? 0 : 1);
 
@@ -112,13 +117,10 @@ internal sealed class RouteManager
         // Failing over to another relay pins a different address, and _pinnedRelayPrefix only
         // holds one. Overwriting it without deleting first would strand the previous /32 in the
         // routing table forever: RemoveAll can only delete the prefix it still remembers, so the
-        // old entry would outlive the service and keep sending that address down a stale path.
-        // Delete without interface= on purpose - the physical adapter may have changed since the
-        // pin was made (Wi-Fi to Ethernet), and naming the wrong index makes the delete a no-op.
+        // old entry would outlive the service.
         if (_pinnedRelayPrefix is not null && _pinnedRelayPrefix != prefix)
         {
-            RunNetsh($"interface ipv4 delete route prefix={_pinnedRelayPrefix} store=active",
-                ignoreErrors: true);
+            DeleteRoute(_pinnedRelayPrefix, _pinnedRelayInterface);
             _pinnedRelayPrefix = null;
         }
 
@@ -128,11 +130,11 @@ internal sealed class RouteManager
         // We cannot simply ignore that failure by matching netsh's message, because the message
         // is localised: an English Windows says "The object already exists" and a Vietnamese one
         // says something else entirely.
-        RunNetsh($"interface ipv4 delete route prefix={prefix} interface={physIndex} store=active",
-            ignoreErrors: true);
+        DeleteRoute(prefix, physIndex);
 
         RunNetsh($"interface ipv4 add route prefix={prefix} interface={physIndex} nexthop={gateway} metric=1 store=active");
         _pinnedRelayPrefix = prefix;
+        _pinnedRelayInterface = physIndex;
     }
 
     /// <summary>
@@ -195,8 +197,7 @@ internal sealed class RouteManager
 
         if (_pinnedRelayPrefix is not null)
         {
-            RunNetshScript([$"interface ipv4 delete route prefix={_pinnedRelayPrefix} store=active"],
-                ignoreErrors: true);
+            DeleteRoute(_pinnedRelayPrefix, _pinnedRelayInterface);
             _pinnedRelayPrefix = null;
         }
     }
@@ -228,6 +229,18 @@ internal sealed class RouteManager
         }
         return null;
     }
+
+    /// <summary>
+    /// Deletes one route. Every deletion goes through here for one reason: netsh REQUIRES
+    /// interface= on `delete route`, and when it is missing netsh prints its usage text and
+    /// <b>exits with code 0</b>. The command does nothing, the exit code says success, and the
+    /// route silently stays in the table - which is how the pinned relay route survived every
+    /// disconnect for weeks. Taking the interface as a parameter makes that mistake impossible to
+    /// write rather than merely unlikely.
+    /// </summary>
+    private static void DeleteRoute(string prefix, uint interfaceIndex)
+        => RunNetsh($"interface ipv4 delete route prefix={prefix} interface={interfaceIndex} store=active",
+            ignoreErrors: true);
 
     private static bool IsValidIPv4Cidr(string cidr)
     {
@@ -298,11 +311,26 @@ internal sealed class RouteManager
         var stderr = proc.StandardError.ReadToEnd();
         proc.WaitForExit(15_000);
 
-        if (proc.ExitCode != 0 && !ignoreErrors)
+        if (ignoreErrors) return;
+
+        if (proc.ExitCode != 0)
         {
             throw new InvalidOperationException(
                 $"netsh exited with {proc.ExitCode}. Commands: {string.Join(" | ", commands)}. " +
                 $"Output: {(stdout + stderr).Trim()}");
+        }
+
+        // The exit code alone is NOT enough. A command with a missing or misspelled parameter
+        // makes netsh print its usage block and exit 0 - so a route command that did nothing at
+        // all looks exactly like one that worked. These commands are silent when they succeed, so
+        // any output at all means something went wrong. We still do not read WHAT it says: the
+        // text is localised, only its presence is not.
+        var noise = (stdout + stderr).Trim();
+        if (noise.Length > 0)
+        {
+            throw new InvalidOperationException(
+                $"netsh exited 0 but printed output, which means it did not run the command. " +
+                $"Commands: {string.Join(" | ", commands)}. Output: {noise}");
         }
     }
 }

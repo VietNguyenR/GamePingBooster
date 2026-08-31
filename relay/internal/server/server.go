@@ -310,15 +310,25 @@ func (s *Server) handlePing(pkt []byte, from netip.AddrPort) {
 	s.sendTo(protocol.BuildPong(sid, stamp), from)
 }
 
-func (s *Server) handleDisconnect(pkt []byte, _ netip.AddrPort) {
+func (s *Server) handleDisconnect(pkt []byte, from netip.AddrPort) {
 	sid, err := protocol.DecodeSessionID(pkt)
 	if err != nil {
 		return
 	}
-	if sess := s.lookup(sid); sess != nil {
-		s.releaseSession(sess, true)
-		s.log.Info("client disconnected", "inner_ip", sess.innerIP.String())
+	sess := s.lookup(sid)
+	if sess == nil {
+		return
 	}
+	// Disconnect carries no signature, and v2 authenticates without encrypting - session ids
+	// travel in clear. Accept the message only from the address the session is currently using,
+	// otherwise anyone who can observe one packet can end the session with a forged nine bytes
+	// and take the address reservation down with it.
+	if cur := sess.addr.Load(); cur == nil || *cur != from {
+		s.stats.dropped.Add(1)
+		return
+	}
+	s.releaseSession(sess, true)
+	s.log.Info("client disconnected", "inner_ip", sess.innerIP.String())
 }
 
 // loopTUN handles relay-to-client traffic: the kernel hands packets back through the
@@ -336,6 +346,14 @@ func (s *Server) loopTUN() error {
 		}
 		if n < 20 || readBuf[0]>>4 != 4 {
 			continue // skip IPv6 and garbage
+		}
+		if n > protocol.MaxPacketLen-protocol.DataHeaderLen {
+			// EncodeData copies into a fixed buffer, so a packet this large would be silently
+			// truncated and the client would receive a corrupt one - far worse than losing it.
+			// Only reachable if the TUN MTU is raised beyond what MaxPacketLen allows.
+			s.log.Warn("dropping an oversized packet from the TUN device", "len", n)
+			s.stats.dropped.Add(1)
+			continue
 		}
 		dst, ok := protocol.DstIPv4(readBuf[:n])
 		if !ok {
@@ -402,6 +420,23 @@ func (s *Server) allocSession(from netip.AddrPort, clientID protocol.ClientID) (
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// A handshake is retried whenever its answer is slow, and the answer carries nothing that
+	// says which request it belongs to. So a repeated handshake from a client that already has a
+	// live session must return THAT session rather than mint a new one. Minting a new one retires
+	// the old, and a client that then adopts the first (merely delayed) answer spends every
+	// packet on a session id the relay has already forgotten: lookup fails, the data is dropped,
+	// and nothing anywhere logs an error. Answering identically makes the retry harmless
+	// whichever answer wins the race, and it also stops a replayed handshake - still valid inside
+	// the 120s skew window - from knocking a live client off its session.
+	if previous, ok := s.reservedIPs[clientID]; ok {
+		if live, inUse := s.byIP[previous]; inUse && live.clientID == clientID {
+			f := from
+			live.addr.Store(&f)
+			live.touch()
+			return live, true
+		}
+	}
+
 	var sid protocol.SessionID
 	if _, err := rand.Read(sid[:]); err != nil {
 		return nil, false
@@ -428,20 +463,22 @@ func (s *Server) allocSession(from netip.AddrPort, clientID protocol.ClientID) (
 func (s *Server) claimAddress(clientID protocol.ClientID) (netip.Addr, bool) {
 	if previous, ok := s.reservedIPs[clientID]; ok {
 		if old, inUse := s.byIP[previous]; inUse {
-			// The same client reconnected before its old session timed out - most likely it lost
-			// the network rather than shutting down cleanly. Retire the stale session and take
-			// the address back; its inner IP is what the client's routing table already points at.
+			// A session is still holding the address under a different client id, which should
+			// not happen. Retire it rather than hand the same inner IP to two clients at once.
 			delete(s.bySession, old.id)
 			delete(s.byIP, previous)
+			// Drop the loser's reservation as well. Two client ids reserving one address is the
+			// one shape that lets evictReservations return it to the pool twice, and a duplicate
+			// in the pool means two live clients on the same inner IP, each receiving the other's
+			// return traffic. Keep the mapping one-to-one and that can never arise.
+			if held, ok := s.reservedIPs[old.clientID]; ok && held == previous && old.clientID != clientID {
+				delete(s.reservedIPs, old.clientID)
+			}
 			return previous, true
 		}
-		// The address is free and still reserved for this client. Take it out of the pool.
-		for i, free := range s.freeIPs {
-			if free == previous {
-				s.freeIPs = append(s.freeIPs[:i], s.freeIPs[i+1:]...)
-				return previous, true
-			}
-		}
+		// Reserved and idle. A reserved address is deliberately kept OUT of freeIPs while it is
+		// being held, so there is nothing to remove from the pool here - see releaseSession.
+		return previous, true
 	}
 
 	if len(s.freeIPs) == 0 {
@@ -457,7 +494,9 @@ func (s *Server) claimAddress(clientID protocol.ClientID) (netip.Addr, bool) {
 	return ip, false
 }
 
-// evictReservations releases addresses that are reserved but not in use by any live session.
+// evictReservations releases addresses that are reserved but not in use by any live session,
+// returning them to the pool. This is the only way a held address comes back, so the append here
+// is not optional: dropping the reservation without it would lose the address permanently.
 // Caller must hold s.mu.
 func (s *Server) evictReservations() {
 	for clientID, ip := range s.reservedIPs {
@@ -465,6 +504,7 @@ func (s *Server) evictReservations() {
 			continue
 		}
 		delete(s.reservedIPs, clientID)
+		s.freeIPs = append(s.freeIPs, ip)
 	}
 }
 
@@ -480,10 +520,22 @@ func (s *Server) releaseSession(sess *session, dropReservation bool) {
 	}
 	delete(s.bySession, sess.id)
 	delete(s.byIP, sess.innerIP)
-	s.freeIPs = append(s.freeIPs, sess.innerIP)
+
 	if dropReservation {
 		delete(s.reservedIPs, sess.clientID)
+		s.freeIPs = append(s.freeIPs, sess.innerIP)
+		return
 	}
+
+	// Idle timeout: the address stays OUT of the free pool while it is reserved. Putting it back
+	// was the bug that made reservations useless - freeIPs is a stack, so the address landed on
+	// top and the very next client to connect was handed it, and the client it was being held for
+	// came back to a different inner IP and a full routing-table rebuild. The address returns to
+	// the pool only through evictReservations, when there is nothing else left to give out.
+	if held, ok := s.reservedIPs[sess.clientID]; ok && held == sess.innerIP {
+		return
+	}
+	s.freeIPs = append(s.freeIPs, sess.innerIP)
 }
 
 func (s *Server) lookup(sid protocol.SessionID) *session {
