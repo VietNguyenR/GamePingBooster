@@ -321,16 +321,27 @@ internal sealed class RouteManager
         }
 
         // The exit code alone is NOT enough. A command with a missing or misspelled parameter
-        // makes netsh print its usage block and exit 0 - so a route command that did nothing at
-        // all looks exactly like one that worked. These commands are silent when they succeed, so
-        // any output at all means something went wrong. We still do not read WHAT it says: the
-        // text is localised, only its presence is not.
+        // makes netsh print its usage block and exit 0, so a command that did nothing at all
+        // looks exactly like one that worked - which is how `delete route` ran without an
+        // interface= for weeks, deleting nothing, reporting success.
+        //
+        // Detecting that must not rely on reading the text, which is localised. It relies on the
+        // SHAPE instead, measured on this machine:
+        //
+        //   syntax error (missing interface=) : exit 0, 935 chars over 24 lines (the usage block)
+        //   real failure ("Element not found"): exit 1, 18 chars on 1 line
+        //   success ("Ok.")                   : exit 0, 3 chars on 1 line
+        //
+        // So: exit code catches real failures, and a multi-line wall of text on exit 0 catches
+        // syntax errors. Requiring BOTH conditions keeps a short localised acknowledgement from
+        // being mistaken for a failure - an earlier version of this check treated ANY output as a
+        // failure, and "Ok." from a perfectly good `add route` broke every connect.
         var noise = (stdout + stderr).Trim();
-        if (noise.Length > 0)
+        if (noise.Length >= 200 && noise.AsSpan().Count('\n') >= 1)
         {
             throw new InvalidOperationException(
-                $"netsh exited 0 but printed output, which means it did not run the command. " +
-                $"Commands: {string.Join(" | ", commands)}. Output: {noise}");
+                "netsh exited 0 but printed its usage text, which means it rejected the command " +
+                $"and did nothing. Commands: {string.Join(" | ", commands)}. Output: {noise}");
         }
     }
 }

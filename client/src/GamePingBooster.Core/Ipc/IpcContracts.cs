@@ -77,6 +77,16 @@ public sealed class StatusMessage
     [JsonPropertyName("packetsSent")] public long PacketsSent { get; set; }
     [JsonPropertyName("packetsReceived")] public long PacketsReceived { get; set; }
 
+    /// <summary>
+    /// Packets lost inside the client itself, not on the network.
+    ///
+    /// Additive on purpose, with no contract version bump: an older UI ignores the field and a
+    /// newer UI reads 0 from an older service, so neither fails. The per-cause breakdown stays in
+    /// the service log where it belongs - this is only the number that tells a player whether it
+    /// is worth looking there at all.
+    /// </summary>
+    [JsonPropertyName("packetsDropped")] public long PacketsDropped { get; set; }
+
     /// <summary>Error detail when State is Faulted.</summary>
     [JsonPropertyName("error")] public string? Error { get; set; }
 }

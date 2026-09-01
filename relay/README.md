@@ -89,3 +89,56 @@ logging each one would cost latency on the path whose latency is the entire poin
 | `-idle-timeout` | `90s` | Drop a session after this long without packets and return its IP to the pool |
 | `-configure-if` | `true` | Run `ip addr/link` to configure the TUN device |
 | `-log-level` | `info` | `debug` also logs why a handshake was rejected |
+
+## Load testing with gpb-soak
+
+`cmd/gpb-soak` drives a relay with many simulated clients for as long as you like. Every serious
+bug found in this project so far was invisible to manual testing - they needed load, duration or
+concurrency, and usually all three - so this tool exists to supply what a person with one PC
+cannot.
+
+It sends ICMP echo requests to the relay's **own** inner address (`10.77.0.1`). The Linux kernel
+answers them, so each packet makes the full round trip - client, UDP, relay, TUN, kernel, TUN,
+relay, UDP, client - without a single byte leaving the VPS. No game servers are involved and no
+external bandwidth is used.
+
+```
+go build -o gpb-soak ./cmd/gpb-soak
+./gpb-soak -relay 203.0.113.10:51820 -psk-file ./psk -clients 10 -pps 200 -duration 30m
+```
+
+It exits non-zero and names the problem when it finds one. What it detects:
+
+| Flag | Why it matters |
+|---|---|
+| `-churn` | Reconnects one client at a time while the rest keep running |
+| `-churn-gap` | Stays silent that long first. **Set it above the relay's `-idle-timeout`**, or the old session is still alive and the repeat handshake is answered from the live-session path, leaving the address reservation untested |
+| `-joins` | A brand new client arrives periodically. **Without this the address-pool bugs are unreachable**: a returning client only loses its reserved address if somebody else takes it meanwhile, and only a client with no reservation of its own draws from the free pool |
+| `-payload` | Raise it towards the MTU to probe fragmentation behaviour |
+
+The three flags matter together. An earlier version of this tool passed cleanly against a relay
+whose address reservation had been deliberately broken, because gaps never overlapped and no new
+clients ever arrived. With `-churn 8s -churn-gap 40s -joins 6s` the same broken relay is caught
+within two minutes:
+
+```
+a new client was handed 10.77.0.253, which client 1 is holding (it is temporarily away...)
+ADDRESS HANDED OUT TWICE: 4 time(s) ...
+```
+
+A test that cannot fail is worse than no test, so verify the harness against a deliberately
+broken build before trusting a green run from it.
+
+### Running a relay locally for testing
+
+A Linux relay can be run under WSL2 on the development machine, which is enough for everything
+except NAT to the real internet:
+
+```
+CGO_ENABLED=0 GOOS=linux go build -o /tmp/relayd ./cmd/relayd
+wsl -u root -e /tmp/relayd -psk-file /tmp/psk -listen :51820 -idle-timeout 5s
+```
+
+No `setup-nat.sh` is needed for this: soak traffic is addressed to the relay's own TUN address, so
+the kernel delivers it locally and never has to forward or masquerade anything. Point `gpb-soak`
+at the WSL VM's `eth0` address.

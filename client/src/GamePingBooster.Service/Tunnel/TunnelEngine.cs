@@ -571,6 +571,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
         ActiveRoutes = _routes?.ActiveRouteCount ?? 0,
         PacketsSent = _tunnel?.PacketsSent ?? 0,
         PacketsReceived = _tunnel?.PacketsReceived ?? 0,
+        PacketsDropped = _tunnel?.PacketsDropped ?? 0,
     };
 
     /// <summary>Relay list for the UI to offer to the user.</summary>

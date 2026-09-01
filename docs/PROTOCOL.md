@@ -133,3 +133,39 @@ With a path MTU of 1500 the safe virtual-adapter MTU is **1400** - deliberately 
 1500 - 37 = 1463 the arithmetic allows, to leave room for PPPoE (1492) and ISPs that shave off a
 little more. TCP inside the tunnel is handled by MSS clamping on the relay
 (`iptables --clamp-mss-to-pmtu`); see `relay/deploy/setup-nat.sh`.
+
+## Keeping the two implementations in step
+
+This format has two implementations that must agree byte for byte:
+
+- `relay/internal/protocol/protocol.go`
+- `client/src/GamePingBooster.Core/Protocol/GpbProtocol.cs`
+
+Nothing in either build fails when they drift apart. The symptom is not a compile error: it is a
+tunnel that handshakes and then carries nothing, or one that misreads a field and hands a
+player's traffic to the wrong session - discovered on a player's PC rather than on the machine
+where the change was made.
+
+Both sides therefore check themselves against the same committed file of golden packets,
+`testdata/protocol-vectors.json`.
+
+Run both after touching either implementation:
+
+```
+cd relay && go test ./internal/protocol/
+dotnet run --project client/src/GamePingBooster.ProtocolCheck
+```
+
+The C# side is a plain console program returning 0 or 1, with no test framework behind it: this
+repository carries no NuGet test dependency and a protocol check is a list of assertions.
+
+Regenerate the vectors **only** when a format change is deliberate and the Go side is finished.
+A regenerated file makes any drift look correct, which is exactly the failure this guards
+against:
+
+```
+cd relay && GPB_UPDATE_VECTORS=1 go test ./internal/protocol/ -run TestProtocolVectors
+```
+
+So a protocol change now touches **five** places: the two implementations, this document, the
+vector file, and whatever new assertions the change deserves on both sides.

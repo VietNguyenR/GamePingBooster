@@ -1,0 +1,42 @@
+{
+  "note": "Golden packets shared by the Go relay and the C# client. See relay/internal/protocol/vectors_test.go.",
+  "psk": "a-test-psk-of-at-least-16-bytes",
+  "version": 2,
+  "handshakeReq": {
+    "clientIdHex": "0102030405060708",
+    "unixTimeSeconds": 1767225600,
+    "nonceHex": "3cbe73aabd5c3ddb",
+    "packetHex": "213cbe73aabd5c3ddb000000006955b9000102030405060708fffd6f5a81fed10387e7eab6aebf4c91799ec54f48d5df5833813cafd383466c"
+  },
+  "handshakeResp": {
+    "status": 0,
+    "sessionIdHex": "1122334455667788",
+    "clientIp": "10.77.0.5",
+    "relayIp": "10.77.0.1",
+    "mtu": 1400,
+    "packetHex": "220011223344556677880a4d00050a4d000105780fb118076198a19b4c3373152f21292f0ff3653ea1eafc91c5c2cdb1992f2fa5"
+  },
+  "versionMismatchResp": {
+    "clientVersion": 3,
+    "packetHex": "3203000000000000000000000000000000000000c352c2d5a5f2ab90b1aa6cff488417a303815b7ff00d9ddfbd20967990ca2e31"
+  },
+  "data": {
+    "sessionIdHex": "1122334455667788",
+    "innerHex": "4500002000000000401100000a4d0005010101011f901f9000080000",
+    "packetHex": "2311223344556677884500002000000000401100000a4d0005010101011f901f9000080000"
+  },
+  "ping": {
+    "sessionIdHex": "1122334455667788",
+    "stamp": 81985529216486895,
+    "packetHex": "2411223344556677880123456789abcdef"
+  },
+  "pong": {
+    "sessionIdHex": "1122334455667788",
+    "stamp": 81985529216486895,
+    "packetHex": "2511223344556677880123456789abcdef"
+  },
+  "disconnect": {
+    "sessionIdHex": "1122334455667788",
+    "packetHex": "261122334455667788"
+  }
+}

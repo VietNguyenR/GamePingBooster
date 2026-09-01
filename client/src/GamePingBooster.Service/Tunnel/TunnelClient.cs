@@ -38,6 +38,18 @@ internal sealed class TunnelClient : IDisposable
     private double _lastRttMs = -1;
     private long _lastPongTicks;
 
+    // Every place a packet can be lost on this machine rather than out on the internet. Without
+    // these, a player reporting "it still feels laggy" leaves nothing to look at, and the honest
+    // answer to "is the booster itself dropping packets?" is a shrug.
+    private long _dropUplinkOversize;   // Wintun handed us a packet bigger than our buffer
+    private long _dropUplinkPathMtu;    // the socket refused it: too big for the path, DF set
+    private long _dropUplinkSendFailed; // ICMP port-unreachable or a transient socket error
+    private long _dropDownlinkForeign;  // not ours: wrong version, wrong session, unparseable
+    private long _dropDownlinkRingFull; // Windows drains the adapter slower than we fill it
+
+    private long _lastReportedDrops;
+    private int _keepaliveTicks;
+
     /// <summary>Round-trip time of the handshake itself, measured before any traffic flows.</summary>
     public double HandshakeRttMs { get; private set; } = -1;
 
@@ -68,6 +80,14 @@ internal sealed class TunnelClient : IDisposable
 
     public long PacketsSent => Interlocked.Read(ref _packetsSent);
     public long PacketsReceived => Interlocked.Read(ref _packetsReceived);
+
+    /// <summary>Packets lost inside this client, by any cause. Nothing to do with the network.</summary>
+    public long PacketsDropped =>
+        Interlocked.Read(ref _dropUplinkOversize) +
+        Interlocked.Read(ref _dropUplinkPathMtu) +
+        Interlocked.Read(ref _dropUplinkSendFailed) +
+        Interlocked.Read(ref _dropDownlinkForeign) +
+        Interlocked.Read(ref _dropDownlinkRingFull);
     public double? LastRttMs => _lastRttMs < 0 ? null : _lastRttMs;
 
     /// <summary>Fraction of pings that went unanswered - a rough packet loss estimate.</summary>
@@ -207,15 +227,29 @@ internal sealed class TunnelClient : IDisposable
                     _adapter.WaitForPacket(250);
                     continue;
                 }
-                if (len == 0) continue;
+                if (len == 0)
+                {
+                    // ReceivePacket returns 0 when the packet did not fit the buffer, which can
+                    // only happen if the adapter MTU has been raised past MaxPacketLen.
+                    Interlocked.Increment(ref _dropUplinkOversize);
+                    continue;
+                }
 
                 var wireLen = GpbProtocol.WriteData(wire, _sessionId, packet.AsSpan(0, len));
                 _socket!.Send(wire.AsSpan(0, wireLen), SocketFlags.None);
                 Interlocked.Increment(ref _packetsSent);
             }
-            catch (SocketException ex) when (ex.SocketErrorCode is SocketError.ConnectionReset or SocketError.MessageSize)
+            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.MessageSize)
             {
-                // ICMP port-unreachable from the relay, or a packet over the MTU: drop it, keep the tunnel alive.
+                // Too big for the path with DF set. Counted on its own because it is the signature
+                // of an MTU that is wrong for this player's connection: a steady trickle here,
+                // affecting only large packets, is the classic path-MTU black hole.
+                Interlocked.Increment(ref _dropUplinkPathMtu);
+            }
+            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionReset)
+            {
+                // ICMP port-unreachable from the relay: drop it, keep the tunnel alive.
+                Interlocked.Increment(ref _dropUplinkSendFailed);
             }
             catch (SocketException ex) when (ex.SocketErrorCode is SocketError.Interrupted or SocketError.OperationAborted)
             {
@@ -247,15 +281,29 @@ internal sealed class TunnelClient : IDisposable
                 if (n < 1) continue;
 
                 var (version, type) = GpbProtocol.ParseHeader(buffer[0]);
-                if (version != GpbProtocol.Version) continue;
+                if (version != GpbProtocol.Version)
+                {
+                    Interlocked.Increment(ref _dropDownlinkForeign);
+                    continue;
+                }
 
                 switch (type)
                 {
                     case GpbProtocol.TypeData:
                         if (GpbProtocol.TryReadData(buffer.AsSpan(0, n), out var sid, out var ip) && sid == _sessionId)
                         {
-                            _adapter!.SendPacket(ip);
-                            Interlocked.Increment(ref _packetsReceived);
+                            if (_adapter!.SendPacket(ip))
+                            {
+                                Interlocked.Increment(ref _packetsReceived);
+                            }
+                            else
+                            {
+                                Interlocked.Increment(ref _dropDownlinkRingFull);
+                            }
+                        }
+                        else
+                        {
+                            Interlocked.Increment(ref _dropDownlinkForeign);
                         }
                         break;
 
@@ -309,6 +357,10 @@ internal sealed class TunnelClient : IDisposable
                 var ping = GpbProtocol.BuildPing(_sessionId, (ulong)_clock.ElapsedTicks);
                 await _socket!.SendAsync(ping, SocketFlags.None, ct).ConfigureAwait(false);
                 Interlocked.Increment(ref _pingsSent);
+
+                // Every tenth tick, so once every 30 seconds - the same cadence as the relay's own
+                // stats line, which makes the two logs easy to read side by side.
+                if (++_keepaliveTicks % 10 == 0) ReportDrops();
             }
             catch (Exception) when (!ct.IsCancellationRequested)
             {
@@ -317,8 +369,29 @@ internal sealed class TunnelClient : IDisposable
         }
     }
 
+    /// <summary>
+    /// Logs the drop breakdown, but only when it has changed. A healthy tunnel stays silent, so
+    /// the mere appearance of this line in a log is itself the signal.
+    /// </summary>
+    private void ReportDrops()
+    {
+        var total = PacketsDropped;
+        if (total == Interlocked.Read(ref _lastReportedDrops)) return;
+        Interlocked.Exchange(ref _lastReportedDrops, total);
+
+        _log($"Packets dropped inside the client: {total} total - " +
+             $"uplink oversize {Interlocked.Read(ref _dropUplinkOversize)}, " +
+             $"over path MTU {Interlocked.Read(ref _dropUplinkPathMtu)}, " +
+             $"send failed {Interlocked.Read(ref _dropUplinkSendFailed)}, " +
+             $"downlink not ours {Interlocked.Read(ref _dropDownlinkForeign)}, " +
+             $"adapter ring full {Interlocked.Read(ref _dropDownlinkRingFull)}");
+    }
+
     public void Dispose()
     {
+        // One last account before the counters go with the object.
+        ReportDrops();
+
         try
         {
             if (AnnounceDisconnect && _socket is { Connected: true } && _sessionId != 0)
@@ -330,8 +403,22 @@ internal sealed class TunnelClient : IDisposable
 
         _cts?.Cancel();
         _socket?.Dispose();
-        _uplinkThread?.Join(TimeSpan.FromSeconds(2));
-        _downlinkThread?.Join(TimeSpan.FromSeconds(2));
+
+        // Both pumps must be gone before the caller disposes the Wintun adapter: they call into
+        // the adapter's session on every packet, and WintunEndSession while one is still running
+        // is a use-after-free that takes the whole LocalSystem service down. Neither loop can
+        // block for long - the uplink waits at most 250 ms on the ring, and disposing the socket
+        // above unblocks the downlink - so a timeout here means something is genuinely stuck, and
+        // it must not pass silently.
+        var uplinkStopped = _uplinkThread?.Join(TimeSpan.FromSeconds(2)) ?? true;
+        var downlinkStopped = _downlinkThread?.Join(TimeSpan.FromSeconds(2)) ?? true;
+        if (!uplinkStopped || !downlinkStopped)
+        {
+            _log($"WARNING: a pump thread did not stop within 2s (uplink stopped: {uplinkStopped}, " +
+                 $"downlink stopped: {downlinkStopped}). The adapter is about to be released while " +
+                 "it may still be in use - if the service dies right after this line, that is why.");
+        }
+
         _cts?.Dispose();
     }
 }

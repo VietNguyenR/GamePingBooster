@@ -36,9 +36,20 @@ public static class Program
             cts.Cancel();
         };
 
+        // Console mode writes to both: the terminal for the developer watching it now, and the
+        // file so a session can still be read back afterwards.
+        using var fileLog = new FileLog();
+        void Log(string message)
+        {
+            Console.WriteLine(message);
+            fileLog.Write(message);
+        }
+
+        if (fileLog.Path is not null) Console.WriteLine($"Logging to {fileLog.Path}");
+
         try
         {
-            await RunAsync(Console.WriteLine, cts.Token).ConfigureAwait(false);
+            await RunAsync(Log, cts.Token).ConfigureAwait(false);
             return 0;
         }
         catch (OperationCanceledException)
@@ -47,6 +58,7 @@ public static class Program
         }
         catch (Exception ex)
         {
+            Log($"Fatal error: {ex}");
             Console.Error.WriteLine($"Fatal error: {ex}");
             return 1;
         }
@@ -69,6 +81,7 @@ public static class Program
 internal sealed class BoosterService : ServiceBase
 {
     private readonly CancellationTokenSource _cts = new();
+    private readonly FileLog _log = new();
     private Task? _worker;
 
     public BoosterService()
@@ -84,7 +97,7 @@ internal sealed class BoosterService : ServiceBase
         {
             try
             {
-                await Program.RunAsync(WriteEventLog, _cts.Token).ConfigureAwait(false);
+                await Program.RunAsync(_log.Sink, _cts.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -92,7 +105,10 @@ internal sealed class BoosterService : ServiceBase
             }
             catch (Exception ex)
             {
-                WriteEventLog($"Service stopped with an error: {ex}");
+                // The full exception, not just the message: this is the only account of a crash
+                // that anyone will ever get, and it has to survive the process exiting below.
+                _log.Write($"Service stopped with an error: {ex}");
+                _log.Dispose();
                 // Let the SCM restart us according to the recovery settings.
                 Environment.Exit(1);
             }
@@ -110,21 +126,14 @@ internal sealed class BoosterService : ServiceBase
         try { _worker?.Wait(TimeSpan.FromSeconds(10)); } catch (AggregateException) { }
     }
 
-    private void WriteEventLog(string message)
-    {
-        try
-        {
-            EventLog.WriteEntry(message);
-        }
-        catch (Exception)
-        {
-            // Event log full or blocked - nothing to do, and this must never throw.
-        }
-    }
-
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _cts.Dispose();
+        if (disposing)
+        {
+            // The log goes last so it can record the shutdown it is about to stop recording.
+            _cts.Dispose();
+            _log.Dispose();
+        }
         base.Dispose(disposing);
     }
 }

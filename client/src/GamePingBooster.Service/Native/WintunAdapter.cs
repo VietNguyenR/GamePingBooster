@@ -112,16 +112,22 @@ internal sealed class WintunAdapter : IDisposable
     public bool WaitForPacket(int timeoutMs)
         => WinApi.WaitForSingleObject(_readEvent, (uint)timeoutMs) == WinApi.WaitObject0;
 
-    /// <summary>Injects an IP packet (received from the relay) into the Windows network stack.</summary>
-    public void SendPacket(ReadOnlySpan<byte> packet)
+    /// <summary>
+    /// Injects an IP packet (received from the relay) into the Windows network stack.
+    /// Returns false when the ring was full and the packet had to be dropped.
+    ///
+    /// The caller must count those drops. Dropping is the right behaviour - blocking this thread
+    /// would stall every packet behind it, and UDP tolerates loss - but a drop nobody counts is
+    /// indistinguishable from a problem out on the internet, and telling those two apart is
+    /// precisely what this project exists to do.
+    /// </summary>
+    public bool SendPacket(ReadOnlySpan<byte> packet)
     {
         var ptr = WintunInterop.WintunAllocateSendPacket(_session, (uint)packet.Length);
         if (ptr == nint.Zero)
         {
             var err = Marshal.GetLastPInvokeError();
-            // A full ring means Windows is consuming slower than the relay is sending.
-            // For a game, dropping is better than blocking the thread - UDP tolerates loss.
-            if (err == WintunInterop.ErrorBufferOverflow) return;
+            if (err == WintunInterop.ErrorBufferOverflow) return false;
             throw new Win32Exception(err, "WintunAllocateSendPacket failed.");
         }
 
@@ -130,6 +136,7 @@ internal sealed class WintunAdapter : IDisposable
             packet.CopyTo(new Span<byte>((void*)ptr, packet.Length));
         }
         WintunInterop.WintunSendPacket(_session, ptr);
+        return true;
     }
 
     public void Dispose()
