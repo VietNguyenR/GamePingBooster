@@ -11,10 +11,11 @@
     attribution works the same way tools like cFosSpeed do it, without any driver and without
     touching the game:
 
-      - the captured packet gives the local source port and the remote address
+      - the captured packet gives the local source port, the remote address and the time
       - the Windows UDP socket table (Get-NetUDPEndpoint, i.e. GetExtendedUdpTable) gives
         local port -> owning process
-      - joining the two on local port yields "this address was contacted by TslGame.exe"
+      - joining the two on local port AND time yields "this address was contacted by TslGame.exe
+        while it actually held that port"
 
     The socket table is polled while capturing, because it only ever describes the present: UDP
     is connectionless, so there is no historical record to consult afterwards.
@@ -59,6 +60,12 @@ param(
 $ErrorActionPreference = 'Stop'
 if (-not $OutputPath) { $OutputPath = Join-Path $PSScriptRoot 'observed.txt' }
 
+# Everything the running capture owns, so the finally block at the bottom can clean up after a
+# Ctrl+C. Without this the script dies and dumpcap keeps running, writing to a file nobody will
+# ever read - for hours, on a disk nobody is watching.
+$script:LiveCapture = $null
+$script:LiveCaptureFile = $null
+
 # --------------------------------------------------------------- locate tools
 
 $wiresharkDir = @("${env:ProgramFiles}\Wireshark", "${env:ProgramFiles(x86)}\Wireshark") |
@@ -70,8 +77,26 @@ if (-not $wiresharkDir) {
 $tshark = Join-Path $wiresharkDir 'tshark.exe'
 $dumpcap = Join-Path $wiresharkDir 'dumpcap.exe'
 
+# Fail now rather than after a whole match. Npcap can be installed either restricted to
+# administrators or open to everyone, so the only honest test is to ask dumpcap to list the
+# interfaces and see whether it can.
+function Assert-CanCapture {
+    $probe = & $dumpcap -D 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not $probe) {
+        $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)
+        $hint = if ($elevated) {
+            "Npcap looks broken or missing - reinstall Wireshark and include Npcap."
+        } else {
+            "Run this window as Administrator (Npcap was installed restricted to administrators)."
+        }
+        throw "dumpcap cannot list interfaces. $hint"
+    }
+    return $probe
+}
+
 function Resolve-CaptureInterface {
-    param([string]$Requested)
+    param([string]$Requested, [string[]]$Devices)
     if ($Requested) { return $Requested }
 
     $activeNic = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
@@ -81,11 +106,10 @@ function Resolve-CaptureInterface {
     $adapter = Get-NetAdapter -InterfaceIndex $activeNic.ifIndex
     # Match on the interface GUID, not the name. dumpcap -D prints the connection name
     # ("Wi-Fi 2"), never the hardware description, and both are renameable and localised.
-    $devices = & $dumpcap -D
-    $match = $devices | Where-Object { $_ -like "*$($adapter.InterfaceGuid)*" } | Select-Object -First 1
+    $match = $Devices | Where-Object { $_ -like "*$($adapter.InterfaceGuid)*" } | Select-Object -First 1
     if (-not $match) {
         Write-Host "Could not match the adapter automatically. Available interfaces:"
-        $devices | ForEach-Object { Write-Host "    $_" }
+        $Devices | ForEach-Object { Write-Host "    $_" }
         throw "Pass one explicitly, e.g. -Interface 5"
     }
     Write-Host "==> Adapter: $($adapter.Name) - $($adapter.InterfaceDescription) (dumpcap $(($match -split '\.')[0].Trim()))"
@@ -105,16 +129,40 @@ $bpfFilter = 'udp and not port 53 ' +
              'and not dst net 192.168.0.0/16 and not dst net 169.254.0.0/16 ' +
              'and not dst net 224.0.0.0/4 and not dst host 255.255.255.255'
 
+# Only the headers are ever read back (ip.dst, the two ports, the timestamp), and those live in
+# the first 42 bytes. Capturing 96 keeps room for a VLAN tag and throws the payload away in the
+# driver: a three-hour session drops from roughly a gigabyte to under a hundred megabytes, and
+# tshark reads it back in a fraction of the time. It also means no game content ever touches the
+# disk, which is worth something on its own.
+$snapLen = 96
+
+# Two autostop limits, and the second one is not about this script working - it is about this
+# script NOT working. dumpcap is a separate process: pressing Ctrl+C runs the cleanup at the
+# bottom of this file, but if the host is killed outright or crashes, nothing runs and dumpcap
+# keeps capturing to a file nobody will read. Killing it cleanly is impossible from a dead
+# parent without a Windows job object, which is a lot of P/Invoke for a capture script. Capping
+# the file at 256 MB bounds the damage instead: at 96 bytes a packet that is millions of packets,
+# far beyond any real session, so it never fires in normal use and an orphan cannot fill a disk.
+# The duration limit does the same for time.
+
+function Get-EpochSeconds {
+    return [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000.0
+}
+
 # ------------------------------------------------------- process attribution
 
-# Sample the UDP socket table into portOwners: local port -> set of process names.
-# Called repeatedly during a capture. A port can be reused by another process later, hence a
-# set rather than a single name - a port claimed by two processes over one session is ambiguous
-# and we would rather see that than silently pick one.
+# Sample the UDP socket table into portOwners: local port -> owner -> {First, Last} epoch seconds.
+#
+# The time window is what makes attribution honest. Windows hands out ephemeral ports from a pool
+# of about sixteen thousand and reuses them freely, so over a three-hour session a port the game
+# used early can belong to a browser later. Recording only "this port was the game's" would then
+# credit the game with somebody else's traffic. Recording WHEN it was the game's lets the analysis
+# reject a packet that arrived after the game let the port go.
 function Update-PortOwners {
     param([hashtable]$PortOwners, [hashtable]$PidNames, [string]$OnlyProcess)
     try {
         $endpoints = Get-NetUDPEndpoint -ErrorAction Stop
+        $now = Get-EpochSeconds
 
         if ($OnlyProcess) {
             # We already know which process matters, so skip name resolution entirely: look up
@@ -129,9 +177,7 @@ function Update-PortOwners {
 
             foreach ($endpoint in $endpoints) {
                 if (-not $targetPids.ContainsKey([int]$endpoint.OwningProcess)) { continue }
-                $port = [int]$endpoint.LocalPort
-                if (-not $PortOwners.ContainsKey($port)) { $PortOwners[$port] = @{} }
-                $PortOwners[$port][$OnlyProcess] = $true
+                Add-PortSighting -PortOwners $PortOwners -Port ([int]$endpoint.LocalPort) -Owner $OnlyProcess -Now $now
             }
             return
         }
@@ -143,12 +189,21 @@ function Update-PortOwners {
                 try { $PidNames[$owningPid] = (Get-Process -Id $owningPid -ErrorAction Stop).ProcessName }
                 catch { $PidNames[$owningPid] = "pid-$owningPid" }
             }
-            $port = [int]$endpoint.LocalPort
-            if (-not $PortOwners.ContainsKey($port)) { $PortOwners[$port] = @{} }
-            $PortOwners[$port][$PidNames[$owningPid]] = $true
+            Add-PortSighting -PortOwners $PortOwners -Port ([int]$endpoint.LocalPort) -Owner $PidNames[$owningPid] -Now $now
         }
     } catch {
         # The table is a snapshot of a moving target; a failed sample is not worth reporting.
+    }
+}
+
+function Add-PortSighting {
+    param([hashtable]$PortOwners, [int]$Port, [string]$Owner, [double]$Now)
+    if (-not $PortOwners.ContainsKey($Port)) { $PortOwners[$Port] = @{} }
+    $owners = $PortOwners[$Port]
+    if ($owners.ContainsKey($Owner)) {
+        $owners[$Owner].Last = $Now
+    } else {
+        $owners[$Owner] = [pscustomobject]@{ First = $Now; Last = $Now }
     }
 }
 
@@ -169,8 +224,17 @@ function Invoke-CaptureSession {
     $proc = Start-Process -FilePath $dumpcap -PassThru -NoNewWindow -ArgumentList @(
         '-i', $InterfaceId,
         '-f', "`"$bpfFilter`"",
+        '-s', $snapLen,
         '-a', "duration:$($DurationMinutes * 60)",
+        '-a', 'filesize:262144',
         '-w', "`"$captureFile`"")
+
+    $script:LiveCapture = $proc
+    $script:LiveCaptureFile = $captureFile
+
+    # The first sighting has to land before the first packet does, or the earliest seconds of the
+    # session fall outside every ownership window and are thrown away.
+    Update-PortOwners -PortOwners $portOwners -PidNames $pidNames -OnlyProcess $OnlyProcess
 
     $started = Get-Date
     while (-not $proc.HasExited) {
@@ -183,10 +247,12 @@ function Invoke-CaptureSession {
         Stop-Process -Id $proc.Id -Force
         Start-Sleep -Milliseconds 500
     }
+    $script:LiveCapture = $null
 
     $elapsed = [int]((Get-Date) - $started).TotalSeconds
     if (-not (Test-Path $captureFile)) {
         Write-Warning "No capture file produced. Try running as Administrator."
+        $script:LiveCaptureFile = $null
         return $null
     }
 
@@ -195,36 +261,52 @@ function Invoke-CaptureSession {
 
     # Per-packet fields rather than -z conv,udp: the conversation table is fixed-width with unit
     # suffixes that change with magnitude ("0 bytes" / "1 kB"), which makes a parser fragile.
-    # A long session is a few hundred thousand rows and takes seconds to fold up here.
-    $rows = & $tshark -r $captureFile -T fields -e ip.dst -e udp.srcport -e udp.dstport
-    if (-not $KeepCapture) { Remove-Item $captureFile -Force -ErrorAction SilentlyContinue }
-    else { Write-Host "    Raw capture kept at $captureFile" }
-
-    if (-not $rows) {
-        Write-Warning "The capture is empty. Wrong interface, or the game sent nothing."
-        return $null
-    }
-
+    #
+    # The output is piped rather than collected into a variable. A long session is hundreds of
+    # thousands of rows, and holding them all as PowerShell strings before folding them up costs
+    # far more memory than the numbers they turn into.
     $stats = @{}
-    foreach ($row in $rows) {
-        $parts = $row -split "`t"
-        if ($parts.Count -lt 3) { continue }
-        $ip = $parts[0].Trim()
-        if ($ip -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { continue }
-        $srcPort = $parts[1].Trim()
-        $dstPort = $parts[2].Trim()
+    $slack = 3.0   # one poll interval plus a little, so a packet at the edge is not lost
 
-        if (-not $stats.ContainsKey($ip)) {
-            $stats[$ip] = [pscustomobject]@{
-                Address = $ip; Packets = 0; Ports = @{}; Owners = @{}
+    & $tshark -r $captureFile -T fields -e frame.time_epoch -e ip.dst -e udp.srcport -e udp.dstport |
+        ForEach-Object {
+            $parts = $_ -split "`t"
+            if ($parts.Count -lt 4) { return }
+
+            $ip = $parts[1].Trim()
+            if ($ip -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { return }
+
+            $when = 0.0
+            [void][double]::TryParse($parts[0].Trim(), [ref]$when)
+            $srcPort = $parts[2].Trim()
+            $dstPort = $parts[3].Trim()
+
+            if (-not $stats.ContainsKey($ip)) {
+                $stats[$ip] = [pscustomobject]@{
+                    Address = $ip; Packets = 0; Ports = @{}; Owners = @{}
+                }
+            }
+            $entry = $stats[$ip]
+            $entry.Packets++
+            if ($dstPort) { $entry.Ports[$dstPort] = $true }
+
+            if ($srcPort -and $portOwners.ContainsKey([int]$srcPort)) {
+                foreach ($owner in $portOwners[[int]$srcPort].Keys) {
+                    $window = $portOwners[[int]$srcPort][$owner]
+                    if ($when -ge ($window.First - $slack) -and $when -le ($window.Last + $slack)) {
+                        $entry.Owners[$owner] = $true
+                    }
+                }
             }
         }
-        $entry = $stats[$ip]
-        $entry.Packets++
-        if ($dstPort) { $entry.Ports[$dstPort] = $true }
-        if ($srcPort -and $portOwners.ContainsKey([int]$srcPort)) {
-            foreach ($owner in $portOwners[[int]$srcPort].Keys) { $entry.Owners[$owner] = $true }
-        }
+
+    if (-not $KeepCapture) { Remove-Item $captureFile -Force -ErrorAction SilentlyContinue }
+    else { Write-Host "    Raw capture kept at $captureFile" }
+    $script:LiveCaptureFile = $null
+
+    if ($stats.Count -eq 0) {
+        Write-Warning "The capture is empty. Wrong interface, or the game sent nothing."
+        return $null
     }
 
     return $stats
@@ -239,9 +321,10 @@ function Write-SessionResult {
 
     $rows = $Stats.Values
     if ($OnlyProcess) {
-        # Keep only destinations whose local port belonged to the watched process. Unattributed
-        # ones are dropped too: with the socket table sampled every two seconds, anything the
-        # game held open for a whole match is attributed, so what is left is someone else's.
+        # Keep only destinations whose local port belonged to the watched process at the time the
+        # packet was sent. Unattributed ones are dropped too: with the socket table sampled every
+        # two seconds, anything the game held open for a whole match is attributed, so what is
+        # left is someone else's.
         $rows = @($rows | Where-Object { $_.Owners.Keys -contains $OnlyProcess })
     }
     $rows = @($rows | Sort-Object Packets -Descending)
@@ -288,48 +371,64 @@ function Write-SessionResult {
 
 # ---------------------------------------------------------------------- main
 
-$Interface = Resolve-CaptureInterface -Requested $Interface
+try {
+    $devices = Assert-CanCapture
+    $Interface = Resolve-CaptureInterface -Requested $Interface -Devices $devices
 
-if ($Interactive) {
-    Write-Host ""
-    Write-Host "==> Interactive capture. Start your match now, press Enter when it ends." -ForegroundColor Cyan
-    $stop = {
-        if ($Host.UI.RawUI.KeyAvailable) {
-            $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
-            return ($key.VirtualKeyCode -eq 13)
+    if ($Interactive) {
+        Write-Host ""
+        Write-Host "==> Interactive capture. Start your match now, press Enter when it ends." -ForegroundColor Cyan
+        $stop = {
+            if ($Host.UI.RawUI.KeyAvailable) {
+                $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+                return ($key.VirtualKeyCode -eq 13)
+            }
+            return $false
         }
-        return $false
+        $stats = Invoke-CaptureSession -InterfaceId $Interface -ShouldStop $stop -Label 'Capture' -OnlyProcess ''
+        $null = Write-SessionResult -Stats $stats -OnlyProcess ''
+        Write-Host ""
+        Write-Host "    Next: .\Build-PubgProfile.ps1"
+        return
     }
-    $stats = Invoke-CaptureSession -InterfaceId $Interface -ShouldStop $stop -Label 'Capture' -OnlyProcess ''
-    $null = Write-SessionResult -Stats $stats -OnlyProcess ''
+
     Write-Host ""
-    Write-Host "    Next: .\Build-PubgProfile.ps1"
-    return
+    Write-Host "==> Resident mode, watching for $WatchProcess.exe" -ForegroundColor Cyan
+    Write-Host "    Play as many matches as you like. Ctrl+C to stop."
+    Write-Host "    Capture starts when the game opens and is analysed when it closes."
+    Write-Host ""
+
+    $sessionCount = 0
+    while ($true) {
+        while (-not (Get-Process -Name $WatchProcess -ErrorAction SilentlyContinue)) {
+            Start-Sleep -Seconds 2
+        }
+
+        $sessionCount++
+        Write-Host "==> $WatchProcess.exe started - capturing (session $sessionCount)" -ForegroundColor Cyan
+
+        $stop = { return -not (Get-Process -Name $WatchProcess -ErrorAction SilentlyContinue) }
+        $stats = Invoke-CaptureSession -InterfaceId $Interface -ShouldStop $stop -Label "Session $sessionCount" -OnlyProcess $WatchProcess
+        $null = Write-SessionResult -Stats $stats -OnlyProcess $WatchProcess
+
+        Write-Host ""
+        Write-Host "==> Waiting for $WatchProcess.exe again. Ctrl+C to stop, then run .\Build-PubgProfile.ps1"
+        Write-Host ""
+
+        # The process table can still list a closing process for a moment; do not re-trigger on it.
+        Start-Sleep -Seconds 5
+    }
 }
-
-Write-Host ""
-Write-Host "==> Resident mode, watching for $WatchProcess.exe" -ForegroundColor Cyan
-Write-Host "    Play as many matches as you like. Ctrl+C to stop."
-Write-Host "    Capture starts when the game opens and is analysed when it closes."
-Write-Host ""
-
-$sessionCount = 0
-while ($true) {
-    while (-not (Get-Process -Name $WatchProcess -ErrorAction SilentlyContinue)) {
-        Start-Sleep -Seconds 2
+finally {
+    # Ctrl+C lands here. dumpcap is a separate process and does NOT die with this script, so
+    # without this it keeps capturing to a temp file forever - which is how a laptop quietly
+    # runs out of disk overnight.
+    if ($script:LiveCapture -and -not $script:LiveCapture.HasExited) {
+        Write-Host ""
+        Write-Host "==> Stopping the capture..." -ForegroundColor Yellow
+        Stop-Process -Id $script:LiveCapture.Id -Force -ErrorAction SilentlyContinue
     }
-
-    $sessionCount++
-    Write-Host "==> $WatchProcess.exe started - capturing (session $sessionCount)" -ForegroundColor Cyan
-
-    $stop = { return -not (Get-Process -Name $WatchProcess -ErrorAction SilentlyContinue) }
-    $stats = Invoke-CaptureSession -InterfaceId $Interface -ShouldStop $stop -Label "Session $sessionCount" -OnlyProcess $WatchProcess
-    $null = Write-SessionResult -Stats $stats -OnlyProcess $WatchProcess
-
-    Write-Host ""
-    Write-Host "==> Waiting for $WatchProcess.exe again. Ctrl+C to stop, then run .\Build-PubgProfile.ps1"
-    Write-Host ""
-
-    # The process table can still list a closing process for a moment; do not re-trigger on it.
-    Start-Sleep -Seconds 5
+    if ($script:LiveCaptureFile -and -not $KeepCapture -and (Test-Path $script:LiveCaptureFile)) {
+        Remove-Item $script:LiveCaptureFile -Force -ErrorAction SilentlyContinue
+    }
 }
