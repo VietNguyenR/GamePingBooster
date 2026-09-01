@@ -5,7 +5,10 @@
 .DESCRIPTION
     Runs resident by default: it waits for the game process, captures while the game is open,
     analyses when the game exits, appends anything new, and goes back to waiting. Play as many
-    matches as you like without touching the keyboard; Ctrl+C when you are done for the day.
+    matches as you like without touching the keyboard.
+
+    Ctrl+C stops it, and stopping mid-match is fine: the capture is analysed on the way out
+    rather than thrown away. You do not have to close the game first.
 
     Traffic is attributed to a process, so only what the game itself sent is considered. The
     attribution works the same way tools like cFosSpeed do it, without any driver and without
@@ -32,6 +35,13 @@
     Old behaviour: capture once, stop when you press Enter. Useful for a game whose process name
     you do not know yet.
 
+.PARAMETER FromFile
+    Analyse a .pcapng that is already on disk instead of capturing. Used to recover a session the
+    script left behind after an abnormal exit. Process attribution is not available for a saved
+    file - the socket table it needs only existed while the capture was running - so every
+    destination is listed and you judge them by volume, with the cloud cross-check in
+    Build-PubgProfile.ps1 as the real filter.
+
 .PARAMETER MinPackets
     Packet count above which a destination is written to observed.txt. Everything the game talked
     to is shown in the table either way, so lower this if you want to see short-lived endpoints
@@ -42,8 +52,8 @@
     Leave it running, play, Ctrl+C when finished.
 
 .EXAMPLE
-    .\Capture-GameTraffic.ps1 -Interactive
-    One capture, stopped by pressing Enter.
+    .\Capture-GameTraffic.ps1 -FromFile C:\Users\me\AppData\Local\Temp\gpb-20260901-215848.pcapng
+    Analyse a capture that was left behind.
 #>
 
 [CmdletBinding()]
@@ -51,6 +61,7 @@ param(
     [string]$OutputPath,
     [string]$WatchProcess = 'TslGame',
     [switch]$Interactive,
+    [string]$FromFile,
     [int]$MinPackets = 100,
     [int]$DurationMinutes = 180,
     [string]$Interface,
@@ -60,11 +71,31 @@ param(
 $ErrorActionPreference = 'Stop'
 if (-not $OutputPath) { $OutputPath = Join-Path $PSScriptRoot 'observed.txt' }
 
-# Everything the running capture owns, so the finally block at the bottom can clean up after a
-# Ctrl+C. Without this the script dies and dumpcap keeps running, writing to a file nobody will
-# ever read - for hours, on a disk nobody is watching.
+# What the running capture owns, so the cleanup at the bottom can deal with it.
 $script:LiveCapture = $null
 $script:LiveCaptureFile = $null
+
+# Ctrl+C is handled as a keypress rather than as a kill. Killing the script mid-capture used to
+# lose the entire session: the analysis only ran when the GAME exited, so stopping for the day
+# while still in a match threw everything away. Reading the key instead lets the script finish
+# the session properly on its way out, which is what somebody who has just played for an hour
+# expects to happen.
+$script:StopRequested = $false
+$script:EnterPressed = $false
+$script:CanReadKeys = $true
+try { $null = [Console]::KeyAvailable } catch { $script:CanReadKeys = $false }
+
+function Read-ControlKeys {
+    if (-not $script:CanReadKeys) { return }
+    # Drain everything waiting, so a stray keypress does not sit in the buffer for an hour.
+    while ([Console]::KeyAvailable) {
+        $key = [Console]::ReadKey($true)
+        if ($key.Key -eq [ConsoleKey]::Enter) { $script:EnterPressed = $true }
+        if ($key.Key -eq [ConsoleKey]::C -and ($key.Modifiers -band [ConsoleModifiers]::Control)) {
+            $script:StopRequested = $true
+        }
+    }
+}
 
 # --------------------------------------------------------------- locate tools
 
@@ -85,10 +116,10 @@ function Assert-CanCapture {
     if ($LASTEXITCODE -ne 0 -or -not $probe) {
         $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
             [Security.Principal.WindowsBuiltInRole]::Administrator)
-        $hint = if ($elevated) {
-            "Npcap looks broken or missing - reinstall Wireshark and include Npcap."
+        if ($elevated) {
+            $hint = "Npcap looks broken or missing - reinstall Wireshark and include Npcap."
         } else {
-            "Run this window as Administrator (Npcap was installed restricted to administrators)."
+            $hint = "Run this window as Administrator (Npcap was installed restricted to administrators)."
         }
         throw "dumpcap cannot list interfaces. $hint"
     }
@@ -136,14 +167,11 @@ $bpfFilter = 'udp and not port 53 ' +
 # disk, which is worth something on its own.
 $snapLen = 96
 
-# Two autostop limits, and the second one is not about this script working - it is about this
-# script NOT working. dumpcap is a separate process: pressing Ctrl+C runs the cleanup at the
-# bottom of this file, but if the host is killed outright or crashes, nothing runs and dumpcap
-# keeps capturing to a file nobody will read. Killing it cleanly is impossible from a dead
-# parent without a Windows job object, which is a lot of P/Invoke for a capture script. Capping
-# the file at 256 MB bounds the damage instead: at 96 bytes a packet that is millions of packets,
-# far beyond any real session, so it never fires in normal use and an orphan cannot fill a disk.
-# The duration limit does the same for time.
+# A second autostop, and it is not about this script working - it is about this script NOT
+# working. dumpcap is a separate process, so if the host is killed outright or crashes, nothing
+# stops it. Capping the file at 256 MB bounds the damage: at 96 bytes a packet that is millions
+# of packets, far beyond any real session, so it never fires in normal use.
+$maxCaptureKb = 262144
 
 function Get-EpochSeconds {
     return [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000.0
@@ -207,57 +235,12 @@ function Add-PortSighting {
     }
 }
 
-# ------------------------------------------------------------------- capture
+# ------------------------------------------------------------------ analysis
 
-function Invoke-CaptureSession {
-    param(
-        [string]$InterfaceId,
-        [scriptblock]$ShouldStop,     # called every poll; $true means wrap up
-        [string]$Label,
-        [string]$OnlyProcess
-    )
-
-    $captureFile = Join-Path ([System.IO.Path]::GetTempPath()) ("gpb-{0:yyyyMMdd-HHmmss}.pcapng" -f (Get-Date))
-    $portOwners = @{}
-    $pidNames = @{}
-
-    $proc = Start-Process -FilePath $dumpcap -PassThru -NoNewWindow -ArgumentList @(
-        '-i', $InterfaceId,
-        '-f', "`"$bpfFilter`"",
-        '-s', $snapLen,
-        '-a', "duration:$($DurationMinutes * 60)",
-        '-a', 'filesize:262144',
-        '-w', "`"$captureFile`"")
-
-    $script:LiveCapture = $proc
-    $script:LiveCaptureFile = $captureFile
-
-    # The first sighting has to land before the first packet does, or the earliest seconds of the
-    # session fall outside every ownership window and are thrown away.
-    Update-PortOwners -PortOwners $portOwners -PidNames $pidNames -OnlyProcess $OnlyProcess
-
-    $started = Get-Date
-    while (-not $proc.HasExited) {
-        Update-PortOwners -PortOwners $portOwners -PidNames $pidNames -OnlyProcess $OnlyProcess
-        if (& $ShouldStop) { break }
-        Start-Sleep -Milliseconds 2000
-    }
-
-    if (-not $proc.HasExited) {
-        Stop-Process -Id $proc.Id -Force
-        Start-Sleep -Milliseconds 500
-    }
-    $script:LiveCapture = $null
-
-    $elapsed = [int]((Get-Date) - $started).TotalSeconds
-    if (-not (Test-Path $captureFile)) {
-        Write-Warning "No capture file produced. Try running as Administrator."
-        $script:LiveCaptureFile = $null
-        return $null
-    }
-
-    $sizeMb = [math]::Round((Get-Item $captureFile).Length / 1MB, 1)
-    Write-Host "==> $Label finished after ${elapsed}s, $sizeMb MB"
+# Fold a capture file into "address -> packets, ports, owners". Kept separate from the capture
+# itself so that a file left behind by an abnormal exit can still be read with -FromFile.
+function Measure-CaptureFile {
+    param([string]$Path, [hashtable]$PortOwners)
 
     # Per-packet fields rather than -z conv,udp: the conversation table is fixed-width with unit
     # suffixes that change with magnitude ("0 bytes" / "1 kB"), which makes a parser fragile.
@@ -268,7 +251,7 @@ function Invoke-CaptureSession {
     $stats = @{}
     $slack = 3.0   # one poll interval plus a little, so a packet at the edge is not lost
 
-    & $tshark -r $captureFile -T fields -e frame.time_epoch -e ip.dst -e udp.srcport -e udp.dstport |
+    & $tshark -r $Path -T fields -e frame.time_epoch -e ip.dst -e udp.srcport -e udp.dstport |
         ForEach-Object {
             $parts = $_ -split "`t"
             if ($parts.Count -lt 4) { return }
@@ -290,15 +273,74 @@ function Invoke-CaptureSession {
             $entry.Packets++
             if ($dstPort) { $entry.Ports[$dstPort] = $true }
 
-            if ($srcPort -and $portOwners.ContainsKey([int]$srcPort)) {
-                foreach ($owner in $portOwners[[int]$srcPort].Keys) {
-                    $window = $portOwners[[int]$srcPort][$owner]
+            if ($srcPort -and $PortOwners.ContainsKey([int]$srcPort)) {
+                foreach ($owner in $PortOwners[[int]$srcPort].Keys) {
+                    $window = $PortOwners[[int]$srcPort][$owner]
                     if ($when -ge ($window.First - $slack) -and $when -le ($window.Last + $slack)) {
                         $entry.Owners[$owner] = $true
                     }
                 }
             }
         }
+
+    return $stats
+}
+
+# ------------------------------------------------------------------- capture
+
+function Invoke-CaptureSession {
+    param(
+        [string]$InterfaceId,
+        [scriptblock]$ShouldStop,     # called every poll; $true means wrap up
+        [string]$Label,
+        [string]$OnlyProcess
+    )
+
+    $captureFile = Join-Path ([System.IO.Path]::GetTempPath()) ("gpb-{0:yyyyMMdd-HHmmss}.pcapng" -f (Get-Date))
+    $portOwners = @{}
+    $pidNames = @{}
+
+    $proc = Start-Process -FilePath $dumpcap -PassThru -NoNewWindow -ArgumentList @(
+        '-i', $InterfaceId,
+        '-f', "`"$bpfFilter`"",
+        '-s', $snapLen,
+        '-a', "duration:$($DurationMinutes * 60)",
+        '-a', "filesize:$maxCaptureKb",
+        '-w', "`"$captureFile`"")
+
+    $script:LiveCapture = $proc
+    $script:LiveCaptureFile = $captureFile
+
+    # The first sighting has to land before the first packet does, or the earliest seconds of the
+    # session fall outside every ownership window and are thrown away.
+    Update-PortOwners -PortOwners $portOwners -PidNames $pidNames -OnlyProcess $OnlyProcess
+
+    $started = Get-Date
+    while (-not $proc.HasExited) {
+        Update-PortOwners -PortOwners $portOwners -PidNames $pidNames -OnlyProcess $OnlyProcess
+        Read-ControlKeys
+        if ($script:StopRequested) { break }
+        if (& $ShouldStop) { break }
+        Start-Sleep -Milliseconds 2000
+    }
+
+    if (-not $proc.HasExited) {
+        Stop-Process -Id $proc.Id -Force
+        Start-Sleep -Milliseconds 500
+    }
+    $script:LiveCapture = $null
+
+    $elapsed = [int]((Get-Date) - $started).TotalSeconds
+    if (-not (Test-Path $captureFile)) {
+        Write-Warning "No capture file produced. Try running as Administrator."
+        $script:LiveCaptureFile = $null
+        return $null
+    }
+
+    $sizeMb = [math]::Round((Get-Item $captureFile).Length / 1MB, 1)
+    Write-Host "==> $Label finished after ${elapsed}s, $sizeMb MB - analysing"
+
+    $stats = Measure-CaptureFile -Path $captureFile -PortOwners $portOwners
 
     if (-not $KeepCapture) { Remove-Item $captureFile -Force -ErrorAction SilentlyContinue }
     else { Write-Host "    Raw capture kept at $captureFile" }
@@ -372,19 +414,29 @@ function Write-SessionResult {
 # ---------------------------------------------------------------------- main
 
 try {
+    if ($FromFile) {
+        if (-not (Test-Path $FromFile)) { throw "No such capture: $FromFile" }
+        Write-Host ""
+        Write-Host "==> Analysing $FromFile" -ForegroundColor Cyan
+        Write-Warning ("Process attribution is not available for a saved capture: the socket table it " +
+                       "needs only existed while the capture was running. Judge these by packet volume, " +
+                       "and let Build-PubgProfile.ps1 do the cloud cross-check.")
+        $stats = Measure-CaptureFile -Path $FromFile -PortOwners @{}
+        $null = Write-SessionResult -Stats $stats -OnlyProcess ''
+        Write-Host ""
+        Write-Host "    Next: .\Build-PubgProfile.ps1"
+        return
+    }
+
+    if ($script:CanReadKeys) { [Console]::TreatControlCAsInput = $true }
+
     $devices = Assert-CanCapture
     $Interface = Resolve-CaptureInterface -Requested $Interface -Devices $devices
 
     if ($Interactive) {
         Write-Host ""
         Write-Host "==> Interactive capture. Start your match now, press Enter when it ends." -ForegroundColor Cyan
-        $stop = {
-            if ($Host.UI.RawUI.KeyAvailable) {
-                $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
-                return ($key.VirtualKeyCode -eq 13)
-            }
-            return $false
-        }
+        $stop = { return $script:EnterPressed }
         $stats = Invoke-CaptureSession -InterfaceId $Interface -ShouldStop $stop -Label 'Capture' -OnlyProcess ''
         $null = Write-SessionResult -Stats $stats -OnlyProcess ''
         Write-Host ""
@@ -394,15 +446,18 @@ try {
 
     Write-Host ""
     Write-Host "==> Resident mode, watching for $WatchProcess.exe" -ForegroundColor Cyan
-    Write-Host "    Play as many matches as you like. Ctrl+C to stop."
-    Write-Host "    Capture starts when the game opens and is analysed when it closes."
+    Write-Host "    Play as many matches as you like. Ctrl+C to stop - stopping mid-match is fine,"
+    Write-Host "    the capture is analysed before the script exits."
     Write-Host ""
 
     $sessionCount = 0
-    while ($true) {
+    while (-not $script:StopRequested) {
         while (-not (Get-Process -Name $WatchProcess -ErrorAction SilentlyContinue)) {
-            Start-Sleep -Seconds 2
+            Read-ControlKeys
+            if ($script:StopRequested) { break }
+            Start-Sleep -Seconds 1
         }
+        if ($script:StopRequested) { break }
 
         $sessionCount++
         Write-Host "==> $WatchProcess.exe started - capturing (session $sessionCount)" -ForegroundColor Cyan
@@ -411,6 +466,8 @@ try {
         $stats = Invoke-CaptureSession -InterfaceId $Interface -ShouldStop $stop -Label "Session $sessionCount" -OnlyProcess $WatchProcess
         $null = Write-SessionResult -Stats $stats -OnlyProcess $WatchProcess
 
+        if ($script:StopRequested) { break }
+
         Write-Host ""
         Write-Host "==> Waiting for $WatchProcess.exe again. Ctrl+C to stop, then run .\Build-PubgProfile.ps1"
         Write-Host ""
@@ -418,17 +475,24 @@ try {
         # The process table can still list a closing process for a moment; do not re-trigger on it.
         Start-Sleep -Seconds 5
     }
+
+    Write-Host ""
+    Write-Host "==> Stopped after $sessionCount session(s). Next: .\Build-PubgProfile.ps1" -ForegroundColor Cyan
 }
 finally {
-    # Ctrl+C lands here. dumpcap is a separate process and does NOT die with this script, so
-    # without this it keeps capturing to a temp file forever - which is how a laptop quietly
-    # runs out of disk overnight.
+    if ($script:CanReadKeys) { try { [Console]::TreatControlCAsInput = $false } catch { } }
+
     if ($script:LiveCapture -and -not $script:LiveCapture.HasExited) {
-        Write-Host ""
-        Write-Host "==> Stopping the capture..." -ForegroundColor Yellow
         Stop-Process -Id $script:LiveCapture.Id -Force -ErrorAction SilentlyContinue
     }
-    if ($script:LiveCaptureFile -and -not $KeepCapture -and (Test-Path $script:LiveCaptureFile)) {
-        Remove-Item $script:LiveCaptureFile -Force -ErrorAction SilentlyContinue
+
+    # Reaching here with a capture file still set means the script is ending abnormally, and that
+    # file is the only copy of a session somebody spent an hour producing. An earlier version of
+    # this script deleted it here for tidiness and destroyed 66,000 packets of real gameplay.
+    # Keep it, and say how to read it.
+    if ($script:LiveCaptureFile -and (Test-Path $script:LiveCaptureFile)) {
+        Write-Host ""
+        Write-Host "==> The capture was left at $script:LiveCaptureFile" -ForegroundColor Yellow
+        Write-Host "    Analyse it with:  .\Capture-GameTraffic.ps1 -FromFile '$script:LiveCaptureFile'"
     }
 }
