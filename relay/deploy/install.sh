@@ -41,7 +41,11 @@ bash "${HERE}/setup-nat.sh"
 echo "==> Installing the systemd unit"
 install -m 0644 "${HERE}/relayd.service" /etc/systemd/system/relayd.service
 systemctl daemon-reload
-systemctl enable --now relayd
+systemctl enable relayd
+
+# Quen me mat restart bao sao mai deo chay 😢
+echo "==> Restarting relayd so the new binary is the one actually running"
+systemctl restart relayd
 
 sleep 1
 systemctl --no-pager --lines=15 status relayd || true
