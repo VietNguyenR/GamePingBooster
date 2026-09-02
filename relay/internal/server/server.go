@@ -28,6 +28,14 @@ type Config struct {
 	MTU         int          // TUN MTU, must match the MTU the client sets on Wintun
 	IdleTimeout time.Duration
 
+	// MaxSessionAge caps how long one handshake stays good for. 0 uses protocol.MaxSessionAge.
+	//
+	// A session is authenticated once, at handshake, and never re-checked while it runs: cutting
+	// a customer off mid-match is the worst possible moment, and a lapsed subscription is refused
+	// at their next connect anyway. The cost of that choice is a session that could be held open
+	// forever, which this closes. No real game session lasts a day.
+	MaxSessionAge time.Duration
+
 	// Exactly one authentication mode is configured, and the relay answers only that one.
 	//
 	// PSK is the self-hosted mode: one shared key, as in v1 and v2.
@@ -61,6 +69,7 @@ type session struct {
 	innerIP  netip.Addr
 	addr     atomic.Pointer[netip.AddrPort] // current client UDP address (changes on roaming)
 	lastSeen atomic.Int64                   // unix nanoseconds
+	born     int64                          // unix nanoseconds, set once and never updated
 	resumed  bool                           // true if this session reclaimed a previously held address
 
 	up   *bucket // client -> internet, touched only by loopUDP
@@ -122,6 +131,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.IdleTimeout <= 0 {
 		cfg.IdleTimeout = 90 * time.Second
+	}
+	if cfg.MaxSessionAge <= 0 {
+		cfg.MaxSessionAge = protocol.MaxSessionAge
 	}
 	if cfg.RateBytesPerSec > 0 && cfg.BurstBytes <= 0 {
 		// Four seconds at the sustained rate. The first draft used eight, and a test written
@@ -539,31 +551,61 @@ func (s *Server) loopJanitor(done <-chan struct{}) {
 		case <-done:
 			return
 		case <-t.C:
-			cutoff := time.Now().Add(-s.cfg.IdleTimeout).UnixNano()
-			var expired []*session
-			s.mu.RLock()
-			for _, sess := range s.bySession {
-				if sess.lastSeen.Load() < cutoff {
-					expired = append(expired, sess)
-				}
-			}
-			active := len(s.bySession)
-			s.mu.RUnlock()
-
-			for _, sess := range expired {
-				s.releaseSession(sess, false)
-				s.log.Info("session expired", "inner_ip", sess.innerIP.String())
-			}
-			s.log.Info("stats",
-				"sessions", active-len(expired),
-				"rx_pkt", s.stats.rxPackets.Load(),
-				"tx_pkt", s.stats.txPackets.Load(),
-				"rx_bytes", s.stats.rxBytes.Load(),
-				"tx_bytes", s.stats.txBytes.Load(),
-				"dropped", s.stats.dropped.Load(),
-				"rate_limited", s.stats.limited.Load())
+			s.sweep(time.Now())
 		}
 	}
+}
+
+// sweep drops sessions that have gone quiet or have simply been up too long, and logs the
+// statistics line.
+//
+// It takes the time rather than reading the clock so a test can reach a 24-hour session age
+// without waiting 24 hours or sleeping. The ticker is the only caller in production.
+func (s *Server) sweep(now time.Time) {
+	idleCutoff := now.Add(-s.cfg.IdleTimeout).UnixNano()
+
+	// Guarded rather than trusting New() to have filled the default in. A Server built by hand -
+	// which the session tests do, because New() wants a TUN device and root - would otherwise
+	// have a zero cap, and a zero cap read literally means "born before now", i.e. every session
+	// is too old on the first tick. A silently disabled cap is bad; a relay that drops every
+	// session thirty seconds after it starts is worse.
+	capAge := s.cfg.MaxSessionAge > 0
+	bornCutoff := now.Add(-s.cfg.MaxSessionAge).UnixNano()
+
+	var expired, tooOld []*session
+	s.mu.RLock()
+	for _, sess := range s.bySession {
+		switch {
+		case sess.lastSeen.Load() < idleCutoff:
+			expired = append(expired, sess)
+		case capAge && sess.born < bornCutoff:
+			tooOld = append(tooOld, sess)
+		}
+	}
+	active := len(s.bySession)
+	s.mu.RUnlock()
+
+	for _, sess := range expired {
+		s.releaseSession(sess, false)
+		s.log.Info("session expired", "inner_ip", sess.innerIP.String())
+	}
+	// Age is checked separately from idleness because it means something different: the client
+	// is alive and well, and is being asked to prove again that it is still entitled to be here.
+	// It reconnects, which is a blip; it does not lose service.
+	for _, sess := range tooOld {
+		s.releaseSession(sess, false)
+		s.log.Info("session reached its maximum age, the client must handshake again",
+			"inner_ip", sess.innerIP.String(),
+			"age", now.Sub(time.Unix(0, sess.born)).Truncate(time.Second).String())
+	}
+	s.log.Info("stats",
+		"sessions", active-len(expired)-len(tooOld),
+		"rx_pkt", s.stats.rxPackets.Load(),
+		"tx_pkt", s.stats.txPackets.Load(),
+		"rx_bytes", s.stats.rxBytes.Load(),
+		"tx_bytes", s.stats.txBytes.Load(),
+		"dropped", s.stats.dropped.Load(),
+		"rate_limited", s.stats.limited.Load())
 }
 
 // ------------------------------------------------------------ session table
@@ -601,6 +643,7 @@ func (s *Server) allocSession(from netip.AddrPort, resKey protocol.ClientID) (*s
 
 	sess := &session{
 		id: sid, resKey: resKey, innerIP: ip, resumed: resumed,
+		born: time.Now().UnixNano(),
 		up:   newBucket(s.cfg.BurstBytes),
 		down: newBucket(s.cfg.BurstBytes),
 	}
