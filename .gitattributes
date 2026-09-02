@@ -1,0 +1,16 @@
+# Files that are executed on Linux must keep LF endings no matter which platform they were
+# edited on. core.autocrlf is true on the development machine, so without this a shell script
+# committed from Windows arrives on the VPS with CRLF and fails with an error that names the
+# wrong thing entirely - which is why install.sh is currently run through `sed -i 's/\r$//'`
+# before it will execute. That workaround stays as a belt-and-braces measure, but it should
+# never be the thing making deployment work.
+gpb         text eol=lf
+*.sh        text eol=lf
+*.service   text eol=lf
+
+# Go source is LF by convention and gofmt output is compared byte for byte in CI-style checks.
+*.go        text eol=lf
+
+# PowerShell stays CRLF: it is Windows-only tooling, and the repo requires these files to carry
+# a UTF-8 BOM anyway (PowerShell 5.1 reads a BOM-less file as ANSI).
+*.ps1       text eol=crlf

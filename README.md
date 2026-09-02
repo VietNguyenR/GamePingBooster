@@ -74,8 +74,9 @@ cd client && dotnet publish src/GamePingBooster.Service -c Release
 
 ## Running it
 
-1. Deploy the relay to a VPS - see [relay/README.md](relay/README.md). Note the endpoint and PSK
-   it prints.
+1. Declare your VPS in `gpb.conf` (copy `gpb.conf.example`; it is gitignored), then
+   `./gpb relay deploy`. See [relay/README.md](relay/README.md). Note the endpoint and PSK it
+   prints - they go into two different files, as step 3 says.
 2. Download the signed `wintun.dll` into `client/native/wintun/` - see
    [client/native/wintun/README.md](client/native/wintun/README.md).
 3. Copy `client/config.example.json` to `client/config.json` and fill in the PSK. Put the relay's

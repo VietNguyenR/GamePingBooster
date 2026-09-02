@@ -18,13 +18,33 @@ make test
 **Run this from the development machine, NOT on the VPS.** Go cross-compiles a static binary, so
 the server never needs Go installed - it only receives a 2.4 MB executable.
 
-On Windows (no `make` required):
+Declare the relay once in `gpb.conf` at the repository root - host, and whichever of user, port,
+key or password your VPS needs. Copy `gpb.conf.example` and edit one block; the file is
+gitignored. The name in the middle of each key is yours to choose and is what you type:
 
-```powershell
-.\deploy.ps1 -RemoteHost root@1.2.3.4
+```
+RELAY_SG_HOST=203.0.113.10
+RELAY_SG_USER=root
+RELAY_SG_KEY=~/.ssh/id_ed25519
+RELAY_DEFAULT=sg
 ```
 
-On Linux or macOS, or on Windows with `make` available:
+Then, from anywhere in the repository and on any operating system:
+
+```bash
+./gpb relay list           # what gpb.conf declares, and how each one authenticates
+./gpb relay deploy sg      # or just ./gpb relay deploy, for RELAY_DEFAULT
+./gpb relay logs sg
+```
+
+`gpb.ps1` takes the same verbs on Windows, and `deploy.ps1` still works on its own:
+
+```powershell
+.\deploy.ps1 -RemoteHost sg
+```
+
+A name `gpb.conf` does not declare is handed to ssh unchanged, so an alias from your
+`~/.ssh/config` or a plain `root@1.2.3.4` works too. With `make`:
 
 ```bash
 make deploy HOST=root@1.2.3.4
@@ -51,8 +71,17 @@ Either way, `install.sh` does the following:
   clamping, opens the UDP port
 - installs and starts the `relayd` systemd unit
 
-It finishes by printing the **endpoint** and the **PSK** - the two values that go into
-`client/config.json`.
+It finishes by printing the **endpoint** and the **PSK**. These go into two different files,
+because they answer two different questions:
+
+- the **endpoint** (`<ip>:51820`) goes into the profile, as an entry in `relays[]` - that is the
+  data plane, the address the client sends packets to
+- the **PSK** goes into `client/config.json`, next to a `defaultRelayId` matching the `id` of
+  that relay entry
+
+Neither goes into `gpb.conf`. That file describes how to **reach the VPS over SSH** and is read
+on your machine only; the client never sees it. `./gpb relay deploy` prints both values in the
+shape they belong in when it finishes.
 
 `setup-nat.sh` detects the distribution and the firewall manager in use (firewalld, or iptables
 with either Debian's `netfilter-persistent` or RHEL's `iptables-services`). It also refuses to

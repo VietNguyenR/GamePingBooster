@@ -45,3 +45,7 @@ profiles/*.local.json
 HANDOFF.md
 profiles/pubg-vn.json
 .gitignore
+
+# Local machine settings for ./gpb and gpb.ps1 (relay host aliases and the like)
+gpb.conf
+profiles/pubg-vn.json

@@ -1,0 +1,415 @@
+#!/bin/sh
+# One entry point for this project, on any operating system.
+#
+# Why a POSIX shell script next to gpb.ps1 rather than one or the other:
+#
+# The two halves of this project do not have the same reach. The relay is Go on Linux, and anyone
+# on any machine can build it, test it and deploy it. The client is Windows only - not by habit
+# but by construction: it drives Wintun, netsh, a Windows service and a named pipe, none of which
+# exist elsewhere. Rewriting that half in a "portable" language would produce portable-looking
+# code that still refuses to run anywhere but Windows, plus a new dependency for every
+# contributor. So the split is by what the command DRIVES, not by what it is written in.
+#
+# This script is the front door. Relay work runs natively here. Windows-only work is handed to
+# gpb.ps1 when you are on Windows, and explained rather than silently failing when you are not.
+#
+#   ./gpb relay build            cross-compile relayd for Linux           (any OS)
+#   ./gpb relay test             Go tests, vet and gofmt                  (any OS)
+#   ./gpb relay list             show the relays gpb.conf declares         (any OS)
+#   ./gpb relay deploy [name]    build, upload and install on a relay     (any OS)
+#   ./gpb relay logs [name]      follow journalctl on a relay             (any OS)
+#   ./gpb relay setup            first-time setup, explained              (any OS)
+#   ./gpb test                   everything: Go, plus C# if the SDK is here
+#
+#   ./gpb dev                    build and start the service and UI       (Windows)
+#   ./gpb capture                collect game server addresses            (Windows)
+#   ./gpb profile                rebuild the profile                      (Windows)
+#   ./gpb check                  is the game going through the relay      (Windows)
+#   ./gpb logs | status | stop | publish | diag                           (Windows)
+#
+# Relays are declared in gpb.conf - host, port, user, key or password, one block each. Copy
+# gpb.conf.example to gpb.conf and fill it in; it is gitignored and this repository names no
+# real host. Run `./gpb relay setup` for the walkthrough.
+
+set -eu
+
+root=$(cd "$(dirname "$0")" && pwd)
+relay="$root/relay"
+
+say()  { printf '==> %s\n' "$*"; }
+warn() { printf '    %s\n' "$*" >&2; }
+die()  { printf 'gpb: %s\n' "$*" >&2; exit 1; }
+
+need() {
+    command -v "$1" >/dev/null 2>&1 || die "$1 not found on PATH. $2"
+}
+
+# --------------------------------------------------------------------------- local settings
+#
+# gpb.conf is PARSED, not sourced. Sourcing it would be shorter, and would also mean that a
+# password containing $ or a backslash silently turned into something else, and that any command
+# left in the file ran as you. Parsing takes the value literally to the end of the line, which is
+# what the file's own comments promise the reader.
+
+RELAY_DEFAULT=
+
+load_conf() {
+    conf="$root/gpb.conf"
+    [ -f "$conf" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in '' | '#'*) continue ;; esac
+        key=${line%%=*}
+        [ "$key" != "$line" ] || continue
+        val=${line#*=}
+
+        key=$(printf '%s' "$key" | tr -d ' \t')
+        case "$key" in RELAY_*) ;; *) continue ;; esac
+        # Anything that is not a shell name character means a malformed line, not a setting.
+        # Skipping it is safer than handing it to eval below.
+        [ -z "$(printf '%s' "$key" | sed 's/[A-Za-z0-9_]//g')" ] || continue
+
+        # CRLF is likely here. gpb.conf is written by hand on Windows and is untracked, so
+        # .gitattributes never sees it, and a trailing CR in a host name produces an ssh error
+        # that names the wrong thing entirely. [[:space:]] covers CR.
+        val=$(printf '%s' "$val" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+
+        # Only key paths get ~ expanded. Doing it to every value would corrupt a password that
+        # happened to start with one.
+        case "$key" in
+            *_KEY) case "$val" in '~/'*) val="$HOME/${val#'~/'}" ;; esac ;;
+        esac
+
+        eval "$key=\$val"
+    done < "$conf"
+}
+load_conf
+
+# One field of one declared relay; empty when the relay or the field is not declared.
+relay_field() {
+    n=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9]/_/g')
+    eval "printf '%s' \"\${RELAY_${n}_$2:-}\""
+}
+
+relay_password() {
+    pw=$(relay_field "$1" PASSWORD)
+    [ -n "$pw" ] || pw=${RELAY_PASSWORD:-}
+    printf '%s' "$pw"
+}
+
+# The address a player's client connects to, which is not the SSH address: the port is relayd's
+# UDP port, not the SSH port. Printed at the end of a deploy so it can be pasted into a profile.
+relay_endpoint() {
+    host=$(relay_field "$1" HOST)
+    [ -n "$host" ] || return 0
+    listen=$(relay_field "$1" LISTEN)
+    [ -n "$listen" ] || listen=51820
+    printf '%s:%s' "$host" "$listen"
+}
+
+relay_names() {
+    # `set` with no arguments prints every variable as name=value. Bash also prints function
+    # bodies, which this pattern simply does not match.
+    set | sed -n 's/^RELAY_\([A-Za-z0-9_]*\)_HOST=.*/\1/p' | tr 'A-Z' 'a-z' | sort -u
+}
+
+# Run ssh against a relay, whether gpb.conf declares it or it is a bare alias.
+#
+# The arguments are built with `set --` rather than joined into a string, so a key path with a
+# space in it - normal on Windows - stays one argument.
+relay_ssh() {
+    name=$1
+    shift
+    host=$(relay_field "$name" HOST)
+    if [ -z "$host" ]; then
+        # Not declared here, so it is an alias from ~/.ssh/config or a plain user@host. Hand it
+        # to ssh unchanged and let ssh's own configuration answer for it.
+        ssh "$name" "$@"
+        return
+    fi
+    user=$(relay_field "$name" USER)
+    [ -n "$user" ] || user=root
+    port=$(relay_field "$name" PORT)
+    [ -n "$port" ] || port=22
+    key=$(relay_field "$name" KEY)
+
+    set -- "$user@$host" "$@"
+    # IdentitiesOnly stops ssh offering every key the agent holds before the one that was named,
+    # which on a host with MaxAuthTries 3 and four keys loaded fails before it ever gets there.
+    [ -z "$key" ] || set -- -i "$key" -o IdentitiesOnly=yes "$@"
+    set -- -p "$port" "$@"
+    ssh "$@"
+}
+
+# OpenSSH will not take a password from a flag, a file or an environment variable - that is
+# deliberate on its part. The one supported way to supply one without a human at the keyboard is
+# SSH_ASKPASS: ssh runs the named program and reads the password from its output. So the helper
+# below is written at call time, reads the password from the environment rather than containing
+# it, and is deleted on the way out however the script ends.
+askpass_file=
+arm_askpass() {
+    [ -n "$1" ] || return 0
+    askpass_file=$(mktemp)
+    cat > "$askpass_file" <<'ASKPASS'
+#!/bin/sh
+printf '%s\n' "$GPB_SSH_PASSWORD"
+ASKPASS
+    chmod 700 "$askpass_file"
+    trap 'rm -f "$askpass_file"' EXIT INT TERM HUP
+    GPB_SSH_PASSWORD=$1
+    export GPB_SSH_PASSWORD
+    SSH_ASKPASS=$askpass_file
+    export SSH_ASKPASS
+    # Without force, ssh only asks the helper when there is no terminal, and falls back to
+    # prompting the moment one exists - which is exactly when you run this by hand.
+    SSH_ASKPASS_REQUIRE=force
+    export SSH_ASKPASS_REQUIRE
+}
+
+# Resolve the relay a command should act on, and explain the options when there is no answer.
+#
+# It sets $picked rather than printing the name, because printing would mean calling it as
+# $(pick_relay ...) - and the exit below would then end only the command substitution's subshell,
+# leaving the caller to carry on with an empty relay name.
+picked=
+pick_relay() {
+    picked=${1:-$RELAY_DEFAULT}
+    [ -z "$picked" ] || return 0
+
+    warn "Which relay? Name one, or set RELAY_DEFAULT in gpb.conf."
+    names=$(relay_names)
+    if [ -n "$names" ]; then
+        warn ""
+        warn "Declared in gpb.conf:"
+        printf '        %s\n' $names >&2
+    else
+        warn ""
+        warn "gpb.conf declares none yet. Run ./gpb relay setup."
+    fi
+    exit 1
+}
+
+is_windows=0
+case "$(uname -s 2>/dev/null || echo unknown)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT) is_windows=1 ;;
+esac
+
+# Hand a verb to the PowerShell side. Everything routed here touches a Windows service, the
+# routing table, a named pipe or Npcap, so there is nothing to fall back to on another system.
+delegate() {
+    verb=$1
+    shift
+    if [ "$is_windows" -eq 0 ]; then
+        warn "'$verb' drives Windows components - a virtual adapter, the routing table, a Windows"
+        warn "service - and has no meaning on $(uname -s). The relay verbs all work here:"
+        warn ""
+        warn "    ./gpb relay build | test | list | deploy [name] | logs [name]"
+        exit 2
+    fi
+    need powershell "It ships with Windows; make sure C:/Windows/System32/WindowsPowerShell/v1.0 is on PATH."
+    exec powershell -NoProfile -ExecutionPolicy Bypass -File "$root/gpb.ps1" "$verb" "$@"
+}
+
+relay_build() {
+    need go "Install Go 1.22 or newer from https://go.dev/dl/"
+    say "Cross-compiling relayd for Linux"
+    ( cd "$relay" && CGO_ENABLED=0 GOOS=linux go build -o relayd ./cmd/relayd )
+    say "Built $relay/relayd"
+}
+
+relay_test() {
+    need go "Install Go 1.22 or newer from https://go.dev/dl/"
+    say "gofmt"
+    unformatted=$( cd "$relay" && gofmt -l . )
+    if [ -n "$unformatted" ]; then
+        die "gofmt would change these files:
+$unformatted"
+    fi
+    say "go vet"
+    ( cd "$relay" && go vet ./... )
+    say "go test"
+    ( cd "$relay" && go test ./... )
+}
+
+relay_list() {
+    names=$(relay_names)
+    if [ -z "$names" ]; then
+        warn "gpb.conf declares no relays. Copy gpb.conf.example to gpb.conf and fill in one block."
+        return 0
+    fi
+    printf '%-10s %-24s %-22s %s\n' NAME 'SSH' 'CLIENT ENDPOINT' 'AUTH'
+    for n in $names; do
+        user=$(relay_field "$n" USER); [ -n "$user" ] || user=root
+        port=$(relay_field "$n" PORT); [ -n "$port" ] || port=22
+        if [ -n "$(relay_field "$n" KEY)" ]; then
+            auth=key
+        elif [ -n "$(relay_password "$n")" ]; then
+            auth=password
+        else
+            auth='ssh decides'
+        fi
+        # An `x && y` list that fails IS fatal under set -e when it stands on its own, so this
+        # stays an if. That mistake would only show up for a relay that is not the default.
+        mark=' '
+        if [ "$n" = "$RELAY_DEFAULT" ]; then mark='*'; fi
+        printf '%-10s %-24s %-22s %s\n' \
+            "$n$mark" "$user@$(relay_field "$n" HOST):$port" "$(relay_endpoint "$n")" "$auth"
+    done
+    printf '\n* = RELAY_DEFAULT, used when a command is given no name.\n'
+}
+
+relay_setup() {
+    cat <<'EOF'
+
+Setting up a relay, start to finish.
+
+1. Declare it in gpb.conf. Copy the example and edit one block - host, and whichever of user,
+   port, key or password your VPS needs. The name in the middle of the key is yours to pick and
+   is what you type on the command line:
+
+    cp gpb.conf.example gpb.conf
+
+    RELAY_SG_HOST=203.0.113.10
+    RELAY_SG_USER=root
+    RELAY_SG_KEY=~/.ssh/id_ed25519
+    RELAY_DEFAULT=sg
+
+   gpb.conf is gitignored. Check what got read:
+
+    ./gpb relay list
+
+2. If you have no key yet, make one and install it. Once per host, and the last time you type
+   that password:
+
+    ssh-keygen -t ed25519
+    ssh-copy-id -i ~/.ssh/id_ed25519.pub root@203.0.113.10
+
+   ssh-copy-id is missing from Git for Windows. Without it:
+
+    cat ~/.ssh/id_ed25519.pub | ssh root@203.0.113.10 \
+      "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+
+   A password in RELAY_<NAME>_PASSWORD works instead, and costs one prompt-free deploy, but it
+   sits in plain text on your disk. gpb.conf.example says more about that trade.
+
+3. Deploy. This builds relayd, ships it in one connection and runs install.sh on the far end:
+
+    ./gpb relay deploy sg          (or just ./gpb relay deploy, for RELAY_DEFAULT)
+    ./gpb relay logs sg
+
+4. install.sh prints the endpoint and the PSK. They go into two different files, because they
+   are two different things:
+
+    endpoint <ip>:51820  ->  profiles/<profile>.json, as an entry in "relays"
+    PSK                  ->  client/config.json, as "psk"
+
+   Neither belongs in gpb.conf: that file is only about reaching the VPS.
+
+EOF
+}
+
+# Deploy without PowerShell, so a contributor on Linux is not locked out of the one half of the
+# project they can actually run. Same steps deploy.ps1 takes, in the same order.
+relay_deploy() {
+    pick_relay "${1:-}"
+    target=$picked
+    need ssh "Install OpenSSH."
+    need tar "Install tar. Windows 10 and later ship it in System32."
+
+    arm_askpass "$(relay_password "$target")"
+
+    relay_build
+
+    # Everything goes over ONE ssh connection, as a tar stream on stdin.
+    #
+    # The obvious version - ssh mkdir, scp the binary, scp the scripts, ssh install - opens four
+    # connections, and with password authentication that is four password prompts for one deploy.
+    # Key authentication hides the cost, which is why it went unnoticed. Piping a tar means one
+    # connection and therefore exactly one prompt, whichever authentication the server uses.
+    #
+    # The sed strips CR: these files are edited on Windows, and a shell script with CRLF endings
+    # fails on Linux with an error that names the wrong thing entirely. .gitattributes should keep
+    # them LF now, so this is a second line of defence rather than the thing making it work.
+    if [ -n "$(relay_password "$target")" ]; then
+        say "Deploying to $target (one connection, password from gpb.conf)"
+    else
+        say "Deploying to $target (one connection - expect at most one password prompt)"
+    fi
+    tar -czf - -C "$relay" relayd deploy/setup-nat.sh deploy/install.sh deploy/relayd.service |
+        relay_ssh "$target" "set -e
+            mkdir -p /opt/gpb
+            tar -xzf - -C /opt/gpb
+            cd /opt/gpb/deploy
+            sed -i 's/\r\$//' *.sh
+            chmod +x *.sh
+            ./install.sh"
+
+    endpoint=$(relay_endpoint "$target")
+    say "Done. Follow it with:  ./gpb relay logs $target"
+    if [ -n "$endpoint" ]; then
+        printf '\n    The endpoint above goes into a profile, not into gpb.conf:\n\n'
+        printf '      "relays": [ { "id": "%s", "name": "%s", "endpoint": "%s" } ]\n\n' \
+            "$target" "$target" "$endpoint"
+        printf '    The PSK goes into client/config.json, with "defaultRelayId": "%s".\n\n' "$target"
+    fi
+}
+
+usage() {
+    sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+[ $# -gt 0 ] || { usage; exit 0; }
+
+verb=$1
+shift
+
+case "$verb" in
+    relay)
+        sub=${1:-}
+        [ $# -gt 0 ] && shift
+        case "$sub" in
+            build)  relay_build ;;
+            test)   relay_test ;;
+            list)   relay_list ;;
+            deploy) relay_deploy "${1:-}" ;;
+            logs)
+                pick_relay "${1:-}"
+                host=$picked
+                need ssh "Install OpenSSH."
+                arm_askpass "$(relay_password "$host")"
+                relay_ssh "$host" 'journalctl -u relayd -f'
+                ;;
+            setup)  relay_setup ;;
+            *)
+                printf '  relay build            cross-compile relayd for Linux\n'
+                printf '  relay test             gofmt, go vet, go test\n'
+                printf '  relay list             show the relays gpb.conf declares\n'
+                printf '  relay deploy [name]    build, upload and install\n'
+                printf '  relay logs [name]      follow journalctl\n'
+                printf '  relay setup            first-time setup, explained\n'
+                ;;
+        esac
+        ;;
+
+    test)
+        relay_test
+        # The C# half needs the .NET SDK. On a machine without it the Go tests are still worth
+        # running on their own rather than failing the whole command.
+        if command -v dotnet >/dev/null 2>&1; then
+            say "C#: build and wire-format check"
+            dotnet build "$root/client/GamePingBooster.sln" --nologo -v quiet
+            dotnet run --project "$root/client/src/GamePingBooster.ProtocolCheck/GamePingBooster.ProtocolCheck.csproj"
+        else
+            warn "dotnet not found - skipped the C# build and the wire-format check."
+            warn "The Go side passed; install the .NET 9 SDK to check the client too."
+        fi
+        say "Done"
+        ;;
+
+    dev | capture | profile | check | logs | status | stop | publish | diag)
+        delegate "$verb" "$@"
+        ;;
+
+    help | -h | --help) usage ;;
+
+    *) die "unknown command '$verb'. Run ./gpb help" ;;
+esac

@@ -1,0 +1,94 @@
+# Local settings for ./gpb, gpb.ps1 and relay/deploy.ps1. Copy to gpb.conf and edit:
+#
+#   cp gpb.conf.example gpb.conf
+#
+# gpb.conf is gitignored, so your addresses and credentials never reach the repository.
+#
+# Plain KEY=value, one per line, no quotes and no inline comments. Values are taken literally to
+# the end of the line, so a password may contain spaces, #, $ or a backslash without escaping.
+# Lines starting with # are ignored, as are blank ones.
+
+
+# =============================================================================== your relays
+#
+# One block per relay. The word in the middle of the key is a name YOU choose - letters and
+# digits - and it is what you type on the command line:
+#
+#   ./gpb relay deploy sg          build, upload and install on the relay named sg
+#   ./gpb relay logs sg            follow its log
+#   ./gpb relay list               show every relay this file declares
+#
+# Only HOST is required. Every other field has the default shown in brackets.
+#
+#   RELAY_<NAME>_HOST       address or DNS name of the VPS                  (required)
+#   RELAY_<NAME>_USER       SSH user                                        [root]
+#   RELAY_<NAME>_PORT       SSH port - NOT the relay's UDP port             [22]
+#   RELAY_<NAME>_KEY        private key file, ~ allowed                     [ssh decides]
+#   RELAY_<NAME>_PASSWORD   password, if the host refuses key auth          [ssh asks you]
+#   RELAY_<NAME>_LISTEN     UDP port relayd listens on, for players         [51820]
+#
+# Give either KEY or PASSWORD, not both - if both are set the key is tried first and the
+# password is the fallback, which is what ssh does anyway.
+
+RELAY_SG_HOST=203.0.113.10
+RELAY_SG_USER=root
+RELAY_SG_PORT=22
+RELAY_SG_KEY=~/.ssh/id_ed25519
+RELAY_SG_PASSWORD=
+RELAY_SG_LISTEN=51820
+
+# A second relay needs nothing but a name and a host. Uncomment and edit:
+#
+# RELAY_HK_HOST=198.51.100.20
+# RELAY_HK_KEY=~/.ssh/id_ed25519
+
+
+# Relay used when a command needs one and you did not name it, as in `./gpb relay deploy`.
+RELAY_DEFAULT=sg
+
+
+# =============================================================================== notes
+#
+# WHAT THIS FILE IS NOT
+#
+# Everything above is about reaching the VPS to deploy and operate it. It is read on your
+# machine and nowhere else. The address a player's client sends packets to is a separate thing,
+# declared in the files that ship to players:
+#
+#   the relay endpoint, <ip>:<LISTEN>  ->  profiles/<profile>.json, an entry in "relays"
+#   the PSK and the relay to prefer    ->  client/config.json ("psk", "defaultRelayId")
+#
+# `./gpb relay deploy` prints both, ready to paste, when it finishes.
+#
+#
+# USING ~/.ssh/config INSTEAD
+#
+# A name with no RELAY_<NAME>_HOST here is handed to ssh unchanged, so an alias from your own
+# ~/.ssh/config, or a plain user@host, still works:
+#
+#   ./gpb relay deploy myalias
+#   ./gpb relay deploy root@203.0.113.10
+#
+# Declaring the relay here is the simpler path; the alias is there if you already have one.
+#
+#
+# BEFORE YOU FILL IN A PASSWORD
+#
+#   - It sits in plain text in a file. Anything that can read your files can read it: backup
+#     software, a sync client, another program running as you. A key is better in every way -
+#     it is never transmitted, it can carry a passphrase, and it is revoked per host by deleting
+#     one line on the server. `./gpb relay setup` sets one up in about two minutes, and the last
+#     password you type is the one that installs it.
+#
+#   - On Linux and macOS, restrict the file once you have:  chmod 600 gpb.conf
+#
+#   - Gitignored only protects you from git. It does not protect you from zipping the folder and
+#     sending it to somebody.
+#
+# OpenSSH deliberately refuses to read a password from a flag, a file or an environment
+# variable. What it does support is SSH_ASKPASS: it runs a helper program and reads the password
+# from its output. That is what these scripts do with the value - write a small helper, hand it
+# the password through the environment, and delete it afterwards, whatever happens.
+#
+# RELAY_PASSWORD (with no name in it) still works as a password for every relay that does not
+# set its own. It is left in for older gpb.conf files; prefer the per-relay form.

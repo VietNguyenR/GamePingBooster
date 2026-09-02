@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "generatedUtc": "2026-01-01T00:00:00Z",
+  "note": "Example profile. It shows the shape and is enough to start the client, but the ranges below are only illustrative - generate a real one for your region with tools/profile-builder/Build-PubgProfile.ps1 after capturing a few sessions. Relay endpoints use RFC 5737 documentation addresses; replace them with your own.",
+  "games": [
+    {
+      "id": "pubg",
+      "name": "PUBG: BATTLEGROUNDS",
+      "processNames": [
+        "TslGame.exe",
+        "TslGame_BE.exe"
+      ],
+      "regions": [
+        {
+          "id": "asia-sg",
+          "name": "Southeast Asia (Singapore)",
+          "source": "azure:southeastasia",
+          "note": "Illustrative only. Two published Azure southeastasia blocks, not a curated list.",
+          "cidrs": [
+            "20.24.48.0/20",
+            "52.139.208.0/20"
+          ]
+        },
+        {
+          "id": "asia-jp",
+          "name": "Japan (Tokyo)",
+          "source": "unverified",
+          "note": "Empty. Only fill this in after capturing matches while connected to the Japan region.",
+          "cidrs": []
+        },
+        {
+          "id": "asia-kr",
+          "name": "Korea (Seoul)",
+          "source": "unverified",
+          "note": "Empty. Only fill this in after capturing matches while connected to the Korea region.",
+          "cidrs": []
+        }
+      ]
+    }
+  ],
+  "relays": [
+    {
+      "id": "relay-1",
+      "name": "Your relay",
+      "location": "Singapore",
+      "endpoint": "203.0.113.10:51820"
+    }
+  ]
+}
