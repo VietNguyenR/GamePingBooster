@@ -32,6 +32,8 @@ func main() {
 		pskFile     = flag.String("psk-file", "", "path to the pre-shared key file (takes precedence over GPB_PSK)")
 		idleTimeout = flag.Duration("idle-timeout", 90*time.Second, "drop a session after this long without packets")
 		configureIf = flag.Bool("configure-if", true, "run `ip addr/link` to configure the TUN device")
+		rateKBps    = flag.Int64("rate-limit", 512, "per-session cap in KB/s each way, 0 disables it; a real game session uses about 10")
+		burstKB     = flag.Int64("rate-burst", 0, "burst allowance in KB, 0 means four seconds at the sustained rate")
 		logLevel    = flag.String("log-level", "info", "debug | info | warn | error")
 	)
 	flag.Parse()
@@ -57,8 +59,12 @@ func main() {
 		MTU:         *mtu,
 		PSK:         psk,
 		IdleTimeout: *idleTimeout,
-		ConfigureIf: *configureIf,
-		Log:         log,
+		// Stated in KB on the command line because that is how anyone reasons about it, and
+		// converted here once rather than at every packet.
+		RateBytesPerSec: *rateKBps * 1024,
+		BurstBytes:      *burstKB * 1024,
+		ConfigureIf:     *configureIf,
+		Log:             log,
 	})
 	if err != nil {
 		log.Error("relay failed to start", "err", err)

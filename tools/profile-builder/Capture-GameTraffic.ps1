@@ -302,6 +302,7 @@ function Invoke-CaptureSession {
 
     $proc = Start-Process -FilePath $dumpcap -PassThru -NoNewWindow -ArgumentList @(
         '-i', $InterfaceId,
+        '-q',
         '-f', "`"$bpfFilter`"",
         '-s', $snapLen,
         '-a', "duration:$($DurationMinutes * 60)",

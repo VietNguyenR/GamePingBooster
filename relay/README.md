@@ -89,6 +89,34 @@ logging each one would cost latency on the path whose latency is the entire poin
 | `-idle-timeout` | `90s` | Drop a session after this long without packets and return its IP to the pool |
 | `-configure-if` | `true` | Run `ip addr/link` to configure the TUN device |
 | `-log-level` | `info` | `debug` also logs why a handshake was rejected |
+| `-rate-limit` | `512` | Per-session cap in **KB/s each way**. `0` disables it |
+| `-rate-burst` | `0` | Burst allowance in KB; `0` means four seconds at the sustained rate |
+
+## Rate limiting
+
+Every client ships the same pre-shared key, so anyone who installs the software can use the relay
+as a free VPN - and that traffic leaves under this VPS's address, which is what gets a server
+terminated. Per-client credentials are the real answer; this is the cheap thing that caps the
+damage until they exist.
+
+The numbers come from measurement, not caution. A PUBG session on real hardware ran 73,252 packets
+in 1,187 seconds: **62 packets and about 10 KB per second**. The default of 512 KB/s is fifty
+times that, with a four-second burst on top, so a game never comes near it. If a player ever does
+hit this limit, the setting is wrong - not the player.
+
+Three properties matter more than the numbers:
+
+- **It drops, it never queues.** Queuing would add latency to game packets, which is the one thing
+  this project exists to avoid. A dropped packet is what a congested network does anyway.
+- **It is checked after authentication**, so a forged or spoofed packet cannot spend a real
+  session's allowance, and after the session is touched, so a limited session is not then timed
+  out for traffic it was never allowed to send.
+- **It is loud.** The first time a session is limited it says so in the log, once, and the count
+  appears in the 30-second stats line as `rate_limited`. A limiter that silently eats packets is
+  indistinguishable from a bad network.
+
+What it does *not* do is bound the total: 253 sessions at 512 KB/s is more than any VPS uplink.
+It caps one abuser, not all of them. Only per-client credentials fix that.
 
 ## Load testing with gpb-soak
 

@@ -28,6 +28,25 @@
 .PARAMETER MaxPrefixWidth
     Widest prefix that may be accepted. Default 20 (/20 = 4096 addresses).
 
+    Both this and MaxTotalAddresses were set from measurement rather than caution. Azure publishes
+    southeastasia in /16s and /17s, so the cap decides how much one sighting is worth: at /21 a
+    match landed on an uncovered server about twice in ten, at /20 the same set of observations
+    covers roughly twice the ground. Ten matches at /20 missed twice, which is the number to beat
+    by capturing more, not by widening further.
+
+    Going wider than /20 is where the cost starts to be real - /19 pulls in 143,000 addresses and
+    /18 over 225,000, which is most of Azure southeastasia. Narrow instead (21, 22) if the profile
+    ever needs to fit a smaller ceiling; that costs coverage per sighting, never correctness.
+
+.PARAMETER MaxTotalAddresses
+    Ceiling for the whole profile. Default 131,072.
+
+    The original 65,536 was picked before any data existed and turned out to be arbitrary: routes
+    only exist while the game process is running, so the practical difference between 65k and 131k
+    addresses of Azure southeastasia is some non-game traffic taking a detour during a match. What
+    the ceiling really guards against is routing a whole cloud region by accident, and 131,072
+    still does that.
+
 .PARAMETER DryRun
     Show what would change without touching the profile.
 
@@ -44,6 +63,7 @@ param(
     [string]$ProfilePath,
     [string]$GameId = 'pubg',
     [int]$MaxPrefixWidth = 20,
+    [int]$MaxTotalAddresses = 131072,
     [switch]$DryRun,
     [string[]]$AwsRegions = @('ap-southeast-1', 'ap-northeast-1', 'ap-northeast-2'),
     [string[]]$AzureRegions = @('southeastasia', 'japaneast', 'koreacentral')
@@ -99,7 +119,8 @@ function Format-Json {
             $null = $sb.AppendLine(('  ' * [Math]::Max($depth, 0)) + $line)
             if ($line -match '[\{\[]$') { $depth++ }
         }
-        $out = $sb.ToString() -replace '\[\s*?
+        $out = $sb.ToString() -replace '\[\s*
+?
 \s*\]', '[]'
         $null = ConvertFrom-Json -InputObject $out    # sanity check before we hand it back
         return $out
@@ -161,7 +182,29 @@ function Merge-AdjacentPrefixes {
         }
         $current = @($out | Sort-Object -Unique)
     }
-    return $current
+
+    # Drop anything already covered by a wider prefix in the same set. The sibling merge above
+    # cannot do this: a /24 sitting inside a /20 is nobody's sibling, so it survived every pass
+    # and then got counted a second time. That inflated the validator's total - it saw 66,304
+    # addresses where the union was really 61,440, and failed a profile that was actually within
+    # the limit - and it installed 32 routes into the adapter where 13 cover the same ground.
+    $final = New-Object System.Collections.ArrayList
+    foreach ($c in $current) {
+        $cBits = [int]$c.Split('/')[1]
+        $cNet = ConvertTo-UInt32Address $c.Split('/')[0]
+        $covered = $false
+        foreach ($other in $current) {
+            if ($other -eq $c) { continue }
+            $oBits = [int]$other.Split('/')[1]
+            if ($oBits -ge $cBits) { continue }   # only a strictly wider prefix can contain this one
+            $oMask = [uint32]::MaxValue -shl (32 - $oBits)
+            $oNet = ConvertTo-UInt32Address $other.Split('/')[0]
+            if (($cNet -band $oMask) -eq ($oNet -band $oMask)) { $covered = $true; break }
+        }
+        if (-not $covered) { $null = $final.Add($c) }
+    }
+
+    return @($final | Sort-Object -Unique)
 }
 
 # ------------------------------------------------------------- range sources
@@ -294,7 +337,17 @@ foreach ($ip in $observed) {
     }
 
     $regionId = $regionMap[$cloudRegion]
-    $fallback = (ConvertFrom-UInt32Address ($value -band 0xFFFFFF00)) + '/24'
+    # When the published prefix is wider than we allow, keep the /MaxPrefixWidth BLOCK that
+    # contains this address. The obvious alternative - collapse to the observed /24 - is what this
+    # used to do, and it threw away 99.6% of a /16: Azure publishes southeastasia as /16s and
+    # /17s, so every single /24 needed its own separate sighting and the profile could never
+    # saturate no matter how long anyone played. Clamping keeps the cap meaningful and bounded
+    # while letting one observation speak for the block it landed in.
+    # Decimal with an L suffix, not 0xFFFFFFFF: PowerShell 5.1 parses that hex literal as int32
+    # BEFORE any cast, so it arrives as -1 and every mask built from it comes out negative.
+    $hostBits = 32 - $MaxPrefixWidth
+    $capMask = [uint32](4294967295L -band (-bnot ((1L -shl $hostBits) - 1L)))
+    $fallback = (ConvertFrom-UInt32Address ([uint32]($value -band $capMask))) + "/$MaxPrefixWidth"
     if ($bestBits -lt $MaxPrefixWidth) {
         $chosen = $fallback
         Write-Host ("    {0,-18} {1,-22} published as {2}, using {3}" -f $ip, $source, $best, $chosen)
@@ -344,7 +397,7 @@ foreach ($regionId in ($byRegion.Keys | Sort-Object)) {
     $region.source = (($sourcesByRegion[$regionId] | Sort-Object -Unique) -join ', ')
     $region.note = "Auto-generated by Build-PubgProfile.ps1 on $((Get-Date).ToString('yyyy-MM-dd')) " +
                    "from $($observed.Count) observed addresses. Cloud providers publish these inside much " +
-                   "wider blocks, so anything wider than /$MaxPrefixWidth is narrowed to the observed /24. " +
+                   "wider blocks, so anything wider than /$MaxPrefixWidth is clamped to the /$MaxPrefixWidth block around the observed address. " +
                    "Keep capturing until several sessions in a row add nothing new."
 
     $addedText = ''
@@ -382,9 +435,18 @@ Write-Host "    Written (previous version kept as $(Split-Path $ProfilePath -Lea
 
 Write-Host ""
 Write-Host "==> Validating" -ForegroundColor Cyan
-& (Join-Path $PSScriptRoot 'Test-Profile.ps1') -Path $ProfilePath -MaxPrefixWidth $MaxPrefixWidth
+& (Join-Path $PSScriptRoot 'Test-Profile.ps1') -Path $ProfilePath -MaxPrefixWidth $MaxPrefixWidth -MaxTotalAddresses $MaxTotalAddresses
 if ($LASTEXITCODE -ne 0) {
+    # Put the good profile back rather than telling the operator to do it.
+    #
+    # Leaving the rejected file in place was actively harmful in three ways: the service loads
+    # this path and does not run the validator, so an over-limit profile would be used for real;
+    # the next build read the rejected file as its baseline, which made "+N new" and "nothing new"
+    # report nonsense; and a second failed run overwrote the .bak with the first failure, so the
+    # last good profile was destroyed by the very mechanism meant to preserve it.
+    Copy-Item "$ProfilePath.bak" $ProfilePath -Force
     Write-Host ""
-    Write-Warning "Validation failed. The previous profile is at $ProfilePath.bak - restore it if needed."
+    Write-Warning "Validation failed - the previous profile has been restored, nothing was changed."
+    Write-Host "    Narrow the blocks and try again, e.g. -MaxPrefixWidth 21, or raise -MaxTotalAddresses deliberately."
     exit 1
 }

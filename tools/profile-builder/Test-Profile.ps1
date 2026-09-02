@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Validate a profile file before shipping it to users.
 
@@ -18,7 +18,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Path,
     [int]$MaxPrefixWidth = 20,
-    [int]$MaxTotalAddresses = 65536
+    [int]$MaxTotalAddresses = 131072
 )
 
 $ErrorActionPreference = 'Stop'

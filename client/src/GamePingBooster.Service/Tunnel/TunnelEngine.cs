@@ -112,7 +112,20 @@ internal sealed class TunnelEngine : IAsyncDisposable
         {
             SetState(TunnelState.Connecting, "Preparing...");
 
-            if (_profile is null) await LoadProfileAsync(token).ConfigureAwait(false);
+            // Reload every time the user connects. This used to be "load it once and keep it",
+            // which meant rebuilding the profile changed nothing until the service was restarted,
+            // and nothing said so: the log still reported a route count, just the old one. The
+            // only clue was that the number disagreed with the file on disk.
+            try
+            {
+                await LoadProfileAsync(token).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (_profile is not null)
+            {
+                // A profile we cannot re-read is not a reason to refuse a connection when we
+                // already have a good copy in hand.
+                _log($"Could not reload the profile ({ex.Message}) - continuing with the one already loaded.");
+            }
 
             _game = FindGame(gameId ?? _config.DefaultGameId);
             var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
@@ -268,6 +281,8 @@ internal sealed class TunnelEngine : IAsyncDisposable
                 var tunnel = _tunnel;
                 if (tunnel is null) continue;
 
+                LogThroughput(tunnel);
+
                 var silence = tunnel.SinceLastPong;
                 if (silence < SilenceBeforeDead) continue;
 
@@ -303,6 +318,36 @@ internal sealed class TunnelEngine : IAsyncDisposable
     /// causing a pointless switch: when the network returns, the original relay answers first and
     /// we resume on it, usually on the same inner IP.
     /// </summary>
+    private long _lastThroughputTick;
+    private long _lastLoggedSent;
+
+    /// <summary>
+    /// Writes one throughput line every 30 seconds while traffic is moving, on the same cadence
+    /// as the relay's own stats line so the two logs can be read side by side.
+    ///
+    /// Without this there is no way to answer the question that matters most after a session -
+    /// did the game's packets actually go through the relay? - because the counters live only in
+    /// memory and die with the process. A player reporting "it did not feel any different" left
+    /// nothing behind to check.
+    /// </summary>
+    private void LogThroughput(TunnelClient tunnel)
+    {
+        var now = Environment.TickCount64;
+        if (now - _lastThroughputTick < 30_000) return;
+        _lastThroughputTick = now;
+
+        var sent = tunnel.PacketsSent;
+        if (sent == _lastLoggedSent) return;   // nothing moved; stay quiet
+
+        var rate = 0L;
+        if (_lastLoggedSent > 0) rate = (sent - _lastLoggedSent) / 30;
+        _lastLoggedSent = sent;
+
+        _log($"Tunnel carried {sent} packets up, {tunnel.PacketsReceived} down " +
+             $"({rate}/s up over the last 30s), {_routes?.ActiveGameRouteCount ?? 0} game routes installed, " +
+             $"rtt {tunnel.LastRttMs:F0} ms");
+    }
+
     private async Task ReconnectAsync(CancellationToken ct)
     {
         var adapter = _adapter;

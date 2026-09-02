@@ -27,7 +27,14 @@ type Config struct {
 	PSK         []byte       // pre-shared key used to sign handshakes
 	IdleTimeout time.Duration
 	ConfigureIf bool // true = the relay runs `ip addr/link` for the TUN device itself
-	Log         *slog.Logger
+
+	// Per-session, per-direction cap. 0 disables it. Sized so a game never reaches it: a real
+	// PUBG session runs at roughly 10 KB/s, so the default is a hundred times what the thing
+	// this relay exists for actually needs.
+	RateBytesPerSec int64
+	BurstBytes      int64
+
+	Log *slog.Logger
 }
 
 type session struct {
@@ -37,6 +44,9 @@ type session struct {
 	addr     atomic.Pointer[netip.AddrPort] // current client UDP address (changes on roaming)
 	lastSeen atomic.Int64                   // unix nanoseconds
 	resumed  bool                           // true if this session reclaimed a previously held address
+
+	up   *bucket // client -> internet, touched only by loopUDP
+	down *bucket // internet -> client, touched only by loopTUN
 }
 
 func (s *session) touch() { s.lastSeen.Store(time.Now().UnixNano()) }
@@ -66,6 +76,7 @@ type Server struct {
 		rxPackets, txPackets atomic.Uint64
 		rxBytes, txBytes     atomic.Uint64
 		dropped              atomic.Uint64
+		limited              atomic.Uint64
 	}
 }
 
@@ -82,6 +93,12 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.IdleTimeout <= 0 {
 		cfg.IdleTimeout = 90 * time.Second
+	}
+	if cfg.RateBytesPerSec > 0 && cfg.BurstBytes <= 0 {
+		// Four seconds at the sustained rate. The first draft used eight, and a test written
+		// against it let 9.2 MB of a 10 MB flood straight through while still reporting success -
+		// the burst was doing all the work and the sustained rate never got a chance to bind.
+		cfg.BurstBytes = cfg.RateBytesPerSec * 4
 	}
 
 	s := &Server{
@@ -287,6 +304,18 @@ func (s *Server) handleData(pkt []byte, from netip.AddrPort) {
 		s.log.Info("client roamed", "inner_ip", sess.innerIP.String(), "new_addr", from.String())
 	}
 
+	// Checked after authentication, so a forged or spoofed packet cannot spend a real session's
+	// allowance, and after touch(), so a limited session is still considered alive rather than
+	// being timed out for traffic it was not allowed to send.
+	if !sess.up.allow(len(inner), s.cfg.RateBytesPerSec, s.cfg.BurstBytes) {
+		if sess.up.shouldWarn() {
+			s.log.Warn("session hit the uplink rate limit - packets are being dropped",
+				"inner_ip", sess.innerIP.String(), "limit_bytes_per_sec", s.cfg.RateBytesPerSec)
+		}
+		s.stats.limited.Add(1)
+		return
+	}
+
 	if _, err := s.dev.Write(inner); err != nil {
 		s.log.Warn("TUN write failed", "err", err)
 		s.stats.dropped.Add(1)
@@ -370,6 +399,14 @@ func (s *Server) loopTUN() error {
 		if addr == nil {
 			continue
 		}
+		if !sess.down.allow(n, s.cfg.RateBytesPerSec, s.cfg.BurstBytes) {
+			if sess.down.shouldWarn() {
+				s.log.Warn("session hit the downlink rate limit - packets are being dropped",
+					"inner_ip", sess.innerIP.String(), "limit_bytes_per_sec", s.cfg.RateBytesPerSec)
+			}
+			s.stats.limited.Add(1)
+			continue
+		}
 		out := protocol.EncodeData(sendBuf, sess.id, readBuf[:n])
 		if _, err := s.conn.WriteToUDPAddrPort(out, *addr); err != nil {
 			s.log.Debug("UDP send failed", "err", err)
@@ -409,7 +446,8 @@ func (s *Server) loopJanitor(done <-chan struct{}) {
 				"tx_pkt", s.stats.txPackets.Load(),
 				"rx_bytes", s.stats.rxBytes.Load(),
 				"tx_bytes", s.stats.txBytes.Load(),
-				"dropped", s.stats.dropped.Load())
+				"dropped", s.stats.dropped.Load(),
+				"rate_limited", s.stats.limited.Load())
 		}
 	}
 }
@@ -447,7 +485,11 @@ func (s *Server) allocSession(from netip.AddrPort, clientID protocol.ClientID) (
 		return nil, false
 	}
 
-	sess := &session{id: sid, clientID: clientID, innerIP: ip, resumed: resumed}
+	sess := &session{
+		id: sid, clientID: clientID, innerIP: ip, resumed: resumed,
+		up:   newBucket(s.cfg.BurstBytes),
+		down: newBucket(s.cfg.BurstBytes),
+	}
 	f := from
 	sess.addr.Store(&f)
 	sess.touch()

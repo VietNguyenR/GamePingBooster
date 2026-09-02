@@ -108,10 +108,10 @@ Section "Windows event log - service crashes and errors"
 # process died even when nothing in the service got the chance to write a line.
 $since = (Get-Date).AddDays(-$EventLogDays)
 Emit (Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $since; ProviderName = 'Service Control Manager' } -ErrorAction SilentlyContinue |
-    Where-Object { $_.Message -like "*GamePingBooster*" } |
+    Where-Object { $_.Message -like "*GamePingBooster*" -or $_.Message -like "*Game Ping Booster*" } |
     Select-Object TimeCreated, Id, LevelDisplayName, Message)
 Emit (Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $since } -ErrorAction SilentlyContinue |
-    Where-Object { $_.Message -like "*gpb-service*" -or $_.Message -like "*GamePingBooster*" } |
+    Where-Object { $_.Message -like "*gpb-service*" -or $_.Message -like "*GamePingBooster*" -or $_.Message -like "*Game Ping Booster*" } |
     Select-Object TimeCreated, Id, ProviderName, LevelDisplayName, Message)
 
 Section "Service log files present"
