@@ -308,7 +308,13 @@ switch ($Verb.ToLowerInvariant()) {
             $fmt = & gofmt -l .
             if ($fmt) { throw "gofmt would change: $fmt" }
             & go vet ./...; if ($LASTEXITCODE -ne 0) { throw "go vet failed" }
-            & go test ./...; if ($LASTEXITCODE -ne 0) { throw "go tests failed" }
+            # Go's test cache does not notice that testdata/protocol-vectors.json changed: it is
+            # outside the package directory, so it is not one of the inputs the cache is keyed on.
+            # Measured, not assumed - a tampered vector file was reported as a cached pass while the
+            # same run with -count=1 failed. Since the whole point of that file is to catch drift
+            # between the Go and C# implementations, a cached pass is the exact failure it exists to
+            # prevent. The full suite takes about six seconds cold, so always re-running is cheap.
+            & go test -count=1 ./...; if ($LASTEXITCODE -ne 0) { throw "go tests failed" }
         } finally { Pop-Location }
 
         Say "C#: build and wire-format check"
@@ -370,7 +376,7 @@ switch ($Verb.ToLowerInvariant()) {
             }
             'test' {
                 Push-Location $relayDir
-                try { & go test ./... } finally { Pop-Location }
+                try { & go test -count=1 ./... } finally { Pop-Location }
             }
             default {
                 Write-Host "  relay build            cross-compile relayd for Linux"

@@ -1,4 +1,4 @@
-using System.Buffers.Binary;
+﻿using System.Buffers.Binary;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -32,6 +32,14 @@ internal static class Program
 
     private static int Main(string[] args)
     {
+        // Go can regenerate its own P-256 signature but obviously not this one, so the committed
+        // .NET signature is produced here and pasted into the vector file by hand. It only has to
+        // be redone when the fixed key or the message changes.
+        if (args.Length > 0 && args[0] == "--emit-p256-signature")
+        {
+            return EmitP256Signature(args.Length > 1 ? args[1] : null);
+        }
+
         string path;
         try
         {
@@ -66,6 +74,7 @@ internal static class Program
         CheckPing(root.GetProperty("ping"));
         CheckPong(root.GetProperty("pong"));
         CheckDisconnect(root.GetProperty("disconnect"));
+        CheckCryptoP256(root.GetProperty("cryptoP256"));
 
         Console.WriteLine();
         if (_failures == 0)
@@ -220,6 +229,80 @@ internal static class Program
     }
 
     // ----------------------------------------------------------------- helpers
+
+    /// <summary>
+    /// P-256 agreement with the Go side, for the v3 handshake.
+    ///
+    /// The check that matters is verifying the signature GO made. This program verifying its own
+    /// output would pass even if the two standard libraries disagreed completely - which is the
+    /// whole reason a cross-language vector file exists.
+    /// </summary>
+    private static void CheckCryptoP256(JsonElement v)
+    {
+        var d = Hex(v.GetProperty("privateKeyHex").GetString()!);
+        var expectedPub = v.GetProperty("publicKeyHex").GetString()!;
+        var message = Hex(v.GetProperty("messageHex").GetString()!);
+        var goSig = Hex(v.GetProperty("signatureFromGoHex").GetString()!);
+        var dotnetSig = v.GetProperty("signatureFromDotnetHex").GetString()!;
+
+        using var priv = GpbCrypto.ImportPrivateKey(d);
+
+        Check("P-256 public key derived from the committed scalar",
+            ToHex(GpbCrypto.ExportPublicKey(priv)) == expectedPub,
+            $"got {ToHex(GpbCrypto.ExportPublicKey(priv))}, want {expectedPub}");
+
+        using var pub = GpbCrypto.ImportPublicKey(Hex(expectedPub));
+
+        Check("P-256 verify a signature made by Go",
+            GpbCrypto.Verify(pub, message, goSig),
+            "the two standard libraries disagree - v3 handshakes would be rejected in one direction");
+
+        // Signing is randomised, so this cannot be compared against a fixed value. What it does
+        // prove is that this side produces something the same key verifies, at the right length.
+        var fresh = GpbCrypto.Sign(priv, message);
+        Check("P-256 signature length", fresh.Length == GpbCrypto.SignatureLen,
+            $"got {fresh.Length}, want {GpbCrypto.SignatureLen} - r and s must each be padded to 32 bytes");
+        Check("P-256 round trip", GpbCrypto.Verify(pub, message, fresh), "signed here, rejected here");
+
+        Check("P-256 rejects a tampered message",
+            !GpbCrypto.Verify(pub, Hex("00"), goSig), "verification is not actually checking anything");
+
+        if (dotnetSig.Length == 0)
+        {
+            Fail("P-256 committed .NET signature",
+                "empty - regenerate with: dotnet run --project client/src/GamePingBooster.ProtocolCheck " +
+                "-- --emit-p256-signature");
+        }
+        else
+        {
+            Check("P-256 verify the committed .NET signature",
+                GpbCrypto.Verify(pub, message, Hex(dotnetSig)),
+                "the committed signature was made with a different key or message");
+        }
+    }
+
+    /// <summary>Prints a fresh r||s signature over the committed message, for pasting into the vectors.</summary>
+    private static int EmitP256Signature(string? vectorPath)
+    {
+        string path;
+        try
+        {
+            path = vectorPath ?? FindVectorFile();
+        }
+        catch (FileNotFoundException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return 2;
+        }
+
+        using var doc = JsonDocument.Parse(File.ReadAllBytes(path));
+        var v = doc.RootElement.GetProperty("cryptoP256");
+        using var priv = GpbCrypto.ImportPrivateKey(Hex(v.GetProperty("privateKeyHex").GetString()!));
+        var message = Hex(v.GetProperty("messageHex").GetString()!);
+
+        Console.WriteLine(ToHex(GpbCrypto.Sign(priv, message)));
+        return 0;
+    }
 
     private static void Check(string name, bool ok, string detail)
     {

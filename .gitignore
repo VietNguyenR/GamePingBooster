@@ -49,3 +49,4 @@ profiles/pubg-vn.json
 # Local machine settings for ./gpb and gpb.ps1 (relay host aliases and the like)
 gpb.conf
 profiles/pubg-vn.json
+docs/COMMERCIAL.md

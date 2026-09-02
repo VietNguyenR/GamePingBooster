@@ -37,6 +37,17 @@ const (
 	vectorInnerHex  = "450000200000000040110000" + "0a4d0005" + "01010101" + "1f901f9000080000"
 	vectorClientHex = "0102030405060708"
 	vectorSessHex   = "1122334455667788"
+
+	// A fixed P-256 key for the cross-language checks. Generated once and frozen: the committed
+	// signatures were made with it, so changing it invalidates every one of them.
+	vectorP256PrivHex = "58ee53ec7ce1815650f98f5aa2275a2d8aa7839c5ceb40f2253d39b0037510a3"
+	vectorP256PubHex  = "0430906cdb359b22917fd8ea326d18d606f61f001430addf2fd62afa02d3d1e2" +
+		"83c3c9dba8f9d5eb11ae0fffe2cc9ad0e90a90f7a220b7288513342abd93d90604"
+
+	// 64 bytes of 0x00..0x3f. Arbitrary, but it exercises a full block and is trivially
+	// reproducible by hand on the other side.
+	vectorP256MsgHex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" +
+		"202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
 )
 
 type vectorFile struct {
@@ -87,6 +98,20 @@ type vectorFile struct {
 		SessionIDHex string `json:"sessionIdHex"`
 		PacketHex    string `json:"packetHex"`
 	} `json:"disconnect"`
+
+	// P-256 agreement between the two standard libraries, for the v3 handshake. Each side
+	// verifies a signature the OTHER one made: that is the only thing that proves they agree,
+	// because either side verifying its own output proves nothing.
+	//
+	// ECDSA signing is randomised, so these are not reproducible - they are frozen samples.
+	CryptoP256 struct {
+		Note                   string `json:"note"`
+		PrivateKeyHex          string `json:"privateKeyHex"`
+		PublicKeyHex           string `json:"publicKeyHex"`
+		MessageHex             string `json:"messageHex"`
+		SignatureFromGoHex     string `json:"signatureFromGoHex"`
+		SignatureFromDotnetHex string `json:"signatureFromDotnetHex"`
+	} `json:"cryptoP256"`
 }
 
 func mustHex(t *testing.T, s string) []byte {
@@ -154,6 +179,39 @@ func generateVectors(t *testing.T) {
 
 	v.Disconnect.SessionIDHex = vectorSessHex
 	v.Disconnect.PacketHex = hex.EncodeToString(BuildDisconnect(sid))
+
+	// ------------------------------------------------------------ P-256
+	//
+	// Go can regenerate its own signature but obviously not .NET's, so the existing one is
+	// carried across from the committed file. Losing it would leave the Go side verifying only
+	// its own output, which proves nothing and would still pass - the exact shape of a test
+	// that cannot fail.
+	v.CryptoP256.Note = "Each side verifies the signature the other made. Regenerate .NET's with: " +
+		"dotnet run --project client/src/GamePingBooster.ProtocolCheck -- --emit-p256-signature"
+	v.CryptoP256.PrivateKeyHex = vectorP256PrivHex
+	v.CryptoP256.PublicKeyHex = vectorP256PubHex
+	v.CryptoP256.MessageHex = vectorP256MsgHex
+
+	p256Key, err := ParsePrivateKey(mustHex(t, vectorP256PrivHex))
+	if err != nil {
+		t.Fatalf("parse the fixed P-256 key: %v", err)
+	}
+	goSig, err := Sign(p256Key, mustHex(t, vectorP256MsgHex))
+	if err != nil {
+		t.Fatalf("sign with the fixed P-256 key: %v", err)
+	}
+	v.CryptoP256.SignatureFromGoHex = hex.EncodeToString(goSig)
+
+	if prev, err := os.ReadFile(vectorPath); err == nil {
+		var old vectorFile
+		if json.Unmarshal(prev, &old) == nil {
+			v.CryptoP256.SignatureFromDotnetHex = old.CryptoP256.SignatureFromDotnetHex
+		}
+	}
+	if v.CryptoP256.SignatureFromDotnetHex == "" {
+		t.Log("no .NET signature carried over - produce one and paste it in, or the " +
+			"cross-language half of this check is not running")
+	}
 
 	out, err := json.MarshalIndent(&v, "", "  ")
 	if err != nil {
@@ -276,5 +334,36 @@ func TestProtocolVectors(t *testing.T) {
 	// -------------------------------------------------------------- Disconnect
 	if got := BuildDisconnect(sid); !bytes.Equal(got, mustHex(t, v.Disconnect.PacketHex)) {
 		t.Errorf("Disconnect changed:\n got %x\nwant %s", got, v.Disconnect.PacketHex)
+	}
+
+	// ------------------------------------------------------------------ P-256
+	//
+	// The half that matters is verifying .NET's signature. Go verifying its own output here
+	// would pass even if the two libraries disagreed completely.
+	p256Msg := mustHex(t, v.CryptoP256.MessageHex)
+
+	p256Priv, err := ParsePrivateKey(mustHex(t, v.CryptoP256.PrivateKeyHex))
+	if err != nil {
+		t.Fatalf("the committed P-256 private key does not parse: %v", err)
+	}
+	if got := hex.EncodeToString(MarshalPublicKey(&p256Priv.PublicKey)); got != v.CryptoP256.PublicKeyHex {
+		t.Errorf("public key derived from the committed scalar\n got %s\nwant %s",
+			got, v.CryptoP256.PublicKeyHex)
+	}
+
+	p256Pub, err := ParsePublicKey(mustHex(t, v.CryptoP256.PublicKeyHex))
+	if err != nil {
+		t.Fatalf("the committed P-256 public key does not parse: %v", err)
+	}
+
+	if !Verify(p256Pub, p256Msg, mustHex(t, v.CryptoP256.SignatureFromGoHex)) {
+		t.Error("Go cannot verify its own committed signature - the format changed")
+	}
+
+	if v.CryptoP256.SignatureFromDotnetHex == "" {
+		t.Error("no .NET signature in the vectors: the cross-language check is not running, " +
+			"which is worse than it failing, because it looks like it passed")
+	} else if !Verify(p256Pub, p256Msg, mustHex(t, v.CryptoP256.SignatureFromDotnetHex)) {
+		t.Error("Go REJECTED a signature made by .NET - the two libraries disagree")
 	}
 }

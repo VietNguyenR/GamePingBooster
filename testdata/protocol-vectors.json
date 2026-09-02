@@ -5,8 +5,8 @@
   "handshakeReq": {
     "clientIdHex": "0102030405060708",
     "unixTimeSeconds": 1767225600,
-    "nonceHex": "3cbe73aabd5c3ddb",
-    "packetHex": "213cbe73aabd5c3ddb000000006955b9000102030405060708fffd6f5a81fed10387e7eab6aebf4c91799ec54f48d5df5833813cafd383466c"
+    "nonceHex": "9f57fe09ec8a9533",
+    "packetHex": "219f57fe09ec8a9533000000006955b90001020304050607084caf8e3dc6ec2cc43648bb46d6ef95ba97cb5e13df584796976c1db5af438862"
   },
   "handshakeResp": {
     "status": 0,
@@ -38,5 +38,13 @@
   "disconnect": {
     "sessionIdHex": "1122334455667788",
     "packetHex": "261122334455667788"
+  },
+  "cryptoP256": {
+    "note": "Each side verifies the signature the other made. Regenerate .NET's with: dotnet run --project client/src/GamePingBooster.ProtocolCheck -- --emit-p256-signature",
+    "privateKeyHex": "58ee53ec7ce1815650f98f5aa2275a2d8aa7839c5ceb40f2253d39b0037510a3",
+    "publicKeyHex": "0430906cdb359b22917fd8ea326d18d606f61f001430addf2fd62afa02d3d1e283c3c9dba8f9d5eb11ae0fffe2cc9ad0e90a90f7a220b7288513342abd93d90604",
+    "messageHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "signatureFromGoHex": "942b3ac54e661e9b58a7c2487e164da1aa011364ce69274bc89e1a455483e5f4bab480b7966636e9bcedb45613bf5c1815d50484730b0d354d7529eef7754123",
+    "signatureFromDotnetHex": "0fd35aa25589950a5881f2c4e076fa945277b44a01616c46d64ac72522da1d6c5452bc85d11236a7ad527f8395893cd5855b9c0540a5ab05ca48ea4e42e54d32"
   }
 }

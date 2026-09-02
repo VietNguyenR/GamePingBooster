@@ -301,8 +301,14 @@ $unformatted"
     fi
     say "go vet"
     ( cd "$relay" && go vet ./... )
+    # Go's test cache does not notice that testdata/protocol-vectors.json changed: it is
+    # outside the package directory, so it is not one of the inputs the cache is keyed on.
+    # Measured, not assumed - a tampered vector file was reported as a cached pass while the
+    # same run with -count=1 failed. Since the whole point of that file is to catch drift
+    # between the Go and C# implementations, a cached pass is the exact failure it exists to
+    # prevent. The full suite takes about six seconds cold, so always re-running is cheap.
     say "go test"
-    ( cd "$relay" && go test ./... )
+    ( cd "$relay" && go test -count=1 ./... )
 }
 
 relay_list() {
