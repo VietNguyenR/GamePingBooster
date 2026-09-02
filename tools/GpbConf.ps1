@@ -62,7 +62,8 @@ function Get-GpbRelayNames {
     Everything needed to reach one relay, or $null when no name was given and there is no default.
 
 .OUTPUTS
-    Hashtable with Name, Declared, Target, Port, Key, Password, Listen, Endpoint and SshArgs.
+    Hashtable with Name, Declared, Target, Port, Key, Password, SudoPassword, Listen,
+    Endpoint and SshArgs.
     SshArgs is ready to splat at ssh; Endpoint is the address a PLAYER connects to, which is a
     different port from the SSH one and belongs in a profile, not in gpb.conf.
 #>
@@ -83,19 +84,26 @@ function Get-GpbRelay {
     $password = $conf["RELAY_${slug}_PASSWORD"]
     if (-not $password) { $password = $conf['RELAY_PASSWORD'] }
 
+    # sudo on the far end usually wants the same password used to log in - a VPS with password
+    # authentication has one password, not two. The separate field is for the case where they
+    # differ, most often key-based login plus a sudo password.
+    $sudoPassword = $conf["RELAY_${slug}_SUDO_PASSWORD"]
+    if (-not $sudoPassword) { $sudoPassword = $password }
+
     if (-not $hostName) {
         # Not declared here: an ssh alias, or user@host. Let ssh's own configuration answer for
         # the port, the user and the key.
         return @{
-            Name     = $Name
-            Declared = $false
-            Target   = $Name
-            Port     = ''
-            Key      = ''
-            Password = $password
-            Listen   = ''
-            Endpoint = ''
-            SshArgs  = @($Name)
+            Name         = $Name
+            Declared     = $false
+            Target       = $Name
+            Port         = ''
+            Key          = ''
+            Password     = $password
+            SudoPassword = $sudoPassword
+            Listen       = ''
+            Endpoint     = ''
+            SshArgs      = @($Name)
         }
     }
 
@@ -125,15 +133,16 @@ function Get-GpbRelay {
     $sshArgs += $target
 
     return @{
-        Name     = $Name
-        Declared = $true
-        Target   = $target
-        Port     = $port
-        Key      = $key
-        Password = $password
-        Listen   = $listen
-        Endpoint = "${hostName}:${listen}"
-        SshArgs  = $sshArgs
+        Name         = $Name
+        Declared     = $true
+        Target       = $target
+        Port         = $port
+        Key          = $key
+        Password     = $password
+        SudoPassword = $sudoPassword
+        Listen       = $listen
+        Endpoint     = "${hostName}:${listen}"
+        SshArgs      = $sshArgs
     }
 }
 
@@ -195,4 +204,52 @@ function ConvertTo-GpbCmdArgs {
         if ($a -match '[\s"]') { '"' + $a + '"' } else { $a }
     }
     return ($quoted -join ' ')
+}
+
+<#
+.SYNOPSIS
+    Run ssh with one line written to its stdin as raw UTF-8 bytes. Returns ssh's exit code.
+
+.DESCRIPTION
+    Used to hand sudo a password. `$text | & ssh ...` looks like the obvious way to do this and
+    is wrong twice over in PowerShell 5.1, both times silently - measured, not assumed:
+
+      - it appends CRLF. sudo -S strips the newline and keeps the carriage return, so the
+        password it compares is the real one with a stray \r on the end, and authentication
+        fails for a password that is perfectly correct.
+      - it cannot carry a non-ASCII character. Every byte outside ASCII is written as 0x3F, '?',
+        whatever $OutputEncoding and [Console]::OutputEncoding are set to. There is no setting
+        that fixes it.
+
+    Writing to the process's stdin stream directly avoids both: the bytes are exactly the ones
+    asked for, terminated by a single LF.
+
+    stdout and stderr are deliberately NOT redirected, so install.sh's output appears live.
+#>
+function Invoke-GpbSshWithStdin {
+    param(
+        [string[]]$SshArgs,
+        [string]$RemoteCommand,
+        [string]$StdinLine
+    )
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'ssh'
+    # ProcessStartInfo.ArgumentList does not exist in .NET Framework, so the arguments have to be
+    # one quoted string. None of them contains a double quote - the remote command is written
+    # without any, for the cmd path - so quoting whatever holds whitespace is enough.
+    $psi.Arguments = ConvertTo-GpbCmdArgs ($SshArgs + $RemoteCommand)
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardInput = $true
+
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($StdinLine + "`n")
+        $proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+        $proc.StandardInput.BaseStream.Flush()
+    } finally {
+        $proc.StandardInput.Close()
+    }
+    $proc.WaitForExit()
+    return $proc.ExitCode
 }

@@ -92,6 +92,46 @@ if ($PackageOnly) {
 
 # ------------------------------------------------------------------ deploy
 
+<#
+.SYNOPSIS
+    Run install.sh under sudo on a second connection.
+
+.DESCRIPTION
+    Reached only when the tarball is already unpacked on the far end and all that is left is to
+    run install.sh as root. It has to be a second connection because sudo -S takes its password
+    from stdin, and on the first connection stdin was the tarball.
+
+    -p '' suppresses sudo's own prompt, which would otherwise appear in the output as a stray
+    'Password:' with nothing typed after it.
+#>
+function Invoke-RemoteInstall {
+    param($Relay)
+
+    $sshArgv = $Relay.SshArgs
+
+    if (-not $Relay.SudoPassword) {
+        Write-Host "==> sudo needs a password on $($Relay.Name). Type it when it asks." -ForegroundColor Cyan
+        # -t so sudo has a terminal to prompt on. Safe here and not on the first connection: a
+        # pty translates newlines, which would have corrupted the gzip stream.
+        & ssh -t @sshArgv 'cd ~/.gpb-deploy/deploy && sudo ./install.sh'
+        if ($LASTEXITCODE -ne 0) { throw "the install step failed - see the output above" }
+        return
+    }
+
+    Write-Host "==> sudo needs a password on $($Relay.Name); using the one from gpb.conf" -ForegroundColor Cyan
+
+    # Not `$password | & ssh ...`: in PowerShell 5.1 that appends CRLF, which sudo keeps as part
+    # of the password, and it replaces every non-ASCII byte with '?'. Both were measured.
+    # The password never touches disk either way.
+    $code = Invoke-GpbSshWithStdin -SshArgs $sshArgv `
+        -RemoteCommand "cd ~/.gpb-deploy/deploy && sudo -S -p '' ./install.sh" `
+        -StdinLine $Relay.SudoPassword
+
+    if ($code -ne 0) {
+        throw "the install step failed. If sudo rejected the password, set RELAY_<NAME>_SUDO_PASSWORD in gpb.conf."
+    }
+}
+
 foreach ($tool in 'ssh', 'tar') {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
         throw "$tool not found. OpenSSH and tar both ship with Windows 10 and later - see Settings > System > Optional features. Or use -PackageOnly."
@@ -121,14 +161,40 @@ try {
     & tar -czf $payload -C . relayd deploy/setup-nat.sh deploy/install.sh deploy/relayd.service
     if ($LASTEXITCODE -ne 0) { throw "tar failed" }
 
-    # The sed strips CR: these files are edited on Windows, and a shell script with CRLF endings
-    # fails on Linux with an error that names the wrong thing entirely. .gitattributes should keep
-    # them LF now, so this is a second line of defence rather than the thing making it work.
-    $remote = "set -e; mkdir -p /opt/gpb; tar -xzf - -C /opt/gpb; cd /opt/gpb/deploy; sed -i 's/\r`$//' *.sh; chmod +x *.sh; ./install.sh"
+    # What runs on the far end. Duplicated from ./gpb - keep the two in step.
+    #
+    # The staging directory is under ~ rather than /opt, because an unprivileged account cannot
+    # create /opt/gpb - that is the "mkdir: Permission denied" a non-root deploy used to die on.
+    # Nothing is installed from there: install.sh finds its own directory and copies to absolute
+    # paths, so where it is unpacked does not matter.
+    #
+    # Exit 90 means "not root, and sudo wants a password". It cannot be handled on this
+    # connection: stdin is the tarball, and sudo -S reads its password from stdin. Exit 91 means
+    # there is no sudo at all.
+    #
+    # The string is single-quoted and holds no double quotes of its own: it travels through cmd
+    # inside a double-quoted argument, and a quote here would end that argument early. The sed
+    # strips CR, because a shell script with CRLF endings fails on Linux with an error that names
+    # the wrong thing entirely.
+    #
+    # The sudo check is written the long way round, with an empty then-branch, rather than as
+    # `if ! command -v sudo`. A '!' is one delayed-expansion setting away from being eaten
+    # somewhere on the trip through cmd, and losing it would invert the test: every host that HAS
+    # sudo would be told it has none. The long form cannot fail that way.
+    $remote = 'set -e; mkdir -p ~/.gpb-deploy; tar -xzf - -C ~/.gpb-deploy; cd ~/.gpb-deploy/deploy; sed -i ''s/\r$//'' *.sh; chmod +x *.sh; if [ $(id -u) -eq 0 ]; then ./install.sh; exit; fi; if command -v sudo >/dev/null 2>&1; then :; else exit 91; fi; if sudo -n true 2>/dev/null; then sudo -n ./install.sh; exit; fi; exit 90'
 
     Write-Host "==> Deploying to $($relay.Name) at $($relay.Target) (one connection)" -ForegroundColor Cyan
     cmd /c "ssh $sshArgs `"$remote`" < `"$payload`""
-    if ($LASTEXITCODE -ne 0) { throw "deploy failed - see the output above" }
+    $staged = $LASTEXITCODE
+
+    if ($staged -eq 91) {
+        throw "the account on $($relay.Name) is not root and has no sudo. Deploy as root, or install sudo there."
+    }
+    if ($staged -eq 90) {
+        Invoke-RemoteInstall $relay
+    } elseif ($staged -ne 0) {
+        throw "deploy failed - see the output above"
+    }
 } finally {
     Remove-Item $payload -Force -ErrorAction SilentlyContinue
     Disable-GpbAskpass -Helper $askpass

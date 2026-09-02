@@ -25,16 +25,33 @@
 #   RELAY_<NAME>_PORT       SSH port - NOT the relay's UDP port             [22]
 #   RELAY_<NAME>_KEY        private key file, ~ allowed                     [ssh decides]
 #   RELAY_<NAME>_PASSWORD   password, if the host refuses key auth          [ssh asks you]
+#   RELAY_<NAME>_SUDO_PASSWORD   password for sudo, when it differs         [the one above]
 #   RELAY_<NAME>_LISTEN     UDP port relayd listens on, for players         [51820]
 #
 # Give either KEY or PASSWORD, not both - if both are set the key is tried first and the
 # password is the fallback, which is what ssh does anyway.
+#
+# SUDO_PASSWORD is only for accounts that are not root. Installing writes to /usr/local/bin,
+# /etc and systemd, so it needs root, and a deploy works this out on the far end rather than
+# asking you to declare it:
+#
+#   the account IS root                 -> installs directly, one connection
+#   sudo is configured NOPASSWD         -> installs under sudo, still one connection
+#   sudo wants a password               -> a second connection carries it, because the first
+#                                          one's stdin is the tarball and sudo -S reads its
+#                                          password from stdin
+#
+# In that last case the password used is SUDO_PASSWORD, or PASSWORD when SUDO_PASSWORD is empty
+# - a VPS you log into with a password normally has one password, not two. Set SUDO_PASSWORD on
+# its own when you log in with a key but sudo still asks. Leave both empty and sudo prompts you
+# on the terminal, which costs one typed password per deploy and nothing on disk.
 
 RELAY_SG_HOST=203.0.113.10
 RELAY_SG_USER=root
 RELAY_SG_PORT=22
 RELAY_SG_KEY=~/.ssh/id_ed25519
 RELAY_SG_PASSWORD=
+RELAY_SG_SUDO_PASSWORD=
 RELAY_SG_LISTEN=51820
 
 # A second relay needs nothing but a name and a host. Uncomment and edit:

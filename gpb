@@ -96,6 +96,15 @@ relay_password() {
     printf '%s' "$pw"
 }
 
+# Password for sudo on the far end, which is usually the same one used to log in - a VPS with
+# password authentication has one password, not two. A separate field exists for the case where
+# they differ, most often key-based login plus a sudo password.
+relay_sudo_password() {
+    pw=$(relay_field "$1" SUDO_PASSWORD)
+    [ -n "$pw" ] || pw=$(relay_password "$1")
+    printf '%s' "$pw"
+}
+
 # The address a player's client connects to, which is not the SSH address: the port is relayd's
 # UDP port, not the SSH port. Printed at the end of a deploy so it can be pasted into a profile.
 relay_endpoint() {
@@ -116,6 +125,11 @@ relay_names() {
 #
 # The arguments are built with `set --` rather than joined into a string, so a key path with a
 # space in it - normal on Windows - stays one argument.
+#
+# Set ssh_tty_flag to -t around a call that needs a terminal on the far end, which sudo does when
+# it has to prompt for a password itself. Never set it for the call that carries the tarball: a
+# pty translates newlines and would corrupt the gzip stream.
+ssh_tty_flag=
 relay_ssh() {
     name=$1
     shift
@@ -123,7 +137,9 @@ relay_ssh() {
     if [ -z "$host" ]; then
         # Not declared here, so it is an alias from ~/.ssh/config or a plain user@host. Hand it
         # to ssh unchanged and let ssh's own configuration answer for it.
-        ssh "$name" "$@"
+        set -- "$name" "$@"
+        [ -z "$ssh_tty_flag" ] || set -- "$ssh_tty_flag" "$@"
+        ssh "$@"
         return
     fi
     user=$(relay_field "$name" USER)
@@ -137,7 +153,66 @@ relay_ssh() {
     # which on a host with MaxAuthTries 3 and four keys loaded fails before it ever gets there.
     [ -z "$key" ] || set -- -i "$key" -o IdentitiesOnly=yes "$@"
     set -- -p "$port" "$@"
+    [ -z "$ssh_tty_flag" ] || set -- "$ssh_tty_flag" "$@"
     ssh "$@"
+}
+
+# ------------------------------------------------------------------- what runs on the far end
+#
+# Three remote scripts, because a deploy has to cope with three kinds of account.
+#
+# The staging directory is under $HOME rather than /opt, because an unprivileged account cannot
+# create /opt/gpb - that is the "mkdir: Permission denied" a non-root deploy used to die on.
+# Nothing is installed from there: install.sh finds its own directory and copies to absolute
+# paths, so where it is unpacked does not matter.
+#
+# Exit 90 means "not root, and sudo wants a password". It cannot be handled on this connection:
+# stdin is the tarball, and sudo -S reads its password from stdin. The caller opens a second
+# connection, where stdin is free. Exit 91 means there is no sudo at all.
+#
+# These strings are duplicated in relay\deploy.ps1 - keep the two in step. They contain no double
+# quotes on purpose: the PowerShell copy has to travel through cmd, inside a double-quoted
+# argument, and a quote of its own would end that argument early. ~ is used rather than "$HOME"
+# for the same reason - the login shell expands it and it needs no quoting.
+#
+# The sudo check is written the long way round, with an empty then-branch, rather than as
+# `if ! command -v sudo`. A '!' is one delayed-expansion setting away from being eaten somewhere
+# on the trip through cmd, and losing it would invert the test: every host that HAS sudo would
+# be told it has none. The long form cannot fail that way.
+REMOTE_STAGE="set -e
+    mkdir -p ~/.gpb-deploy
+    tar -xzf - -C ~/.gpb-deploy
+    cd ~/.gpb-deploy/deploy
+    sed -i 's/\r\$//' *.sh
+    chmod +x *.sh
+    if [ \$(id -u) -eq 0 ]; then ./install.sh; exit; fi
+    if command -v sudo >/dev/null 2>&1; then :; else exit 91; fi
+    if sudo -n true 2>/dev/null; then sudo -n ./install.sh; exit; fi
+    exit 90"
+
+# -p '' suppresses sudo's own prompt, which would otherwise appear in the output as a stray
+# 'Password:' with nothing typed after it.
+REMOTE_INSTALL_STDIN="cd ~/.gpb-deploy/deploy && sudo -S -p '' ./install.sh"
+REMOTE_INSTALL_TTY="cd ~/.gpb-deploy/deploy && sudo ./install.sh"
+
+# Reached only when the tarball is already unpacked on the far end and all that is left is to run
+# install.sh as root.
+relay_install_with_sudo() {
+    name=$1
+    pw=$(relay_sudo_password "$name")
+    if [ -n "$pw" ]; then
+        say "sudo needs a password on $name; using the one from gpb.conf"
+        printf '%s\n' "$pw" | relay_ssh "$name" "$REMOTE_INSTALL_STDIN" || die \
+            "the install step failed. If sudo rejected the password, set RELAY_<NAME>_SUDO_PASSWORD in gpb.conf."
+    else
+        say "sudo needs a password on $name. Type it when it asks."
+        ssh_tty_flag=-t
+        relay_ssh "$name" "$REMOTE_INSTALL_TTY" || {
+            ssh_tty_flag=
+            die "the install step failed - see the output above"
+        }
+        ssh_tty_flag=
+    fi
 }
 
 # OpenSSH will not take a password from a flag, a file or an environment variable - that is
@@ -296,6 +371,10 @@ Setting up a relay, start to finish.
     ./gpb relay deploy sg          (or just ./gpb relay deploy, for RELAY_DEFAULT)
     ./gpb relay logs sg
 
+   An account that is not root needs sudo for the install step, which the deploy works out on
+   the far end. If sudo wants a password it uses RELAY_<NAME>_SUDO_PASSWORD, or the login
+   password when that is empty, and asks you on the terminal if there is neither.
+
 4. install.sh prints the endpoint and the PSK. They go into two different files, because they
    are two different things:
 
@@ -319,29 +398,38 @@ relay_deploy() {
 
     relay_build
 
-    # Everything goes over ONE ssh connection, as a tar stream on stdin.
+    # The payload goes over ONE ssh connection, as a tar stream on stdin.
     #
     # The obvious version - ssh mkdir, scp the binary, scp the scripts, ssh install - opens four
     # connections, and with password authentication that is four password prompts for one deploy.
     # Key authentication hides the cost, which is why it went unnoticed. Piping a tar means one
     # connection and therefore exactly one prompt, whichever authentication the server uses.
     #
-    # The sed strips CR: these files are edited on Windows, and a shell script with CRLF endings
-    # fails on Linux with an error that names the wrong thing entirely. .gitattributes should keep
-    # them LF now, so this is a second line of defence rather than the thing making it work.
+    # An account that needs a sudo password costs a second connection, and only that case: see
+    # REMOTE_STAGE for why it cannot be done on this one.
+    #
+    # The sed on the far end strips CR: these files are edited on Windows, and a shell script with
+    # CRLF endings fails on Linux with an error that names the wrong thing entirely.
+    # .gitattributes should keep them LF now, so it is a second line of defence rather than the
+    # thing making it work.
     if [ -n "$(relay_password "$target")" ]; then
         say "Deploying to $target (one connection, password from gpb.conf)"
     else
         say "Deploying to $target (one connection - expect at most one password prompt)"
     fi
+
+    # || rc=$? rather than a bare call: under set -e a non-zero exit would end the script here,
+    # and 90 is not a failure, it is the far end asking for a second connection.
+    rc=0
     tar -czf - -C "$relay" relayd deploy/setup-nat.sh deploy/install.sh deploy/relayd.service |
-        relay_ssh "$target" "set -e
-            mkdir -p /opt/gpb
-            tar -xzf - -C /opt/gpb
-            cd /opt/gpb/deploy
-            sed -i 's/\r\$//' *.sh
-            chmod +x *.sh
-            ./install.sh"
+        relay_ssh "$target" "$REMOTE_STAGE" || rc=$?
+
+    case "$rc" in
+        0) ;;
+        90) relay_install_with_sudo "$target" ;;
+        91) die "the account on $target is not root and has no sudo. Deploy as root, or install sudo there." ;;
+        *)  die "deploy failed - see the output above" ;;
+    esac
 
     endpoint=$(relay_endpoint "$target")
     say "Done. Follow it with:  ./gpb relay logs $target"

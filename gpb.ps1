@@ -190,6 +190,10 @@ Setting up a relay, start to finish.
     .\gpb.ps1 relay deploy sg          (or just .\gpb.ps1 relay deploy, for RELAY_DEFAULT)
     .\gpb.ps1 relay logs sg
 
+   An account that is not root needs sudo for the install step, which the deploy works out on
+   the far end. If sudo wants a password it uses RELAY_<NAME>_SUDO_PASSWORD, or the login
+   password when that is empty, and asks you on the terminal if there is neither.
+
 4. install.sh prints the endpoint and the PSK. They go into two different files, because they
    are two different things:
 

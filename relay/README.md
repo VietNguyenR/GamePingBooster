@@ -18,6 +18,12 @@ make test
 **Run this from the development machine, NOT on the VPS.** Go cross-compiles a static binary, so
 the server never needs Go installed - it only receives a 2.4 MB executable.
 
+The account does not have to be root. The payload is unpacked into `~/.gpb-deploy`, which any
+account can write, and only the install step needs privilege: a deploy runs it directly when the
+account is root, under `sudo` when sudo is passwordless, and otherwise opens a second connection
+that can carry a sudo password - the first one cannot, because its stdin is the tarball and
+`sudo -S` reads its password from stdin. See `RELAY_<NAME>_SUDO_PASSWORD` in `gpb.conf.example`.
+
 Declare the relay once in `gpb.conf` at the repository root - host, and whichever of user, port,
 key or password your VPS needs. Copy `gpb.conf.example` and edit one block; the file is
 gitignored. The name in the middle of each key is yours to choose and is what you type:
