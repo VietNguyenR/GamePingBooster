@@ -233,8 +233,10 @@ func (c *client) dial() (*net.UDPConn, protocol.HandshakeResult, time.Duration, 
 	}
 
 	var last error
+
+	// Cho chay toi da 4 lan thoi chay lam chay lon
 	for attempt := 1; attempt <= 4; attempt++ {
-		req, _, err := protocol.BuildHandshakeReq(c.psk, c.clientID, time.Now())
+		req, nonce, err := protocol.BuildHandshakeReq(c.psk, c.clientID, time.Now())
 		if err != nil {
 			conn.Close()
 			return nil, zero, 0, err
@@ -252,7 +254,11 @@ func (c *client) dial() (*net.UDPConn, protocol.HandshakeResult, time.Duration, 
 			last = err
 			continue
 		}
-		res, err := protocol.ParseHandshakeResp(c.psk, buf[:n])
+		// v3 echoes the nonce back, and checking it is the point: a captured answer replayed at
+		// a client mid-handshake would otherwise hand it a session the relay has forgotten.
+		// Each attempt sends a fresh nonce, so a late answer to attempt 1 is rejected here
+		// rather than adopted during attempt 2.
+		res, err := protocol.ParseHandshakeResp(c.psk, buf[:n], nonce)
 		if err != nil {
 			last = err
 			continue

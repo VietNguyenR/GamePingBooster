@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using GamePingBooster.Core.Protocol;
@@ -136,7 +136,11 @@ internal sealed class TunnelClient : IDisposable
         {
             ct.ThrowIfCancellationRequested();
 
-            var req = GpbProtocol.BuildHandshakeReq(_psk, _clientId, DateTimeOffset.UtcNow);
+            // A fresh nonce per attempt, deliberately. A late answer to attempt 1 arriving
+            // during attempt 2 is then rejected on the echo instead of being adopted - which
+            // is the retry race that used to leave the client talking into a session the
+            // relay had already retired.
+            var req = GpbProtocol.BuildHandshakeReq(_psk, _clientId, DateTimeOffset.UtcNow, out var nonce);
             var sentAt = _clock.ElapsedTicks;
             await _socket.SendAsync(req, SocketFlags.None, ct).ConfigureAwait(false);
             _log($"Sent handshake to {_relayEndpoint} (attempt {attempt}/{attempts})");
@@ -146,9 +150,10 @@ internal sealed class TunnelClient : IDisposable
             try
             {
                 var n = await _socket.ReceiveAsync(buffer, SocketFlags.None, timeout.Token).ConfigureAwait(false);
-                if (!GpbProtocol.TryParseHandshakeResp(_psk, buffer.AsSpan(0, n), out var result))
+                if (!GpbProtocol.TryParseHandshakeResp(_psk, buffer.AsSpan(0, n), nonce, out var result))
                 {
-                    _log("Got a reply with a bad signature - ignoring (probably stray internet noise).");
+                    _log("Got a reply with a bad signature or a nonce we did not send - ignoring " +
+                         "(stray internet noise, or a late answer to an earlier attempt).");
                     continue;
                 }
                 if (result.Status != GpbProtocol.StatusOk)
@@ -159,6 +164,10 @@ internal sealed class TunnelClient : IDisposable
                         GpbProtocol.StatusShutdown => "The relay is shutting down for maintenance.",
                         GpbProtocol.StatusVersionMismatch =>
                             $"The relay speaks a different protocol version than this client (we are v{GpbProtocol.Version}). Update whichever is older.",
+                        GpbProtocol.StatusCredentialExpired =>
+                            "Your subscription has expired. Sign in again to renew it.",
+                        GpbProtocol.StatusCredentialRevoked =>
+                            "This device is no longer authorised. Check your devices in the app.",
                         _ => $"The relay refused the connection (status {result.Status})."
                     });
                 }

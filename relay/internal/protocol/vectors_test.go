@@ -64,6 +64,7 @@ type vectorFile struct {
 
 	HandshakeResp struct {
 		Status       int    `json:"status"`
+		NonceHex     string `json:"nonceHex"`
 		SessionIDHex string `json:"sessionIdHex"`
 		ClientIP     string `json:"clientIp"`
 		RelayIP      string `json:"relayIp"`
@@ -158,8 +159,9 @@ func generateVectors(t *testing.T) {
 	v.HandshakeResp.ClientIP = vectorClientIP
 	v.HandshakeResp.RelayIP = vectorRelayIP
 	v.HandshakeResp.MTU = vectorMTU
+	v.HandshakeResp.NonceHex = hex.EncodeToString(nonce[:])
 	v.HandshakeResp.PacketHex = hex.EncodeToString(BuildHandshakeResp(psk, StatusOK, sid,
-		netip.MustParseAddr(vectorClientIP), netip.MustParseAddr(vectorRelayIP), vectorMTU))
+		netip.MustParseAddr(vectorClientIP), netip.MustParseAddr(vectorRelayIP), vectorMTU, nonce))
 
 	v.VersionMismatchResp.ClientVersion = Version + 1
 	v.VersionMismatchResp.PacketHex = hex.EncodeToString(BuildVersionMismatchResp(psk, Version+1))
@@ -252,29 +254,34 @@ func TestProtocolVectors(t *testing.T) {
 	// ------------------------------------------------------------ HandshakeReq
 	// Not rebuildable byte for byte (the nonce is random), so verify it the way the relay does.
 	reqPkt := mustHex(t, v.HandshakeReq.PacketHex)
-	if len(reqPkt) != HandshakeReqLen {
-		t.Errorf("HandshakeReq is %d bytes, want %d", len(reqPkt), HandshakeReqLen)
+	if len(reqPkt) != HandshakeReqPSKLen {
+		t.Errorf("HandshakeReq is %d bytes, want %d", len(reqPkt), HandshakeReqPSKLen)
 	}
-	gotID, err := VerifyHandshakeReq(psk, reqPkt, time.Unix(v.HandshakeReq.UnixTimeSeconds, 0))
+	if reqPkt[1] != AuthModePSK {
+		t.Errorf("auth mode byte is %d, want AuthModePSK", reqPkt[1])
+	}
+	gotID, _, err := VerifyHandshakeReq(psk, reqPkt, time.Unix(v.HandshakeReq.UnixTimeSeconds, 0))
 	if err != nil {
 		t.Errorf("the golden HandshakeReq no longer verifies: %v", err)
 	} else if gotID != cid {
 		t.Errorf("client id read as %x, want %x", gotID, cid)
 	}
-	if got := hex.EncodeToString(reqPkt[1:9]); got != v.HandshakeReq.NonceHex {
+	if got := hex.EncodeToString(reqPkt[2:10]); got != v.HandshakeReq.NonceHex {
 		t.Errorf("nonce is at the wrong offset: read %s, want %s", got, v.HandshakeReq.NonceHex)
 	}
 
 	// ----------------------------------------------------------- HandshakeResp
 	respPkt := mustHex(t, v.HandshakeResp.PacketHex)
+	var respNonce [8]byte
+	copy(respNonce[:], mustHex(t, v.HandshakeResp.NonceHex))
 	rebuilt := BuildHandshakeResp(psk, byte(v.HandshakeResp.Status), sid,
 		netip.MustParseAddr(v.HandshakeResp.ClientIP),
 		netip.MustParseAddr(v.HandshakeResp.RelayIP),
-		uint16(v.HandshakeResp.MTU))
+		uint16(v.HandshakeResp.MTU), respNonce)
 	if !bytes.Equal(rebuilt, respPkt) {
 		t.Errorf("HandshakeResp changed:\n got %x\nwant %x", rebuilt, respPkt)
 	}
-	parsed, err := ParseHandshakeResp(psk, respPkt)
+	parsed, err := ParseHandshakeResp(psk, respPkt, respNonce)
 	if err != nil {
 		t.Fatalf("the golden HandshakeResp no longer parses: %v", err)
 	}

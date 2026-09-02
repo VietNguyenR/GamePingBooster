@@ -1,16 +1,16 @@
-using System.Buffers.Binary;
+﻿using System.Buffers.Binary;
 using System.Net;
 using System.Security.Cryptography;
 
 namespace GamePingBooster.Core.Protocol;
 
 /// <summary>
-/// C# mirror of the wire format described in docs/PROTOCOL.md.
+/// C# mirror of the wire format described in docs/PROTOCOL-v3.md.
 /// Must match relay/internal/protocol/protocol.go byte for byte - change one, change both.
 /// </summary>
 public static class GpbProtocol
 {
-    public const byte Version = 2;
+    public const byte Version = 3;
 
     public const byte TypeHandshakeReq = 0x1;
     public const byte TypeHandshakeResp = 0x2;
@@ -19,9 +19,38 @@ public static class GpbProtocol
     public const byte TypePong = 0x5;
     public const byte TypeDisconnect = 0x6;
 
-    // Grew from 49 to 57 in v2 with the addition of the client id.
-    public const int HandshakeReqLen = 57;
-    public const int HandshakeRespLen = 52;
+    /// <summary>
+    /// RESERVED and never sent or accepted. Data is deliberately plaintext - see
+    /// docs/PROTOCOL-v3.md. Holding the number means encryption can be added later beside the
+    /// plaintext path instead of forcing a second handshake redesign.
+    /// </summary>
+    public const byte TypeDataEncrypted = 0x7;
+
+    /// <summary>Self-hosted mode: one shared key, as in v1 and v2.</summary>
+    public const byte AuthModePsk = 0;
+
+    /// <summary>Commercial mode: a licence token the relay verifies offline.</summary>
+    public const byte AuthModeToken = 1;
+
+    // v2's 57 bytes plus the auth-mode byte.
+    public const int HandshakeReqPskLen = 58;
+    // Carries the licence token and a device signature instead of an HMAC.
+    public const int HandshakeReqTokenLen = 240;
+
+    // v2's 52 plus the mode byte and the nonce echo.
+    public const int HandshakeRespPskLen = 60;
+    // Swaps the 32-byte HMAC for a 64-byte relay signature.
+    public const int HandshakeRespTokenLen = 92;
+
+    /// <summary>
+    /// The v2 layout, kept ONLY so a version-mismatch refusal from an older relay can still be
+    /// read. Nothing else may use it.
+    /// </summary>
+    public const int HandshakeRespV2Len = 52;
+
+    public const int TokenLen = 150;
+    public const int NonceLen = 8;
+
     public const int DataHeaderLen = 9;
     public const int PingLen = 17;
     public const int DisconnectLen = 9;
@@ -31,26 +60,77 @@ public static class GpbProtocol
     public const byte StatusPoolFull = 1;
     public const byte StatusShutdown = 2;
     public const byte StatusVersionMismatch = 3;
+    public const byte StatusCredentialExpired = 4;
+    public const byte StatusCredentialRevoked = 5;
+
+    // Field offsets shared by both request layouts. Everything after the header moved by one
+    // when the auth-mode byte was inserted, which is the single easiest thing to get wrong here.
+    private const int ReqOffMode = 1;
+    private const int ReqOffNonce = 2;
+    private const int ReqOffTime = 10;
+    private const int ReqOffClientId = 18;
+    private const int ReqOffAuth = 26;
+    private const int ReqTokenSigOff = ReqOffAuth + TokenLen; // 176
+
+    // Response offsets, shared by both layouts.
+    private const int RespOffNonce = 20;
+    private const int RespOffAuth = 28;
 
     private static byte Header(byte msgType) => (byte)((Version << 4) | (msgType & 0x0f));
 
     public static (byte Version, byte Type) ParseHeader(byte b) => ((byte)(b >> 4), (byte)(b & 0x0f));
 
     /// <summary>
-    /// Builds a HandshakeReq signed with HMAC-SHA256 using the PSK.
+    /// Builds a PSK-mode HandshakeReq signed with HMAC-SHA256.
+    ///
+    /// <paramref name="nonce"/> comes back out because the answer echoes it, and checking that
+    /// echo is what stops a captured response being replayed at a client that is mid-handshake.
+    /// Keep it until the answer arrives.
     ///
     /// <paramref name="clientId"/> is what lets a reconnecting client keep the inner address it
     /// already has, so a brief network drop does not force the routing table to be rebuilt. It
     /// sits inside the signed range, so it cannot be swapped in transit.
     /// </summary>
-    public static byte[] BuildHandshakeReq(byte[] psk, ulong clientId, DateTimeOffset now)
+    public static byte[] BuildHandshakeReq(byte[] psk, ulong clientId, DateTimeOffset now, out byte[] nonce)
     {
-        var pkt = new byte[HandshakeReqLen];
+        var pkt = new byte[HandshakeReqPskLen];
         pkt[0] = Header(TypeHandshakeReq);
-        RandomNumberGenerator.Fill(pkt.AsSpan(1, 8));
-        BinaryPrimitives.WriteUInt64BigEndian(pkt.AsSpan(9, 8), (ulong)now.ToUnixTimeSeconds());
-        BinaryPrimitives.WriteUInt64BigEndian(pkt.AsSpan(17, 8), clientId);
-        HMACSHA256.HashData(psk, pkt.AsSpan(0, 25)).CopyTo(pkt.AsSpan(25));
+        pkt[ReqOffMode] = AuthModePsk;
+        RandomNumberGenerator.Fill(pkt.AsSpan(ReqOffNonce, NonceLen));
+        BinaryPrimitives.WriteUInt64BigEndian(pkt.AsSpan(ReqOffTime, 8), (ulong)now.ToUnixTimeSeconds());
+        BinaryPrimitives.WriteUInt64BigEndian(pkt.AsSpan(ReqOffClientId, 8), clientId);
+        HMACSHA256.HashData(psk, pkt.AsSpan(0, ReqOffAuth)).CopyTo(pkt.AsSpan(ReqOffAuth));
+
+        nonce = pkt.AsSpan(ReqOffNonce, NonceLen).ToArray();
+        return pkt;
+    }
+
+    /// <summary>
+    /// Builds a token-mode HandshakeReq, signed with the device key.
+    ///
+    /// The device public key is not a field: it is inside the token, where the licence server put
+    /// it. That is what stops a stolen token being useful on its own - whoever presents it must
+    /// also hold the matching private key, which never leaves the machine it was made on.
+    /// </summary>
+    public static byte[] BuildHandshakeReqToken(ECDsa deviceKey, ReadOnlySpan<byte> token,
+        ulong clientId, DateTimeOffset now, out byte[] nonce)
+    {
+        if (token.Length != TokenLen)
+        {
+            throw new ArgumentException($"a licence token is {TokenLen} bytes", nameof(token));
+        }
+
+        var pkt = new byte[HandshakeReqTokenLen];
+        pkt[0] = Header(TypeHandshakeReq);
+        pkt[ReqOffMode] = AuthModeToken;
+        RandomNumberGenerator.Fill(pkt.AsSpan(ReqOffNonce, NonceLen));
+        BinaryPrimitives.WriteUInt64BigEndian(pkt.AsSpan(ReqOffTime, 8), (ulong)now.ToUnixTimeSeconds());
+        BinaryPrimitives.WriteUInt64BigEndian(pkt.AsSpan(ReqOffClientId, 8), clientId);
+        token.CopyTo(pkt.AsSpan(ReqOffAuth, TokenLen));
+
+        GpbCrypto.Sign(deviceKey, pkt.AsSpan(0, ReqTokenSigOff)).CopyTo(pkt.AsSpan(ReqTokenSigOff));
+
+        nonce = pkt.AsSpan(ReqOffNonce, NonceLen).ToArray();
         return pkt;
     }
 
@@ -62,33 +142,83 @@ public static class GpbProtocol
         IPAddress RelayIp,
         ushort Mtu);
 
+    private static HandshakeResult ReadHandshakeResp(ReadOnlySpan<byte> pkt) => new(
+        Status: pkt[1],
+        SessionId: BinaryPrimitives.ReadUInt64BigEndian(pkt.Slice(2, 8)),
+        ClientIp: new IPAddress(pkt.Slice(10, 4).ToArray()),
+        RelayIp: new IPAddress(pkt.Slice(14, 4).ToArray()),
+        Mtu: BinaryPrimitives.ReadUInt16BigEndian(pkt.Slice(18, 2)));
+
     /// <summary>
-    /// Decodes and authenticates a HandshakeResp. Returns false on a wrong length, a wrong
-    /// version, or a bad HMAC - in which case none of the fields may be trusted.
+    /// Decodes and authenticates a PSK-mode HandshakeResp. Returns false on a wrong length, a
+    /// wrong version, a bad HMAC, or a nonce that does not match the one that was sent - in any
+    /// of which cases none of the fields may be trusted.
+    ///
+    /// <paramref name="sentNonce"/> is the value BuildHandshakeReq handed back. Checking the echo
+    /// is what stops a captured answer being replayed at a client that is mid-handshake: without
+    /// it the client adopts a session id the relay has already forgotten and the tunnel comes up
+    /// carrying nothing until the idle timeout. v2 had exactly this hole.
     /// </summary>
-    public static bool TryParseHandshakeResp(byte[] psk, ReadOnlySpan<byte> pkt, out HandshakeResult result)
+    public static bool TryParseHandshakeResp(byte[] psk, ReadOnlySpan<byte> pkt,
+        ReadOnlySpan<byte> sentNonce, out HandshakeResult result)
     {
         result = default;
-        if (pkt.Length != HandshakeRespLen) return false;
+
+        // A relay one version behind answers with a v2-layout refusal carrying OUR version in
+        // the header, precisely so this parser can read it. It is 52 bytes, not 60, so the
+        // length check has to allow for it or a clear diagnosis turns back into a timeout - and
+        // that is the whole reason that message exists.
+        if (pkt.Length == HandshakeRespV2Len)
+        {
+            if (ParseHeader(pkt[0]).Type != TypeHandshakeResp) return false;
+            if (pkt[1] != StatusVersionMismatch) return false;
+
+            Span<byte> legacy = stackalloc byte[32];
+            HMACSHA256.HashData(psk, pkt[..20], legacy);
+            if (!CryptographicOperations.FixedTimeEquals(legacy, pkt[20..])) return false;
+
+            result = ReadHandshakeResp(pkt);
+            return true;
+        }
+
+        if (pkt.Length != HandshakeRespPskLen) return false;
 
         var (version, type) = ParseHeader(pkt[0]);
         if (type != TypeHandshakeResp) return false;
-
-        // A relay speaking a different version answers with OUR version in the header and
-        // StatusVersionMismatch in the body, precisely so this parser can read it. Rejecting it
-        // on the version check would turn a clear diagnosis back into a silent timeout.
         if (version != Version && pkt[1] != StatusVersionMismatch) return false;
 
         Span<byte> expected = stackalloc byte[32];
-        HMACSHA256.HashData(psk, pkt[..20], expected);
-        if (!CryptographicOperations.FixedTimeEquals(expected, pkt[20..])) return false;
+        HMACSHA256.HashData(psk, pkt[..RespOffAuth], expected);
+        if (!CryptographicOperations.FixedTimeEquals(expected, pkt[RespOffAuth..])) return false;
 
-        result = new HandshakeResult(
-            Status: pkt[1],
-            SessionId: BinaryPrimitives.ReadUInt64BigEndian(pkt.Slice(2, 8)),
-            ClientIp: new IPAddress(pkt.Slice(10, 4).ToArray()),
-            RelayIp: new IPAddress(pkt.Slice(14, 4).ToArray()),
-            Mtu: BinaryPrimitives.ReadUInt16BigEndian(pkt.Slice(18, 2)));
+        if (!CryptographicOperations.FixedTimeEquals(pkt.Slice(RespOffNonce, NonceLen), sentNonce)) return false;
+
+        result = ReadHandshakeResp(pkt);
+        return true;
+    }
+
+    /// <summary>
+    /// Decodes and authenticates a token-mode HandshakeResp against the relay's own public key,
+    /// which the client got from the profile.
+    ///
+    /// In token mode there is no shared secret, so the relay signs with a key of its own. This is
+    /// new in v3: under v2 a client could only tell a real relay from a forged answer because
+    /// both sides happened to hold the same key.
+    /// </summary>
+    public static bool TryParseHandshakeRespToken(ECDsa relayKey, ReadOnlySpan<byte> pkt,
+        ReadOnlySpan<byte> sentNonce, out HandshakeResult result)
+    {
+        result = default;
+        if (pkt.Length != HandshakeRespTokenLen) return false;
+
+        var (version, type) = ParseHeader(pkt[0]);
+        if (type != TypeHandshakeResp) return false;
+        if (version != Version) return false;
+
+        if (!GpbCrypto.Verify(relayKey, pkt[..RespOffAuth], pkt[RespOffAuth..])) return false;
+        if (!CryptographicOperations.FixedTimeEquals(pkt.Slice(RespOffNonce, NonceLen), sentNonce)) return false;
+
+        result = ReadHandshakeResp(pkt);
         return true;
     }
 

@@ -3,7 +3,9 @@
 package server
 
 import (
+	"crypto/ecdsa"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -24,8 +26,20 @@ type Config struct {
 	TunName     string       // TUN interface name, e.g. "gpb0"
 	Subnet      netip.Prefix // inner IP pool handed to clients, e.g. 10.77.0.0/24
 	MTU         int          // TUN MTU, must match the MTU the client sets on Wintun
-	PSK         []byte       // pre-shared key used to sign handshakes
 	IdleTimeout time.Duration
+
+	// Exactly one authentication mode is configured, and the relay answers only that one.
+	//
+	// PSK is the self-hosted mode: one shared key, as in v1 and v2.
+	//
+	// LicencePub and RelayPriv are the commercial mode. The relay holds the licence server's
+	// PUBLIC key and nothing else of its, so it can verify a token offline without a database,
+	// without a network call, and without holding a secret that would matter if the machine
+	// were lost. RelayPriv is the relay's OWN key, used to sign answers - in token mode there
+	// is no shared secret, so without it a client cannot tell a real relay from a forged reply.
+	PSK         []byte
+	LicencePub  *ecdsa.PublicKey
+	RelayPriv   *ecdsa.PrivateKey
 	ConfigureIf bool // true = the relay runs `ip addr/link` for the TUN device itself
 
 	// Per-session, per-direction cap. 0 disables it. Sized so a game never reaches it: a real
@@ -38,8 +52,12 @@ type Config struct {
 }
 
 type session struct {
-	id       protocol.SessionID
-	clientID protocol.ClientID
+	id protocol.SessionID
+	// resKey is what the inner-address reservation is keyed on. In PSK mode it is the client
+	// id straight off the wire. In token mode it is derived from the DEVICE key instead,
+	// because the client id is chosen by the client, and keying on it would let one paying
+	// customer claim another one's reserved address just by naming it.
+	resKey   protocol.ClientID
 	innerIP  netip.Addr
 	addr     atomic.Pointer[netip.AddrPort] // current client UDP address (changes on roaming)
 	lastSeen atomic.Int64                   // unix nanoseconds
@@ -64,7 +82,7 @@ type Server struct {
 	byIP      map[netip.Addr]*session
 	freeIPs   []netip.Addr
 
-	// reservedIPs remembers which inner address a client id last held. A client that drops and
+	// reservedIPs remembers which inner address a reservation key last held. A client that drops and
 	// comes back gets the same address, so it does not have to tear down and rebuild its whole
 	// routing table over a two-second network blip. Entries survive the session they came from
 	// and are only given up when the pool runs dry.
@@ -82,8 +100,19 @@ type Server struct {
 
 // New builds the relay: opens the TUN device, fills the IP pool, opens the UDP socket.
 func New(cfg Config) (*Server, error) {
-	if len(cfg.PSK) == 0 {
-		return nil, errors.New("missing PSK - without one the relay would be an open proxy")
+	psk := len(cfg.PSK) > 0
+	licence := cfg.LicencePub != nil
+	switch {
+	case !psk && !licence:
+		return nil, errors.New("no authentication configured - the relay would be an open proxy. " +
+			"Pass -psk-file for a self-hosted relay, or -licence-key for a licensed one")
+	case psk && licence:
+		return nil, errors.New("both a PSK and a licence key were given - a relay serves exactly " +
+			"one authentication mode, so pass one or the other")
+	case licence && cfg.RelayPriv == nil:
+		return nil, errors.New("a licensed relay needs its own key to sign answers with: " +
+			"in token mode there is no shared secret, so without it a client cannot tell this " +
+			"relay from a forged reply")
 	}
 	if !cfg.Subnet.Addr().Is4() {
 		return nil, errors.New("subnet must be IPv4")
@@ -225,7 +254,11 @@ func (s *Server) loopUDP() error {
 			// Answer a mismatched handshake rather than dropping it. Silence here is
 			// indistinguishable from a dead relay or a firewalled port, and that ambiguity
 			// costs hours the first time a client and a relay drift apart in version.
-			if msgType == protocol.TypeHandshakeReq {
+			//
+			// Only in PSK mode. A licensed relay shares no key with an old client, so anything
+			// it sent would fail that client's own HMAC check - the reply would be noise, and
+			// answering an unauthenticated packet is exactly what the silence rule forbids.
+			if msgType == protocol.TypeHandshakeReq && len(s.cfg.PSK) > 0 {
 				s.sendTo(protocol.BuildVersionMismatchResp(s.cfg.PSK, version), from)
 				s.log.Warn("handshake from a different protocol version",
 					"from", from.String(), "client_version", version, "our_version", protocol.Version)
@@ -249,8 +282,31 @@ func (s *Server) loopUDP() error {
 	}
 }
 
+// handleHandshake routes a request to the verifier for the mode this relay serves. A request
+// for the OTHER mode is dropped in silence, like any other failed authentication: replying
+// "wrong mode" would tell an unauthenticated scanner that a licensed relay lives here.
 func (s *Server) handleHandshake(pkt []byte, from netip.AddrPort) {
-	clientID, err := protocol.VerifyHandshakeReq(s.cfg.PSK, pkt, time.Now())
+	mode, err := protocol.HandshakeReqMode(pkt)
+	if err != nil {
+		s.log.Debug("handshake rejected", "from", from.String(), "err", err)
+		s.stats.dropped.Add(1)
+		return
+	}
+
+	switch {
+	case mode == protocol.AuthModePSK && len(s.cfg.PSK) > 0:
+		s.handleHandshakePSK(pkt, from)
+	case mode == protocol.AuthModeToken && s.cfg.LicencePub != nil:
+		s.handleHandshakeToken(pkt, from)
+	default:
+		s.log.Debug("handshake for an authentication mode this relay does not serve",
+			"from", from.String(), "mode", mode)
+		s.stats.dropped.Add(1)
+	}
+}
+
+func (s *Server) handleHandshakePSK(pkt []byte, from netip.AddrPort) {
+	clientID, nonce, err := protocol.VerifyHandshakeReq(s.cfg.PSK, pkt, time.Now())
 	if err != nil {
 		// Stay silent: never answer a bad packet, so scanners cannot fingerprint us.
 		s.log.Debug("handshake rejected", "from", from.String(), "err", err)
@@ -261,17 +317,75 @@ func (s *Server) handleHandshake(pkt []byte, from netip.AddrPort) {
 	sess, ok := s.allocSession(from, clientID)
 	if !ok {
 		resp := protocol.BuildHandshakeResp(s.cfg.PSK, protocol.StatusPoolFull,
-			protocol.SessionID{}, netip.Addr{}, netip.Addr{}, 0)
+			protocol.SessionID{}, netip.Addr{}, netip.Addr{}, 0, nonce)
 		s.sendTo(resp, from)
 		s.log.Warn("address pool exhausted", "from", from.String())
 		return
 	}
 
 	resp := protocol.BuildHandshakeResp(s.cfg.PSK, protocol.StatusOK,
-		sess.id, sess.innerIP, s.relayIP, uint16(s.cfg.MTU))
+		sess.id, sess.innerIP, s.relayIP, uint16(s.cfg.MTU), nonce)
 	s.sendTo(resp, from)
 	s.log.Info("client connected",
 		"from", from.String(), "inner_ip", sess.innerIP.String(), "resumed", sess.resumed)
+}
+
+func (s *Server) handleHandshakeToken(pkt []byte, from netip.AddrPort) {
+	// The client id in the packet is deliberately discarded here. It is signed, so it cannot be
+	// altered in transit, but it is still a value the client picked for itself - and in token
+	// mode the reservation is keyed on the device instead. See below.
+	tok, _, nonce, err := protocol.VerifyHandshakeReqToken(s.cfg.LicencePub, pkt, time.Now())
+
+	// An expired token is the one failure worth answering: the signature verified, so this is a
+	// real customer whose subscription lapsed, not a stranger probing the port. Everything else
+	// stays silent.
+	if err == protocol.ErrTokenExpired {
+		s.respondToken(protocol.StatusCredentialExpired, protocol.SessionID{},
+			netip.Addr{}, 0, nonce, from)
+		s.log.Info("licence expired", "from", from.String(), "user", tok.UserID)
+		s.stats.dropped.Add(1)
+		return
+	}
+	if err != nil {
+		s.log.Debug("handshake rejected", "from", from.String(), "err", err)
+		s.stats.dropped.Add(1)
+		return
+	}
+
+	// The reservation is keyed on the DEVICE, not on the client id.
+	//
+	// The client id is chosen by the client. Keying on it would let one device claim another's
+	// reserved inner address simply by naming it - harmless when everybody shares a PSK and is
+	// on the same side, but not when they are separate paying customers. The device key cannot
+	// be borrowed: producing this handshake required its private half.
+	var resKey protocol.ClientID
+	sum := sha256.Sum256(tok.DeviceKeyRaw())
+	copy(resKey[:], sum[:8])
+
+	sess, ok := s.allocSession(from, resKey)
+	if !ok {
+		s.respondToken(protocol.StatusPoolFull, protocol.SessionID{}, netip.Addr{}, 0, nonce, from)
+		s.log.Warn("address pool exhausted", "from", from.String())
+		return
+	}
+
+	s.respondToken(protocol.StatusOK, sess.id, sess.innerIP, uint16(s.cfg.MTU), nonce, from)
+	s.log.Info("client connected", "from", from.String(), "inner_ip", sess.innerIP.String(),
+		"resumed", sess.resumed, "user", tok.UserID)
+}
+
+func (s *Server) respondToken(status byte, sid protocol.SessionID, clientIP netip.Addr,
+	mtu uint16, nonce [8]byte, to netip.AddrPort) {
+
+	resp, err := protocol.BuildHandshakeRespToken(s.cfg.RelayPriv, status, sid,
+		clientIP, s.relayIP, mtu, nonce)
+	if err != nil {
+		// Signing cannot fail for a key that was validated at startup, so this means something
+		// is badly wrong rather than that one client had bad luck.
+		s.log.Error("could not sign a handshake answer", "err", err)
+		return
+	}
+	s.sendTo(resp, to)
 }
 
 func (s *Server) handleData(pkt []byte, from netip.AddrPort) {
@@ -454,7 +568,7 @@ func (s *Server) loopJanitor(done <-chan struct{}) {
 
 // ------------------------------------------------------------ session table
 
-func (s *Server) allocSession(from netip.AddrPort, clientID protocol.ClientID) (*session, bool) {
+func (s *Server) allocSession(from netip.AddrPort, resKey protocol.ClientID) (*session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -466,8 +580,8 @@ func (s *Server) allocSession(from netip.AddrPort, clientID protocol.ClientID) (
 	// and nothing anywhere logs an error. Answering identically makes the retry harmless
 	// whichever answer wins the race, and it also stops a replayed handshake - still valid inside
 	// the 120s skew window - from knocking a live client off its session.
-	if previous, ok := s.reservedIPs[clientID]; ok {
-		if live, inUse := s.byIP[previous]; inUse && live.clientID == clientID {
+	if previous, ok := s.reservedIPs[resKey]; ok {
+		if live, inUse := s.byIP[previous]; inUse && live.resKey == resKey {
 			f := from
 			live.addr.Store(&f)
 			live.touch()
@@ -480,13 +594,13 @@ func (s *Server) allocSession(from netip.AddrPort, clientID protocol.ClientID) (
 		return nil, false
 	}
 
-	ip, resumed := s.claimAddress(clientID)
+	ip, resumed := s.claimAddress(resKey)
 	if !ip.IsValid() {
 		return nil, false
 	}
 
 	sess := &session{
-		id: sid, clientID: clientID, innerIP: ip, resumed: resumed,
+		id: sid, resKey: resKey, innerIP: ip, resumed: resumed,
 		up:   newBucket(s.cfg.BurstBytes),
 		down: newBucket(s.cfg.BurstBytes),
 	}
@@ -496,14 +610,14 @@ func (s *Server) allocSession(from netip.AddrPort, clientID protocol.ClientID) (
 
 	s.bySession[sid] = sess
 	s.byIP[ip] = sess
-	s.reservedIPs[clientID] = ip
+	s.reservedIPs[resKey] = ip
 	return sess, true
 }
 
-// claimAddress returns the inner address for a client id, preferring the one it held before.
+// claimAddress returns the inner address for a reservation key, preferring the one it held before.
 // Caller must hold s.mu.
-func (s *Server) claimAddress(clientID protocol.ClientID) (netip.Addr, bool) {
-	if previous, ok := s.reservedIPs[clientID]; ok {
+func (s *Server) claimAddress(resKey protocol.ClientID) (netip.Addr, bool) {
+	if previous, ok := s.reservedIPs[resKey]; ok {
 		if old, inUse := s.byIP[previous]; inUse {
 			// A session is still holding the address under a different client id, which should
 			// not happen. Retire it rather than hand the same inner IP to two clients at once.
@@ -513,8 +627,8 @@ func (s *Server) claimAddress(clientID protocol.ClientID) (netip.Addr, bool) {
 			// one shape that lets evictReservations return it to the pool twice, and a duplicate
 			// in the pool means two live clients on the same inner IP, each receiving the other's
 			// return traffic. Keep the mapping one-to-one and that can never arise.
-			if held, ok := s.reservedIPs[old.clientID]; ok && held == previous && old.clientID != clientID {
-				delete(s.reservedIPs, old.clientID)
+			if held, ok := s.reservedIPs[old.resKey]; ok && held == previous && old.resKey != resKey {
+				delete(s.reservedIPs, old.resKey)
 			}
 			return previous, true
 		}
@@ -541,11 +655,11 @@ func (s *Server) claimAddress(clientID protocol.ClientID) (netip.Addr, bool) {
 // is not optional: dropping the reservation without it would lose the address permanently.
 // Caller must hold s.mu.
 func (s *Server) evictReservations() {
-	for clientID, ip := range s.reservedIPs {
+	for resKey, ip := range s.reservedIPs {
 		if _, inUse := s.byIP[ip]; inUse {
 			continue
 		}
-		delete(s.reservedIPs, clientID)
+		delete(s.reservedIPs, resKey)
 		s.freeIPs = append(s.freeIPs, ip)
 	}
 }
@@ -564,7 +678,7 @@ func (s *Server) releaseSession(sess *session, dropReservation bool) {
 	delete(s.byIP, sess.innerIP)
 
 	if dropReservation {
-		delete(s.reservedIPs, sess.clientID)
+		delete(s.reservedIPs, sess.resKey)
 		s.freeIPs = append(s.freeIPs, sess.innerIP)
 		return
 	}
@@ -574,7 +688,7 @@ func (s *Server) releaseSession(sess *session, dropReservation bool) {
 	// top and the very next client to connect was handed it, and the client it was being held for
 	// came back to a different inner IP and a full routing-table rebuild. The address returns to
 	// the pool only through evictReservations, when there is nothing else left to give out.
-	if held, ok := s.reservedIPs[sess.clientID]; ok && held == sess.innerIP {
+	if held, ok := s.reservedIPs[sess.resKey]; ok && held == sess.innerIP {
 		return
 	}
 	s.freeIPs = append(s.freeIPs, sess.innerIP)

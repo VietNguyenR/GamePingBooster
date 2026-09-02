@@ -35,8 +35,12 @@ func FuzzParsers(f *testing.F) {
 		make([]byte, 9),
 		make([]byte, 19),
 		make([]byte, 20),
-		make([]byte, HandshakeReqLen),
-		make([]byte, HandshakeRespLen),
+		make([]byte, HandshakeReqPSKLen),
+		make([]byte, HandshakeReqTokenLen),
+		make([]byte, HandshakeRespPSKLen),
+		make([]byte, HandshakeRespTokenLen),
+		make([]byte, HandshakeRespV2Len),
+		make([]byte, TokenLen),
 		make([]byte, PingLen),
 		make([]byte, MaxPacketLen),
 	}
@@ -53,11 +57,26 @@ func FuzzParsers(f *testing.F) {
 		f.Add(decodeSeed(hexed))
 	}
 
+	fuzzLicence, err := GenerateKey()
+	if err != nil {
+		f.Fatalf("generate a licence key for fuzzing: %v", err)
+	}
+
 	f.Fuzz(func(t *testing.T, data []byte) {
 		// None of these may panic, whatever they are handed. Return values are irrelevant here -
 		// the only assertion is that control reaches the end of the function.
-		_, _ = VerifyHandshakeReq(psk, data, now)
-		_, _ = ParseHandshakeResp(psk, data)
+		_, _, _ = VerifyHandshakeReq(psk, data, now)
+		_, _ = ParseHandshakeResp(psk, data, [8]byte{})
+		_ = mustNotPanicMode(data)
+
+		// v3's token path is new attack surface: 240 bytes of attacker-chosen input, parsed
+		// before anything about it is known to be true. Fuzz it against a real licence key, so
+		// the signature check is exercised rather than short-circuited by a malformed one.
+		_, _, _, _ = VerifyHandshakeReqToken(&fuzzLicence.PublicKey, data, now)
+		_, _ = VerifyToken(&fuzzLicence.PublicKey, data, now)
+		_, _ = ParseHandshakeRespToken(&fuzzLicence.PublicKey, data, [8]byte{})
+		_, _ = ParsePublicKey(data)
+		_, _ = ParsePrivateKey(data)
 		_, _, _ = DecodeData(data)
 		_, _, _ = DecodePing(data)
 		_, _ = DecodeSessionID(data)
@@ -98,4 +117,15 @@ func hexNibble(c byte) byte {
 	default:
 		return 0
 	}
+}
+
+// mustNotPanicMode exists so HandshakeReqMode is fuzzed as well. It reads the auth mode out of
+// bytes nobody has validated yet, which is exactly the kind of code that panics on a short
+// slice.
+func mustNotPanicMode(data []byte) byte {
+	m, err := HandshakeReqMode(data)
+	if err != nil {
+		return 0
+	}
+	return m
 }

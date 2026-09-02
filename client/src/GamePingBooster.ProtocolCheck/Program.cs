@@ -102,47 +102,77 @@ internal static class Program
         var unixTime = v.GetProperty("unixTimeSeconds").GetInt64();
         var nonce = v.GetProperty("nonceHex").GetString()!;
 
-        Check("HandshakeReq length", pkt.Length == GpbProtocol.HandshakeReqLen,
-            $"got {pkt.Length}, want {GpbProtocol.HandshakeReqLen}");
+        // Every offset below moved by one in v3, when the auth-mode byte was inserted after the
+        // header. That shift is the easiest thing to get wrong in the whole format, which is why
+        // each one is asserted separately rather than by comparing whole packets.
+        Check("HandshakeReq length", pkt.Length == GpbProtocol.HandshakeReqPskLen,
+            $"got {pkt.Length}, want {GpbProtocol.HandshakeReqPskLen}");
         Check("HandshakeReq header byte", pkt[0] == (GpbProtocol.Version << 4 | GpbProtocol.TypeHandshakeReq),
             $"got 0x{pkt[0]:x2}");
-        Check("HandshakeReq nonce offset", ToHex(pkt.AsSpan(1, 8)) == nonce,
-            $"read {ToHex(pkt.AsSpan(1, 8))}, want {nonce}");
+        Check("HandshakeReq auth mode", pkt[1] == GpbProtocol.AuthModePsk,
+            $"got {pkt[1]}, want AuthModePsk - a licensed relay would drop this in silence");
+        Check("HandshakeReq nonce offset", ToHex(pkt.AsSpan(2, 8)) == nonce,
+            $"read {ToHex(pkt.AsSpan(2, 8))}, want {nonce}");
         Check("HandshakeReq timestamp offset",
-            BinaryPrimitives.ReadUInt64BigEndian(pkt.AsSpan(9, 8)) == (ulong)unixTime,
-            $"read {BinaryPrimitives.ReadUInt64BigEndian(pkt.AsSpan(9, 8))}, want {unixTime}");
+            BinaryPrimitives.ReadUInt64BigEndian(pkt.AsSpan(10, 8)) == (ulong)unixTime,
+            $"read {BinaryPrimitives.ReadUInt64BigEndian(pkt.AsSpan(10, 8))}, want {unixTime}");
         Check("HandshakeReq client id offset",
-            BinaryPrimitives.ReadUInt64BigEndian(pkt.AsSpan(17, 8)) == clientId,
+            BinaryPrimitives.ReadUInt64BigEndian(pkt.AsSpan(18, 8)) == clientId,
             "the relay would hand this client the wrong reserved address");
 
-        // The signature is what the relay checks, and it is computed over the first 25 bytes.
-        var expected = HMACSHA256.HashData(psk, pkt.AsSpan(0, 25));
-        Check("HandshakeReq signature", expected.AsSpan().SequenceEqual(pkt.AsSpan(25)),
+        // The signature is what the relay checks, and it is computed over the first 26 bytes.
+        var expected = HMACSHA256.HashData(psk, pkt.AsSpan(0, 26));
+        Check("HandshakeReq signature", expected.AsSpan().SequenceEqual(pkt.AsSpan(26)),
             "the relay would reject every handshake this client sends");
 
         // And what this client builds today must still have that shape.
-        var built = GpbProtocol.BuildHandshakeReq(psk, clientId, DateTimeOffset.FromUnixTimeSeconds(unixTime));
-        Check("BuildHandshakeReq length", built.Length == GpbProtocol.HandshakeReqLen,
+        var built = GpbProtocol.BuildHandshakeReq(psk, clientId,
+            DateTimeOffset.FromUnixTimeSeconds(unixTime), out var builtNonce);
+        Check("BuildHandshakeReq length", built.Length == GpbProtocol.HandshakeReqPskLen,
             $"got {built.Length}");
         Check("BuildHandshakeReq header", built[0] == pkt[0], $"got 0x{built[0]:x2}, want 0x{pkt[0]:x2}");
+        Check("BuildHandshakeReq auth mode", built[1] == GpbProtocol.AuthModePsk, $"got {built[1]}");
         Check("BuildHandshakeReq timestamp",
-            BinaryPrimitives.ReadUInt64BigEndian(built.AsSpan(9, 8)) == (ulong)unixTime, "wrong offset or endianness");
+            BinaryPrimitives.ReadUInt64BigEndian(built.AsSpan(10, 8)) == (ulong)unixTime, "wrong offset or endianness");
         Check("BuildHandshakeReq client id",
-            BinaryPrimitives.ReadUInt64BigEndian(built.AsSpan(17, 8)) == clientId, "wrong offset or endianness");
+            BinaryPrimitives.ReadUInt64BigEndian(built.AsSpan(18, 8)) == clientId, "wrong offset or endianness");
         Check("BuildHandshakeReq signature",
-            HMACSHA256.HashData(psk, built.AsSpan(0, 25)).AsSpan().SequenceEqual(built.AsSpan(25)),
+            HMACSHA256.HashData(psk, built.AsSpan(0, 26)).AsSpan().SequenceEqual(built.AsSpan(26)),
             "the packet this client sends is not signed over the range the relay verifies");
+
+        // The nonce has to come back out, or the caller cannot check the echo in the answer and
+        // the replay protection is decorative.
+        Check("BuildHandshakeReq returns the nonce it used",
+            builtNonce.Length == GpbProtocol.NonceLen
+                && builtNonce.AsSpan().SequenceEqual(built.AsSpan(2, GpbProtocol.NonceLen)),
+            "the caller cannot verify the echo, so a replayed answer would be accepted");
     }
 
     private static void CheckHandshakeResp(JsonElement v, byte[] psk)
     {
         var pkt = Hex(v.GetProperty("packetHex").GetString()!);
+        var nonce = Hex(v.GetProperty("nonceHex").GetString()!);
 
-        if (!GpbProtocol.TryParseHandshakeResp(psk, pkt, out var result))
+        Check("HandshakeResp length", pkt.Length == GpbProtocol.HandshakeRespPskLen,
+            $"got {pkt.Length}, want {GpbProtocol.HandshakeRespPskLen}");
+        Check("HandshakeResp echoes the nonce",
+            ToHex(pkt.AsSpan(20, 8)) == v.GetProperty("nonceHex").GetString(),
+            $"read {ToHex(pkt.AsSpan(20, 8))} at offset 20");
+
+        if (!GpbProtocol.TryParseHandshakeResp(psk, pkt, nonce, out var result))
         {
             Fail("HandshakeResp parse", "the client rejects the answer the relay sends - no tunnel would ever come up");
             return;
         }
+
+        // A reply to somebody else's handshake must be refused. Without this the client adopts a
+        // session the relay has already forgotten and the tunnel comes up carrying nothing.
+        var wrongNonce = new byte[GpbProtocol.NonceLen];
+        nonce.CopyTo(wrongNonce, 0);
+        wrongNonce[0] ^= 0xff;
+        Check("HandshakeResp with the wrong nonce is refused",
+            !GpbProtocol.TryParseHandshakeResp(psk, pkt, wrongNonce, out _),
+            "a captured answer replayed mid-handshake would be accepted");
         Check("HandshakeResp status", result.Status == v.GetProperty("status").GetInt32(),
             $"got {result.Status}");
         Check("HandshakeResp session id",
@@ -165,7 +195,16 @@ internal static class Program
     private static void CheckVersionMismatchResp(JsonElement v, byte[] psk)
     {
         var pkt = Hex(v.GetProperty("packetHex").GetString()!);
-        if (!GpbProtocol.TryParseHandshakeResp(psk, pkt, out var result))
+
+        // It is the V2 layout, 52 bytes, not v3's 60. A relay one version behind can only send
+        // what it knows, so the client has to be able to read that - otherwise "please update"
+        // degrades back into the four-attempt timeout this message exists to avoid. The nonce is
+        // irrelevant here: the old layout has no echo to check.
+        Check("version-mismatch answer is the v2 layout",
+            pkt.Length == GpbProtocol.HandshakeRespV2Len,
+            $"got {pkt.Length}, want {GpbProtocol.HandshakeRespV2Len}");
+
+        if (!GpbProtocol.TryParseHandshakeResp(psk, pkt, ReadOnlySpan<byte>.Empty, out var result))
         {
             Fail("version-mismatch answer", "the client cannot parse it, so it would report a timeout instead");
             return;

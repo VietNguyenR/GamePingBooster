@@ -1,50 +1,51 @@
 {
   "note": "Golden packets shared by the Go relay and the C# client. See relay/internal/protocol/vectors_test.go.",
   "psk": "a-test-psk-of-at-least-16-bytes",
-  "version": 2,
+  "version": 3,
   "handshakeReq": {
     "clientIdHex": "0102030405060708",
     "unixTimeSeconds": 1767225600,
-    "nonceHex": "9f57fe09ec8a9533",
-    "packetHex": "219f57fe09ec8a9533000000006955b90001020304050607084caf8e3dc6ec2cc43648bb46d6ef95ba97cb5e13df584796976c1db5af438862"
+    "nonceHex": "85316c8dbe2ba4fd",
+    "packetHex": "310085316c8dbe2ba4fd000000006955b90001020304050607087dd5cb16045802d7abd054a8982296242287183683c90309587620b690e16452"
   },
   "handshakeResp": {
     "status": 0,
+    "nonceHex": "85316c8dbe2ba4fd",
     "sessionIdHex": "1122334455667788",
     "clientIp": "10.77.0.5",
     "relayIp": "10.77.0.1",
     "mtu": 1400,
-    "packetHex": "220011223344556677880a4d00050a4d000105780fb118076198a19b4c3373152f21292f0ff3653ea1eafc91c5c2cdb1992f2fa5"
+    "packetHex": "320011223344556677880a4d00050a4d0001057885316c8dbe2ba4fda1a98753869e4085aa0eb220f924bdddc7e980965e3c0641b3d5f6a0f8bbc382"
   },
   "versionMismatchResp": {
-    "clientVersion": 3,
-    "packetHex": "3203000000000000000000000000000000000000c352c2d5a5f2ab90b1aa6cff488417a303815b7ff00d9ddfbd20967990ca2e31"
+    "clientVersion": 4,
+    "packetHex": "42030000000000000000000000000000000000009ea1f453cfab9f53cd40c8638d505423e23bc6b00856680733d529a277a39138"
   },
   "data": {
     "sessionIdHex": "1122334455667788",
     "innerHex": "4500002000000000401100000a4d0005010101011f901f9000080000",
-    "packetHex": "2311223344556677884500002000000000401100000a4d0005010101011f901f9000080000"
+    "packetHex": "3311223344556677884500002000000000401100000a4d0005010101011f901f9000080000"
   },
   "ping": {
     "sessionIdHex": "1122334455667788",
     "stamp": 81985529216486895,
-    "packetHex": "2411223344556677880123456789abcdef"
+    "packetHex": "3411223344556677880123456789abcdef"
   },
   "pong": {
     "sessionIdHex": "1122334455667788",
     "stamp": 81985529216486895,
-    "packetHex": "2511223344556677880123456789abcdef"
+    "packetHex": "3511223344556677880123456789abcdef"
   },
   "disconnect": {
     "sessionIdHex": "1122334455667788",
-    "packetHex": "261122334455667788"
+    "packetHex": "361122334455667788"
   },
   "cryptoP256": {
     "note": "Each side verifies the signature the other made. Regenerate .NET's with: dotnet run --project client/src/GamePingBooster.ProtocolCheck -- --emit-p256-signature",
     "privateKeyHex": "58ee53ec7ce1815650f98f5aa2275a2d8aa7839c5ceb40f2253d39b0037510a3",
     "publicKeyHex": "0430906cdb359b22917fd8ea326d18d606f61f001430addf2fd62afa02d3d1e283c3c9dba8f9d5eb11ae0fffe2cc9ad0e90a90f7a220b7288513342abd93d90604",
     "messageHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
-    "signatureFromGoHex": "942b3ac54e661e9b58a7c2487e164da1aa011364ce69274bc89e1a455483e5f4bab480b7966636e9bcedb45613bf5c1815d50484730b0d354d7529eef7754123",
+    "signatureFromGoHex": "33770b5dbd57f661bf4d43e07ba7fb30e0ab1e0f4cfb239010206a89da1d67b00eb0b156f8984ed9bb64f6f3c64b8a72263959ad6d70420b3a6680db831fb1f4",
     "signatureFromDotnetHex": "0fd35aa25589950a5881f2c4e076fa945277b44a01616c46d64ac72522da1d6c5452bc85d11236a7ad527f8395893cd5855b9c0540a5ab05ca48ea4e42e54d32"
   }
 }

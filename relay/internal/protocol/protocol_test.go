@@ -13,31 +13,37 @@ func TestHandshakeRoundTrip(t *testing.T) {
 	now := time.Now()
 	clientID := ClientID{1, 2, 3, 4, 5, 6, 7, 8}
 
-	req, _, err := BuildHandshakeReq(psk, clientID, now)
+	req, nonce, err := BuildHandshakeReq(psk, clientID, now)
 	if err != nil {
 		t.Fatalf("BuildHandshakeReq: %v", err)
 	}
-	if len(req) != HandshakeReqLen {
-		t.Fatalf("HandshakeReq length = %d, want %d", len(req), HandshakeReqLen)
+	if len(req) != HandshakeReqPSKLen {
+		t.Fatalf("HandshakeReq length = %d, want %d", len(req), HandshakeReqPSKLen)
+	}
+	if req[1] != AuthModePSK {
+		t.Fatalf("auth mode byte = %d, want AuthModePSK", req[1])
 	}
 
-	gotID, err := VerifyHandshakeReq(psk, req, now)
+	gotID, gotNonce, err := VerifyHandshakeReq(psk, req, now)
 	if err != nil {
 		t.Fatalf("VerifyHandshakeReq: %v", err)
 	}
 	if gotID != clientID {
 		t.Fatalf("client id = %v, want %v", gotID, clientID)
 	}
+	if gotNonce != nonce {
+		t.Fatalf("nonce read back as %x, want %x", gotNonce, nonce)
+	}
 
 	sid := SessionID{1, 2, 3, 4, 5, 6, 7, 8}
 	clientIP := netip.MustParseAddr("10.77.0.5")
 	relayIP := netip.MustParseAddr("10.77.0.1")
-	resp := BuildHandshakeResp(psk, StatusOK, sid, clientIP, relayIP, 1400)
-	if len(resp) != HandshakeRespLen {
-		t.Fatalf("HandshakeResp length = %d, want %d", len(resp), HandshakeRespLen)
+	resp := BuildHandshakeResp(psk, StatusOK, sid, clientIP, relayIP, 1400, nonce)
+	if len(resp) != HandshakeRespPSKLen {
+		t.Fatalf("HandshakeResp length = %d, want %d", len(resp), HandshakeRespPSKLen)
 	}
 
-	got, err := ParseHandshakeResp(psk, resp)
+	got, err := ParseHandshakeResp(psk, resp, nonce)
 	if err != nil {
 		t.Fatalf("ParseHandshakeResp: %v", err)
 	}
@@ -51,18 +57,49 @@ func TestHandshakeRejectsBadKeyAndSkew(t *testing.T) {
 	now := time.Now()
 	req, _, _ := BuildHandshakeReq(psk, ClientID{9}, now)
 
-	if _, err := VerifyHandshakeReq([]byte("wrong-key-wrong-key-wrong"), req, now); err != ErrBadAuth {
+	if _, _, err := VerifyHandshakeReq([]byte("wrong-key-wrong-key-wrong"), req, now); err != ErrBadAuth {
 		t.Fatalf("wrong PSK should return ErrBadAuth, got %v", err)
 	}
-	if _, err := VerifyHandshakeReq(psk, req, now.Add(5*time.Minute)); err != ErrClockSkew {
+	if _, _, err := VerifyHandshakeReq(psk, req, now.Add(5*time.Minute)); err != ErrClockSkew {
 		t.Fatalf("clock skew should return ErrClockSkew, got %v", err)
 	}
 
 	// The client id is inside the signed range, so tampering with it must break the HMAC.
+	// Offset 21 is inside the client id now that the auth-mode byte shifted everything by one.
 	tampered := append([]byte(nil), req...)
-	tampered[20] ^= 0x01
-	if _, err := VerifyHandshakeReq(psk, tampered, now); err != ErrBadAuth {
+	tampered[21] ^= 0x01
+	if _, _, err := VerifyHandshakeReq(psk, tampered, now); err != ErrBadAuth {
 		t.Fatalf("tampered client id should return ErrBadAuth, got %v", err)
+	}
+
+	// The auth mode is inside the signed range too, so a token-mode relay cannot be fed a
+	// PSK-mode packet with the byte flipped.
+	tampered = append([]byte(nil), req...)
+	tampered[1] = AuthModeToken
+	if _, _, err := VerifyHandshakeReq(psk, tampered, now); err != ErrBadAuthMode {
+		t.Fatalf("a flipped auth mode should return ErrBadAuthMode, got %v", err)
+	}
+}
+
+// The answer must be tied to the request that asked for it. Without the echo, a captured
+// response replayed at a client that is mid-handshake hands it a session id the relay has
+// already forgotten, and the tunnel comes up carrying nothing until the idle timeout. v2 had
+// exactly this hole.
+func TestHandshakeRespMustEchoTheNonce(t *testing.T) {
+	sid := SessionID{1}
+	clientIP := netip.MustParseAddr("10.77.0.5")
+	relayIP := netip.MustParseAddr("10.77.0.1")
+
+	sent := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
+	other := [8]byte{8, 7, 6, 5, 4, 3, 2, 1}
+
+	resp := BuildHandshakeResp(psk, StatusOK, sid, clientIP, relayIP, 1400, sent)
+
+	if _, err := ParseHandshakeResp(psk, resp, sent); err != nil {
+		t.Fatalf("the matching nonce was rejected: %v", err)
+	}
+	if _, err := ParseHandshakeResp(psk, resp, other); err != ErrBadNonce {
+		t.Fatalf("a reply to somebody else's handshake was accepted, got %v", err)
 	}
 }
 
@@ -72,8 +109,9 @@ func TestVersionMismatchResponseIsReadableByTheOtherVersion(t *testing.T) {
 	const clientVersion = 1
 	resp := BuildVersionMismatchResp(psk, clientVersion)
 
-	if len(resp) != HandshakeRespLen {
-		t.Fatalf("length = %d, want %d", len(resp), HandshakeRespLen)
+	// The V2 layout, on purpose: an old client can only parse what it already knows.
+	if len(resp) != HandshakeRespV2Len {
+		t.Fatalf("length = %d, want the v2 layout's %d", len(resp), HandshakeRespV2Len)
 	}
 	v, msgType := ParseHeader(resp[0])
 	if v != clientVersion {
@@ -88,8 +126,11 @@ func TestVersionMismatchResponseIsReadableByTheOtherVersion(t *testing.T) {
 
 	// Our own parser rejects it precisely because the version is not ours - which is correct,
 	// and is why the field has to be read before the version check on the receiving side.
-	if _, err := ParseHandshakeResp(psk, resp); err != ErrBadVersion {
-		t.Fatalf("expected ErrBadVersion from our own parser, got %v", err)
+	if _, err := ParseHandshakeResp(psk, resp, [8]byte{}); err != ErrShortPacket {
+		// Under v3 it fails on length before it ever reaches the version check, because the v2
+		// layout is 52 bytes and v3's is 60. Either refusal is correct; what matters is that a
+		// v3 client never mistakes this for an answer meant for it.
+		t.Fatalf("expected ErrShortPacket from our own parser, got %v", err)
 	}
 }
 

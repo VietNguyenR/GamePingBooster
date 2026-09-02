@@ -66,14 +66,14 @@ func expectSilence(t *testing.T, c *net.UDPConn) {
 // handshake performs a real handshake and returns the parsed result.
 func handshake(t *testing.T, c *net.UDPConn, id protocol.ClientID) protocol.HandshakeResult {
 	t.Helper()
-	req, _, err := protocol.BuildHandshakeReq(testPSK, id, time.Now())
+	req, nonce, err := protocol.BuildHandshakeReq(testPSK, id, time.Now())
 	if err != nil {
 		t.Fatalf("build handshake: %v", err)
 	}
 	if _, err := c.Write(req); err != nil {
 		t.Fatalf("send handshake: %v", err)
 	}
-	res, err := protocol.ParseHandshakeResp(testPSK, recvPacket(t, c))
+	res, err := protocol.ParseHandshakeResp(testPSK, recvPacket(t, c), nonce)
 	if err != nil {
 		t.Fatalf("parse handshake response: %v", err)
 	}
@@ -222,8 +222,11 @@ func TestVersionMismatchIsAnswered(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 	resp := recvPacket(t, c)
-	if len(resp) != protocol.HandshakeRespLen {
-		t.Fatalf("answer is %d bytes, want %d", len(resp), protocol.HandshakeRespLen)
+	// The V2 layout, deliberately, not v3's. An old client can only parse what it already
+	// knows; handing it a longer packet with a nonce echo it has never heard of turns "please
+	// update" back into the four-attempt timeout this whole path exists to avoid.
+	if len(resp) != protocol.HandshakeRespV2Len {
+		t.Fatalf("answer is %d bytes, want the v2 layout's %d", len(resp), protocol.HandshakeRespV2Len)
 	}
 	// The answer must carry the CLIENT's version so that client can parse it.
 	if v, _ := protocol.ParseHeader(resp[0]); v != protocol.Version+1 {
@@ -372,14 +375,23 @@ func TestRepeatedHandshakeReturnsTheSameSession(t *testing.T) {
 func TestMalformedPacketsDoNotKillTheRelay(t *testing.T) {
 	s, c := newTestRelay(t)
 
+	// Header bytes are version<<4|type, so these all have to move with the version. They used to
+	// be 0x2x, and leaving them there after the bump to v3 turned this test into a different one:
+	// 0x21 is a v2 handshake, which the relay now correctly ANSWERS with a version-mismatch
+	// refusal, and that unread 52-byte reply was then picked up by the handshake below instead of
+	// its own answer. The failure looked like a broken parser and was nothing of the sort.
+	//
+	// A wrong-version handshake belongs in the test that is about wrong versions, not here.
 	junk := [][]byte{
 		{},
-		{0x00},
-		{0x21},                   // Data header, no session id, no payload
-		{0x23, 1, 2, 3},          // truncated Data
-		{0x24, 1, 2, 3, 4, 5},    // truncated Ping
-		{0x26, 1},                // truncated Disconnect
-		{0x21, 0, 0, 0, 0, 0, 0}, // truncated handshake
+		{0x31},                   // handshake header alone, nothing after it
+		{0x00},                   // version 0, type 0
+		{0x33, 1, 2, 3},          // truncated Data
+		{0x34, 1, 2, 3, 4, 5},    // truncated Ping
+		{0x36, 1},                // truncated Disconnect
+		{0x31, 0, 0, 0, 0, 0, 0}, // truncated handshake, our own version
+		{0x31, 0xff},             // handshake naming an authentication mode that does not exist
+		{0x37, 1, 2, 3},          // the RESERVED encrypted-Data type, which must never be accepted
 		make([]byte, 1500),       // all zeroes, full size
 	}
 	for _, p := range junk {
