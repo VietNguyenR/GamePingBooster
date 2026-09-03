@@ -19,10 +19,27 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 {
     private readonly bool _alreadyConfigured;
 
-    public SettingsViewModel(IEnumerable<string>? currentEndpoints, bool alreadyConfigured)
+    public SettingsViewModel(IEnumerable<string>? currentEndpoints, bool alreadyConfigured,
+        string? currentLicenceUrl = null)
     {
         _endpoints = string.Join(Environment.NewLine, currentEndpoints ?? []);
         _alreadyConfigured = alreadyConfigured;
+        _licenceUrl = currentLicenceUrl ?? string.Empty;
+    }
+
+    /// <summary>
+    /// Where to sign in. Empty means self-hosted, which is the default.
+    ///
+    /// It is here because there was nowhere else. Without it the sign-in button could only ever
+    /// be revealed by editing config.json as an administrator, which meant the whole licensed
+    /// path was unreachable from the product itself - the screen existed and nothing could open
+    /// it. Unlike the key, this IS read back from the service: it is an address, not a secret.
+    /// </summary>
+    private string _licenceUrl;
+    public string LicenceUrl
+    {
+        get => _licenceUrl;
+        set { if (Set(ref _licenceUrl, value)) { Raise(nameof(CanSave)); Saved = false; } }
     }
 
     /// <summary>
@@ -51,20 +68,32 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         set { if (Set(ref _psk, value)) { Raise(nameof(CanSave)); Saved = false; } }
     }
 
-    public string PskWatermark => _alreadyConfigured ? "Leave blank to keep the current key" : "44 characters";
+    public string PskWatermark => _alreadyConfigured
+        ? "Leave blank to keep the current key"
+        : "44 characters";
 
     public string PskHint => _alreadyConfigured
         ? "A key is already saved. It is not shown here, and leaving this blank keeps it."
         : "Printed by the relay's installer, next to the endpoint.";
 
     /// <summary>
-    /// Saving needs an address, and a key unless one is already stored. That second half is what
-    /// lets somebody move their relay to a new address without retyping a 44-character key they
-    /// probably no longer have to hand.
+    /// Saving needs SOMETHING to save, and a key only when there are self-hosted addresses to
+    /// use it with.
+    ///
+    /// Both halves used to be stricter and both were wrong. Requiring an address made it
+    /// impossible to go back to the relays the profile lists, or to configure a licensed
+    /// installation, whose relays only ever come from the profile. Requiring a key blocked the
+    /// licensed case entirely - it has no pre-shared key and is not meant to.
+    ///
+    /// "Unless one is already stored" is what lets somebody move their relay to a new address
+    /// without retyping a 44-character key they probably no longer have to hand. That part was
+    /// right, and its bug was elsewhere: the service reported an installation as unconfigured
+    /// until the first connect, so this flag was false on a machine that had been working for
+    /// weeks and the blank box was refused.
     /// </summary>
     public bool CanSave =>
-        EndpointList.Count > 0 &&
-        (_alreadyConfigured || !string.IsNullOrWhiteSpace(Psk));
+        (EndpointList.Count > 0 || !string.IsNullOrWhiteSpace(LicenceUrl)) &&
+        (EndpointList.Count == 0 || _alreadyConfigured || !string.IsNullOrWhiteSpace(Psk));
 
     private string? _error;
     public string? Error

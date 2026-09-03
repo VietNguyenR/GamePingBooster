@@ -32,6 +32,10 @@
     <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
     <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.1" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
+    <!-- DPAPI, for the refresh token. Not in the base framework for net9.0-windows - the same
+         finding as in the service, checked the same way. Here the scope is CURRENT USER, not
+         machine: the refresh token belongs to the person, not to the PC. -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
   </ItemGroup>
 
 </Project>

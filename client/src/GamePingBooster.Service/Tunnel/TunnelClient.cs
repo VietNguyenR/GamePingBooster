@@ -189,12 +189,20 @@ internal sealed class TunnelClient : IDisposable
                 _log("No reply within 2 seconds, retrying...");
             }
         }
+        // Silence has several causes and this side cannot tell them apart, so name them all.
+        // An earlier version named only one - "a relay in PSK mode will not answer" - and said
+        // it about a relay that was in licensed mode and had simply refused the token, which
+        // sends the reader to the wrong machine. The same mistake was made in licence-gen probe
+        // on the same day.
         throw new TimeoutException(
             $"The relay at {_relayEndpoint} did not answer after {attempts} attempts. " +
-            "Check that the relay is running and that the VPS firewall allows the UDP port. " +
             (_auth.IsToken
-                ? "A relay running in PSK mode will not answer a token handshake at all, so check which mode it was started in."
-                : "Also check that both sides share the same PSK."));
+                ? "Any of these produces silence: the relay refused the licence token (its log " +
+                  "says why), the relay is running in PSK mode and never answers a token " +
+                  "handshake, the relay is not running, or the UDP port is not reachable."
+                : "Any of these produces silence: the two sides do not share the same PSK, the " +
+                  "relay is running in licensed mode and never answers a PSK handshake, the " +
+                  "relay is not running, or the UDP port is not reachable."));
     }
 
     /// <summary>Starts both pump threads plus the keepalive loop.</summary>

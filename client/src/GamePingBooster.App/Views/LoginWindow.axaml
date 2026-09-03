@@ -1,0 +1,70 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:GamePingBooster.App.ViewModels"
+        x:Class="GamePingBooster.App.Views.LoginWindow"
+        x:DataType="vm:LoginViewModel"
+        Title="Sign in"
+        Width="400" SizeToContent="Height"
+        MinWidth="400"
+        WindowStartupLocation="CenterOwner"
+        CanResize="False"
+        Background="#0F172A">
+
+  <Window.Styles>
+    <Style Selector="TextBlock.label">
+      <Setter Property="Foreground" Value="#94A3B8" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="Margin" Value="0,0,0,4" />
+    </Style>
+    <Style Selector="TextBlock.hint">
+      <Setter Property="Foreground" Value="#64748B" />
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style Selector="TextBox">
+      <Setter Property="Background" Value="#1E293B" />
+      <Setter Property="Foreground" Value="#E2E8F0" />
+      <Setter Property="BorderBrush" Value="#334155" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="10,8" />
+    </Style>
+    <Style Selector="Button">
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="16,8" />
+    </Style>
+  </Window.Styles>
+
+  <StackPanel Margin="24" Spacing="14">
+
+    <TextBlock Text="Sign in" Foreground="#E2E8F0" FontSize="18" FontWeight="SemiBold" />
+    <TextBlock Classes="hint" Text="{Binding ServerText}" />
+
+    <StackPanel Spacing="0">
+      <TextBlock Classes="label" Text="Email" />
+      <TextBox Text="{Binding Email}" Watermark="you@example.com" />
+    </StackPanel>
+
+    <StackPanel Spacing="0">
+      <TextBlock Classes="label" Text="Password" />
+      <TextBox Text="{Binding Password}" PasswordChar="*" />
+    </StackPanel>
+
+    <!-- Which machine this is. "This account already has 2 devices" is unanswerable without it,
+         and a public key costs nothing to show. -->
+    <TextBlock Classes="hint" Text="{Binding DeviceText}" />
+
+    <Border Background="#7F1D1D" CornerRadius="8" Padding="12,8"
+            IsVisible="{Binding HasError}">
+      <TextBlock Text="{Binding Error}" Foreground="#FECACA" FontSize="12" TextWrapping="Wrap" />
+    </Border>
+
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+      <Button Content="Cancel" Click="OnCancelClick"
+              Background="#1E293B" Foreground="#94A3B8" />
+      <Button Content="{Binding ButtonText}" Click="OnSubmitClick"
+              IsEnabled="{Binding CanSubmit}"
+              Background="#2563EB" Foreground="White" />
+    </StackPanel>
+
+  </StackPanel>
+</Window>

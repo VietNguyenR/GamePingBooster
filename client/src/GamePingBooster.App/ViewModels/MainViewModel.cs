@@ -23,6 +23,85 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _pipe.Disconnected += OnDisconnected;
     }
 
+    // ------------------------------------------------------------ licence
+    //
+    // All of this is absent on a self-hosted installation, which is the default and stays the
+    // default: no licenceUrl means no sign-in button, no licence line, nothing to explain.
+
+    private string? _licenceUrl;
+    public string? LicenceUrl
+    {
+        get => _licenceUrl;
+        private set { if (Set(ref _licenceUrl, value)) Raise(nameof(ShowLicence)); }
+    }
+
+    /// <summary>This machine's device public key, hex. Public, and needed to sign in.</summary>
+    public string? DevicePublicKey { get; private set; }
+
+    private bool _hasToken;
+    public bool HasToken
+    {
+        get => _hasToken;
+        private set
+        {
+            if (!Set(ref _hasToken, value)) return;
+            Raise(nameof(LicenceText));
+            Raise(nameof(SignInButtonText));
+        }
+    }
+
+    private DateTimeOffset? _tokenExpiresAt;
+    public DateTimeOffset? TokenExpiresAt
+    {
+        get => _tokenExpiresAt;
+        private set
+        {
+            if (!Set(ref _tokenExpiresAt, value)) return;
+            // A moved expiry IS the evidence a renewal worked, so any complaint about the last
+            // one has stopped being true and should not be left on screen.
+            _licenceNotice = null;
+            Raise(nameof(LicenceNotice));
+            Raise(nameof(LicenceText));
+        }
+    }
+
+    /// <summary>Whether this installation has a licence server at all.</summary>
+    public bool ShowLicence => !string.IsNullOrWhiteSpace(LicenceUrl);
+
+    public string SignInButtonText => HasToken ? "Account" : "Sign in";
+
+    /// <summary>
+    /// The last thing the renewer had to say, if anything.
+    ///
+    /// It gets its own property rather than borrowing Detail, which the service overwrites on
+    /// every status push - a message written there would be gone within the second and nobody
+    /// would ever see it. Cleared as soon as the state it described stops being true.
+    /// </summary>
+    private string? _licenceNotice;
+    public string? LicenceNotice
+    {
+        get => _licenceNotice;
+        set { if (Set(ref _licenceNotice, value)) Raise(nameof(LicenceText)); }
+    }
+
+    public string LicenceText
+    {
+        get
+        {
+            if (!string.IsNullOrEmpty(LicenceNotice)) return LicenceNotice!;
+            if (!HasToken) return "Not signed in";
+            if (TokenExpiresAt is not { } expiry) return "Signed in";
+
+            // Renewal happens on its own at half of remaining life, so an expiry hours away is
+            // normal and not something to alarm anybody about. Only say something when it is
+            // close enough that the renewal has evidently not been happening.
+            var left = expiry - DateTimeOffset.UtcNow;
+            if (left <= TimeSpan.Zero) return "Licence expired - sign in again";
+            if (left < TimeSpan.FromHours(2)) return $"Licence expires in {left.TotalMinutes:F0} min";
+            return $"Signed in, licence valid until {expiry.LocalDateTime:g}";
+        }
+    }
+
     // ------------------------------------------------------------ displayed state
 
     private TunnelState _state = TunnelState.Disconnected;
@@ -247,6 +326,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
         RelayName = status.RelayName;
         RelayEndpoints = status.RelayEndpoints;
         Configured = status.Configured;
+        LicenceUrl = status.LicenceUrl;
+        DevicePublicKey = status.DevicePublicKey;
+        HasToken = status.HasToken;
+        TokenExpiresAt = status.TokenExpiresAt is { } unix
+            ? DateTimeOffset.FromUnixTimeSeconds(unix)
+            : null;
         ActiveRoutes = status.ActiveRoutes;
         PacketsSent = status.PacketsSent;
         PacketsReceived = status.PacketsReceived;

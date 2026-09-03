@@ -726,10 +726,16 @@ internal sealed class TunnelEngine : IAsyncDisposable
         // value before anything has been tried. The key is deliberately absent - see the
         // set-relay comment in PipeServer.
         RelayEndpoints = _config.RelayEndpoints,
-        // Ready to connect: a key, and somewhere to send packets. The relay may come from the
-        // self-hosted setting OR from the profile's own list - both are normal, and treating
-        // only the first as configured disabled Connect on installations that worked fine.
-        Configured = _config.HasKey && Relays.Count > 0,
+        // Ready to connect: SOME credential, and somewhere to send packets.
+        //
+        // The relay may come from the self-hosted setting OR from the profile's own list - both
+        // are normal, and treating only the first as configured disabled Connect on
+        // installations that worked fine.
+        //
+        // The credential may be a pre-shared key OR a licence token. Requiring the key would
+        // disable Connect on a licensed installation, which has no key at all and is not
+        // supposed to have one.
+        Configured = (_config.HasKey || _token is not null) && Relays.Count > 0,
         TunnelPingMs = _tunnel?.LastRttMs,
         LossRatio = _tunnel?.LossRatio,
         GameRunning = _watcher?.IsGameRunning ?? false,
@@ -747,6 +753,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
         // both to know when to sign in and when to refresh; neither is a credential.
         HasToken = _token is not null,
         TokenExpiresAt = _token is null ? null : TokenStore.ExpiryOf(_token).ToUnixTimeSeconds(),
+        LicenceUrl = _config.LicenceUrl,
     };
 
     /// <summary>Relay list for the UI to offer to the user.</summary>
@@ -791,9 +798,26 @@ internal sealed class TunnelEngine : IAsyncDisposable
     /// the pipe is open to BuiltinUsers, so anything can send this. Rejecting a malformed
     /// endpoint here is what stops a bad value reaching the tunnel.
     /// </summary>
-    public async Task<string?> SetRelayAsync(IReadOnlyList<string>? endpoints, string? psk, CancellationToken ct)
+    public async Task<string?> SetRelayAsync(IReadOnlyList<string>? endpoints, string? psk,
+        string? licenceUrl, CancellationToken ct)
     {
         psk = psk?.Trim();
+
+        // Null means "leave it alone", empty means "clear it". The distinction matters: the
+        // settings screen sends the box's contents every time, and an installation that has a
+        // licence server must not lose it because somebody opened settings to change an address.
+        if (licenceUrl is not null)
+        {
+            licenceUrl = licenceUrl.Trim();
+            if (licenceUrl.Length > 0)
+            {
+                if (!Uri.TryCreate(licenceUrl, UriKind.Absolute, out var uri) ||
+                    (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+                {
+                    return "The licence server must be a full http:// or https:// address.";
+                }
+            }
+        }
 
         var cleaned = (endpoints ?? [])
             .Select(e => e.Trim())
@@ -801,7 +825,16 @@ internal sealed class TunnelEngine : IAsyncDisposable
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        if (cleaned.Count == 0) return "Enter at least one relay address.";
+        // An empty list is legitimate and means "use the relays the profile lists". It used to
+        // be an error, which made two reasonable setups impossible to express: somebody who
+        // wants to go back to the vendor's relays after trying their own, and a licensed
+        // installation, whose relays only ever come from the profile.
+        //
+        // The key is only required when there are self-hosted endpoints to reach WITH it. A
+        // licensed installation authenticates with a token and has no pre-shared key at all;
+        // demanding one there would make the settings screen unusable for the exact case the
+        // licensed mode exists to serve.
+        var needsKey = cleaned.Count > 0;
 
         // A blank key means "keep the one already stored", which is what lets somebody move
         // their relay to a new address without retyping a 44-character key they no longer have
@@ -809,7 +842,14 @@ internal sealed class TunnelEngine : IAsyncDisposable
         var keepExisting = string.IsNullOrWhiteSpace(psk);
         if (keepExisting)
         {
-            if (string.IsNullOrWhiteSpace(_config.Psk)) return "Enter the pre-shared key.";
+            // Only an ERROR when a key is actually needed and there is none to keep. The
+            // carry-across below happens either way: a blank box means "leave the key alone",
+            // and letting it fall through would write an empty key over a good one - silently
+            // breaking an installation whose owner only meant to change an address.
+            if (needsKey && string.IsNullOrWhiteSpace(_config.Psk))
+            {
+                return "Enter the pre-shared key.";
+            }
             psk = _config.Psk;
         }
 
@@ -828,14 +868,26 @@ internal sealed class TunnelEngine : IAsyncDisposable
             }
         }
         // The relay refuses anything shorter, so catching it here saves a handshake that could
-        // only ever fail, and says why.
+        // only ever fail, and says why. Skipped when the key was carried across rather than
+        // typed: an installation with no key at all is legitimate now, and complaining that its
+        // absent key is too short would be nonsense.
         if (!keepExisting && psk!.Length < 16)
         {
             return "The key is too short - it must be at least 16 characters.";
         }
 
+        // Kept so the change can be undone if the write fails. Without this the service would
+        // go on running with settings it had just told the user it could not save, and a
+        // restart would silently put the old ones back - which is the worst of both, because
+        // the machine behaves one way now and a different way tomorrow for no visible reason.
+        var previousEndpoints = _config.RelayEndpoints;
+        var previousPsk = _config.Psk;
+        var previousLicenceUrl = _config.LicenceUrl;
+        var previousRelayId = _config.DefaultRelayId;
+
         _config.RelayEndpoints = cleaned;
         _config.Psk = psk;
+        if (licenceUrl is not null) _config.LicenceUrl = licenceUrl;
 
         // Clear the preferred relay id along with it.
         //
@@ -851,6 +903,10 @@ internal sealed class TunnelEngine : IAsyncDisposable
         }
         catch (Exception ex)
         {
+            _config.RelayEndpoints = previousEndpoints;
+            _config.Psk = previousPsk;
+            _config.LicenceUrl = previousLicenceUrl;
+            _config.DefaultRelayId = previousRelayId;
             return $"Could not save the settings: {ex.Message}";
         }
 

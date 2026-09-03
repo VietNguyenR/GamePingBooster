@@ -19,6 +19,17 @@ public sealed class ServiceConfig
     /// <summary>Pre-shared key; must match /etc/gpb/psk on the relay.</summary>
     [JsonPropertyName("psk")] public string Psk { get; set; } = "";
 
+    /// <summary>
+    /// Base URL of the licence server, e.g. https://licence.example.com. Empty = self-hosted
+    /// only, which is the default and stays the default.
+    ///
+    /// It lives here rather than in a settings file of the UI's own because it is a property of
+    /// the installation, not of the person sitting at it, and because there should be one place
+    /// that answers "what is this client pointed at". The UI cannot read this file, so it comes
+    /// back over the pipe with the status - it is a URL, not a credential.
+    /// </summary>
+    [JsonPropertyName("licenceUrl")] public string? LicenceUrl { get; set; }
+
     /// <summary>Default relay id; empty means take the first relay in the profile.</summary>
     [JsonPropertyName("defaultRelayId")] public string? DefaultRelayId { get; set; }
 

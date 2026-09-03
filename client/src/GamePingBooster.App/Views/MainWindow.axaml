@@ -91,7 +91,7 @@
     </StackPanel>
 
     <!-- Primary action -->
-    <Grid Grid.Row="3" ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
+    <Grid Grid.Row="3" ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto">
 
       <!-- First run: there is no relay yet, so say so instead of offering a button that
            could only fail. -->
@@ -113,14 +113,32 @@
               Background="#2563EB" Foreground="White"
               CornerRadius="10" Margin="0,0,8,0" />
 
-      <Button Grid.Row="1" Grid.Column="1"
-              Content="Settings"
-              Click="OnSettingsClick"
-              HorizontalContentAlignment="Center"
-              VerticalContentAlignment="Center"
-              Height="46" Width="96" FontSize="14"
-              Background="#334155" Foreground="#E2E8F0"
-              CornerRadius="10" />
+      <!-- Only on an installation that has a licence server. A self-hosted one never sees any
+           of this, which is the default and stays the default. -->
+      <TextBlock Grid.Row="2" Grid.ColumnSpan="2"
+                 IsVisible="{Binding ShowLicence}"
+                 Text="{Binding LicenceText}"
+                 Foreground="#94A3B8" FontSize="11"
+                 Margin="0,10,0,0" />
+
+      <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Spacing="8">
+        <!-- Sign in only exists where there is something to sign in to. -->
+        <Button Content="{Binding SignInButtonText}"
+                Click="OnSignInClick"
+                IsVisible="{Binding ShowLicence}"
+                HorizontalContentAlignment="Center"
+                VerticalContentAlignment="Center"
+                Height="46" Width="88" FontSize="14"
+                Background="#334155" Foreground="#E2E8F0"
+                CornerRadius="10" />
+        <Button Content="Settings"
+                Click="OnSettingsClick"
+                HorizontalContentAlignment="Center"
+                VerticalContentAlignment="Center"
+                Height="46" Width="96" FontSize="14"
+                Background="#334155" Foreground="#E2E8F0"
+                CornerRadius="10" />
+      </StackPanel>
     </Grid>
   </Grid>
 </Window>

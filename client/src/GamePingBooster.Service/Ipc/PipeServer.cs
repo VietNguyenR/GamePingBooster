@@ -164,7 +164,7 @@ internal sealed class PipeServer
             // would mean not checking.
             case "set-relay":
             {
-                var error = await _engine.SetRelayAsync(cmd.RelayEndpoints, cmd.Psk, ct)
+                var error = await _engine.SetRelayAsync(cmd.RelayEndpoints, cmd.Psk, cmd.LicenceUrl, ct)
                     .ConfigureAwait(false);
                 if (error is not null)
                 {

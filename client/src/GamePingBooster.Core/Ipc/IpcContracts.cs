@@ -52,6 +52,16 @@ public sealed class CommandMessage
     /// <summary>set-relay: the pre-shared key. Never sent back up. Null means "keep the stored one".</summary>
     [JsonPropertyName("psk")] public string? Psk { get; set; }
 
+    /// <summary>
+    /// set-relay: base URL of the licence server, or empty for a self-hosted installation.
+    ///
+    /// It travels with the relay settings rather than in a verb of its own because it is the
+    /// same act - the settings screen writing the service's configuration - and a second verb
+    /// would mean a second round trip and a second way for the two halves to disagree about
+    /// what was saved. Null means "leave it as it is"; empty string means "clear it".
+    /// </summary>
+    [JsonPropertyName("licenceUrl")] public string? LicenceUrl { get; set; }
+
     /// <summary>Relay id to use, e.g. "sg-1". Empty means let the service pick by ping.</summary>
     [JsonPropertyName("relayId")] public string? RelayId { get; set; }
 
@@ -161,6 +171,13 @@ public sealed class StatusMessage
     /// is the whole reason a handshake never carries a nearly expired token.
     /// </summary>
     [JsonPropertyName("tokenExpiresAt")] public long? TokenExpiresAt { get; set; }
+
+    /// <summary>
+    /// Where to sign in, from the service's configuration. Null or empty means this installation
+    /// is self-hosted and there is nothing to sign in to - the UI hides the whole idea then.
+    /// A URL, not a credential.
+    /// </summary>
+    [JsonPropertyName("licenceUrl")] public string? LicenceUrl { get; set; }
 
     /// <summary>Error detail when State is Faulted.</summary>
     [JsonPropertyName("error")] public string? Error { get; set; }

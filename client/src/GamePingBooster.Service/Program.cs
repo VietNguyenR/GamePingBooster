@@ -105,6 +105,29 @@ public static class Program
         log($"Configuration loaded. Default game: {config.DefaultGameId}, adapter: {config.AdapterName}");
 
         await using var engine = new TunnelEngine(config, log);
+
+        // Load the profile now, not at the first connect.
+        //
+        // Everything the UI asks about configuration goes through Snapshot, and Snapshot answers
+        // "is this installation configured" partly from the relay list - which lives in the
+        // profile. Loading it lazily meant a perfectly configured machine reported itself
+        // unconfigured until somebody pressed Connect: the first-run banner appeared on every
+        // start, and the settings screen decided there was no stored key, so it demanded the
+        // pre-shared key again and refused to save without it. One missing call, three symptoms,
+        // none of which pointed at it.
+        //
+        // Best effort on purpose. A missing or unreadable profile is not a reason to refuse to
+        // start - the same reasoning as ServiceConfig.Load no longer throwing.
+        try
+        {
+            await engine.LoadProfileAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            log($"Could not load the profile at startup ({ex.Message}). " +
+                "It will be tried again on the next connect.");
+        }
+
         var pipe = new PipeServer(engine, log);
 
         log($"Listening on pipe \\\\.\\pipe\\{Core.Ipc.IpcConstants.PipeName}");
