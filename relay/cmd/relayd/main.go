@@ -52,9 +52,31 @@ func main() {
 		burstKB     = flag.Int64("rate-burst", 0, "burst allowance in KB, 0 means four seconds at the sustained rate")
 		logLevel    = flag.String("log-level", "info", "debug | info | warn | error")
 	)
+	printRelayKey := flag.Bool("print-relay-key", false,
+		"print this relay's own public key and exit; creates the key file if it does not exist")
+
 	flag.Parse()
 
 	log := newLogger(*logLevel)
+
+	// Before the mode checks, because this needs neither mode and is run on a relay that may not
+	// be configured yet.
+	//
+	// The key is also logged at startup, but only in the mode that uses it, and reading it back
+	// then means grepping journalctl on a machine somebody is ssh'd into at 2am. It has to reach
+	// the profile somehow, and there is nowhere else to read it from once the log has rotated.
+	if *printRelayKey {
+		key, created, err := loadOrCreateRelayKey(*relayKey)
+		if err != nil {
+			log.Error("could not load this relay's own key", "err", err)
+			os.Exit(1)
+		}
+		if created {
+			log.Warn("no key existed, so one was generated", "file", *relayKey)
+		}
+		fmt.Println(hex.EncodeToString(protocol.MarshalPublicKey(&key.PublicKey)))
+		return
+	}
 
 	// Exactly one mode. Deciding here rather than in server.New means the error names the flag
 	// the operator actually typed.

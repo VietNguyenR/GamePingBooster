@@ -40,6 +40,11 @@ internal static class Program
             return EmitP256Signature(args.Length > 1 ? args[1] : null);
         }
 
+        if (args.Length > 0 && args[0] == "--emit-handshake-req-token")
+        {
+            return EmitHandshakeReqToken(args.Length > 1 ? args[1] : null);
+        }
+
         string path;
         try
         {
@@ -75,6 +80,7 @@ internal static class Program
         CheckPong(root.GetProperty("pong"));
         CheckDisconnect(root.GetProperty("disconnect"));
         CheckCryptoP256(root.GetProperty("cryptoP256"));
+        CheckHandshakeReqToken(root.GetProperty("handshakeReqToken"));
 
         Console.WriteLine();
         if (_failures == 0)
@@ -340,6 +346,140 @@ internal static class Program
         var message = Hex(v.GetProperty("messageHex").GetString()!);
 
         Console.WriteLine(ToHex(GpbCrypto.Sign(priv, message)));
+        return 0;
+    }
+
+    /// <summary>
+    /// The v3 token handshake, in both directions.
+    ///
+    /// The half that matters is verifying the packet GO built. This side verifying only its own
+    /// output would pass even if every offset in the format had moved, because it would have
+    /// moved in the reader too - which is exactly how two implementations drift apart without
+    /// anything going red.
+    ///
+    /// There is no VerifyHandshakeReqToken to lean on here: the client never verifies a request,
+    /// only the relay does. So both signatures are checked with the primitives directly, which
+    /// has the side effect of stating in code where each signed span begins and ends.
+    /// </summary>
+    private static void CheckHandshakeReqToken(JsonElement v)
+    {
+        var tokenHex = v.GetProperty("tokenHex").GetString()!;
+        var devicePubHex = v.GetProperty("devicePublicKeyHex").GetString()!;
+        var token = Hex(tokenHex);
+        var clientId = HexToUInt64(v.GetProperty("clientIdHex").GetString()!);
+        var unixTime = v.GetProperty("unixTimeSeconds").GetInt64();
+
+        using var devicePriv = GpbCrypto.ImportPrivateKey(Hex(v.GetProperty("devicePrivateKeyHex").GetString()!));
+        using var devicePub = GpbCrypto.ImportPublicKey(Hex(devicePubHex));
+        using var licencePub = GpbCrypto.ImportPublicKey(Hex(v.GetProperty("licencePublicKeyHex").GetString()!));
+
+        Check("token handshake: device public key matches the committed scalar",
+            ToHex(GpbCrypto.ExportPublicKey(devicePriv)) == devicePubHex,
+            "the committed device keypair is inconsistent");
+
+        Check("token handshake: token length", token.Length == GpbProtocol.TokenLen,
+            $"got {token.Length}, want {GpbProtocol.TokenLen}");
+
+        // The token's own signature, by the LICENCE key, over everything before it. This is the
+        // first check a relay makes, and .NET has never done it before - the client only ever
+        // carried a token around as opaque bytes.
+        Check("token handshake: the token verifies against the licence key",
+            GpbCrypto.Verify(licencePub, token.AsSpan(0, TokenSigOffset), token.AsSpan(TokenSigOffset)),
+            "the licence signature over the token does not verify, so the two sides disagree " +
+            "about either the token layout or the signature encoding");
+
+        // The device public key sits inside the token. That is what stops a stolen token being
+        // useful on its own, so its position is worth asserting rather than assuming.
+        Check("token handshake: the token names the committed device key",
+            ToHex(token.AsSpan(TokenDeviceKeyOffset, GpbCrypto.PublicKeyLen)) == devicePubHex,
+            "the device key is at the wrong offset inside the token");
+
+        void VerifyPacket(string label, string packetHex)
+        {
+            var pkt = Hex(packetHex);
+
+            Check($"{label}: length", pkt.Length == GpbProtocol.HandshakeReqTokenLen,
+                $"got {pkt.Length}, want {GpbProtocol.HandshakeReqTokenLen}");
+            if (pkt.Length != GpbProtocol.HandshakeReqTokenLen) return;
+
+            Check($"{label}: header byte",
+                pkt[0] == (GpbProtocol.Version << 4 | GpbProtocol.TypeHandshakeReq),
+                $"got {pkt[0]:x2}");
+            Check($"{label}: auth mode byte", pkt[1] == GpbProtocol.AuthModeToken,
+                $"got {pkt[1]}, want {GpbProtocol.AuthModeToken}");
+            Check($"{label}: timestamp", ReadUInt64BE(pkt, 10) == (ulong)unixTime,
+                $"got {ReadUInt64BE(pkt, 10)}, want {unixTime}");
+            Check($"{label}: client id", ReadUInt64BE(pkt, 18) == clientId,
+                $"got {ReadUInt64BE(pkt, 18):x16}, want {clientId:x16}");
+            Check($"{label}: carries the committed token",
+                ToHex(pkt.AsSpan(ReqTokenOffset, GpbProtocol.TokenLen)) == tokenHex,
+                "the token is at the wrong offset, or is not the one this file names");
+
+            // The request signature, by the DEVICE key, over everything before it. If this
+            // passes for a packet built here and fails for Go's, the two sides disagree about
+            // which bytes are signed - the most likely way this format breaks.
+            Check($"{label}: device signature verifies",
+                GpbCrypto.Verify(devicePub, pkt.AsSpan(0, ReqTokenSigOffset), pkt.AsSpan(ReqTokenSigOffset)),
+                "the signature does not cover the span this side thinks it covers");
+
+            // An accept-only check cannot fail. Flip a bit and require a refusal.
+            var tampered = (byte[])pkt.Clone();
+            tampered[18] ^= 0x01;
+            Check($"{label}: one flipped bit is rejected",
+                !GpbCrypto.Verify(devicePub, tampered.AsSpan(0, ReqTokenSigOffset), tampered.AsSpan(ReqTokenSigOffset)),
+                "a tampered packet still verified, so the check above proves nothing");
+        }
+
+        VerifyPacket("token handshake from Go", v.GetProperty("packetFromGoHex").GetString()!);
+
+        // And one built right now, rather than read from the file: it proves the builder in
+        // GpbProtocol still produces something that passes every offset check above.
+        var mine = GpbProtocol.BuildHandshakeReqToken(devicePriv, token, clientId,
+            DateTimeOffset.FromUnixTimeSeconds(unixTime), out _);
+        VerifyPacket("token handshake built here", ToHex(mine));
+    }
+
+    // Offsets inside a token and inside a token-mode HandshakeReq. See docs/PROTOCOL-v3.md.
+    private const int TokenDeviceKeyOffset = 9;
+    private const int TokenSigOffset = 86;
+    private const int ReqTokenOffset = 26;
+    private const int ReqTokenSigOffset = ReqTokenOffset + GpbProtocol.TokenLen;
+
+    private static ulong ReadUInt64BE(ReadOnlySpan<byte> b, int offset) =>
+        System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(b.Slice(offset, 8));
+
+    /// <summary>
+    /// Emits a token-mode HandshakeReq for the Go side to verify.
+    ///
+    /// Built at the frozen timestamp the vectors name, not at the current time: the relay checks
+    /// clock skew, so a packet stamped "now" would stop verifying within a minute of being
+    /// committed, and the failure would look like a format bug rather than a stale sample.
+    /// </summary>
+    private static int EmitHandshakeReqToken(string? vectorPath)
+    {
+        string path;
+        try
+        {
+            path = vectorPath ?? FindVectorFile();
+        }
+        catch (FileNotFoundException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return 2;
+        }
+
+        using var doc = JsonDocument.Parse(File.ReadAllBytes(path));
+        var v = doc.RootElement.GetProperty("handshakeReqToken");
+
+        using var devicePriv = GpbCrypto.ImportPrivateKey(Hex(v.GetProperty("devicePrivateKeyHex").GetString()!));
+        var token = Hex(v.GetProperty("tokenHex").GetString()!);
+        var clientId = HexToUInt64(v.GetProperty("clientIdHex").GetString()!);
+        var unixTime = v.GetProperty("unixTimeSeconds").GetInt64();
+
+        var pkt = GpbProtocol.BuildHandshakeReqToken(devicePriv, token, clientId,
+            DateTimeOffset.FromUnixTimeSeconds(unixTime), out _);
+
+        Console.WriteLine(ToHex(pkt));
         return 0;
     }
 

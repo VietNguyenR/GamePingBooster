@@ -48,6 +48,20 @@ const (
 	// reproducible by hand on the other side.
 	vectorP256MsgHex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" +
 		"202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+
+	// Two more frozen P-256 keys, for the token handshake. They stand in for the licence
+	// server's key and one machine's device key. Frozen for the same reason as the one above:
+	// the committed token was signed with the first and the committed packets with the second.
+	vectorLicencePrivHex = "3d1f5e2c9b47a8360d5e7f1a2c4b6d8e0f1a3b5c7d9e0f2a4b6c8d0e1f3a5b7c"
+	vectorDevicePrivHex  = "6a2c4e8f0b1d3f5a7c9e0b2d4f6a8c0e1f3b5d7f9a1c3e5f7b9d1f3a5c7e9b0d"
+
+	// The token's own fields. The expiry is a day after vectorUnixTime, and every check that
+	// touches it passes that same frozen instant as `now` - so this file does not quietly stop
+	// working a day after it was written, which is what a real timestamp would do.
+	vectorTokenUser    = uint64(4242)
+	vectorTokenTier    = byte(1)
+	vectorTokenMaxSess = byte(0)
+	vectorTokenExpiry  = vectorUnixTime + 86400
 )
 
 type vectorFile struct {
@@ -113,6 +127,34 @@ type vectorFile struct {
 		SignatureFromGoHex     string `json:"signatureFromGoHex"`
 		SignatureFromDotnetHex string `json:"signatureFromDotnetHex"`
 	} `json:"cryptoP256"`
+
+	// The v3 token handshake, crossed the same way cryptoP256 is: each side verifies the packet
+	// the OTHER one built.
+	//
+	// This is the only thing that proves the 240-byte HandshakeReq agrees between the two
+	// implementations. Everything else about token mode was tested within one language: Go's
+	// relay tests build and verify Go packets, and the C# client's device key was only ever
+	// checked as a 65-byte public key. A shifted field or a signature computed over the wrong
+	// span would pass all of that and fail here.
+	//
+	// ECDSA signing is randomised, so neither packet is reproducible - both are frozen samples,
+	// and so is the token, which is embedded inside both of them.
+	HandshakeReqToken struct {
+		Note                 string `json:"note"`
+		LicencePrivateKeyHex string `json:"licencePrivateKeyHex"`
+		LicencePublicKeyHex  string `json:"licencePublicKeyHex"`
+		DevicePrivateKeyHex  string `json:"devicePrivateKeyHex"`
+		DevicePublicKeyHex   string `json:"devicePublicKeyHex"`
+		UserID               uint64 `json:"userId"`
+		Tier                 int    `json:"tier"`
+		MaxSessions          int    `json:"maxSessions"`
+		ExpiryUnixSeconds    int64  `json:"expiryUnixSeconds"`
+		ClientIDHex          string `json:"clientIdHex"`
+		UnixTimeSeconds      int64  `json:"unixTimeSeconds"`
+		TokenHex             string `json:"tokenHex"`
+		PacketFromGoHex      string `json:"packetFromGoHex"`
+		PacketFromDotnetHex  string `json:"packetFromDotnetHex"`
+	} `json:"handshakeReqToken"`
 }
 
 func mustHex(t *testing.T, s string) []byte {
@@ -204,14 +246,68 @@ func generateVectors(t *testing.T) {
 	}
 	v.CryptoP256.SignatureFromGoHex = hex.EncodeToString(goSig)
 
+	// ------------------------------------------------- v3 token handshake
+	//
+	// Read the previous file FIRST. Three values have to survive a regeneration: .NET's P-256
+	// signature, .NET's handshake packet, and the token itself. The token matters most and is
+	// the least obvious - it is embedded inside BOTH committed packets, so minting a fresh one
+	// here would leave .NET's packet carrying a token this file no longer names, and the
+	// mismatch would look like a protocol bug rather than a regeneration artefact.
+	var old vectorFile
 	if prev, err := os.ReadFile(vectorPath); err == nil {
-		var old vectorFile
-		if json.Unmarshal(prev, &old) == nil {
-			v.CryptoP256.SignatureFromDotnetHex = old.CryptoP256.SignatureFromDotnetHex
-		}
+		_ = json.Unmarshal(prev, &old)
 	}
+	v.CryptoP256.SignatureFromDotnetHex = old.CryptoP256.SignatureFromDotnetHex
 	if v.CryptoP256.SignatureFromDotnetHex == "" {
 		t.Log("no .NET signature carried over - produce one and paste it in, or the " +
+			"cross-language half of this check is not running")
+	}
+
+	licencePriv, err := ParsePrivateKey(mustHex(t, vectorLicencePrivHex))
+	if err != nil {
+		t.Fatalf("parse the fixed licence key: %v", err)
+	}
+	devicePriv, err := ParsePrivateKey(mustHex(t, vectorDevicePrivHex))
+	if err != nil {
+		t.Fatalf("parse the fixed device key: %v", err)
+	}
+
+	h := &v.HandshakeReqToken
+	h.Note = "Each side verifies the packet the other built. Regenerate .NET's with: " +
+		"dotnet run --project client/src/GamePingBooster.ProtocolCheck -- --emit-handshake-req-token"
+	h.LicencePrivateKeyHex = vectorLicencePrivHex
+	h.LicencePublicKeyHex = hex.EncodeToString(MarshalPublicKey(&licencePriv.PublicKey))
+	h.DevicePrivateKeyHex = vectorDevicePrivHex
+	h.DevicePublicKeyHex = hex.EncodeToString(MarshalPublicKey(&devicePriv.PublicKey))
+	h.UserID = vectorTokenUser
+	h.Tier = int(vectorTokenTier)
+	h.MaxSessions = int(vectorTokenMaxSess)
+	h.ExpiryUnixSeconds = vectorTokenExpiry
+	h.ClientIDHex = vectorClientHex
+	h.UnixTimeSeconds = vectorUnixTime
+
+	// Carried across, and minted only when there is nothing to carry. See the note above.
+	h.TokenHex = old.HandshakeReqToken.TokenHex
+	if h.TokenHex == "" {
+		tok, err := BuildToken(licencePriv, vectorTokenUser,
+			MarshalPublicKey(&devicePriv.PublicKey), time.Unix(vectorTokenExpiry, 0),
+			vectorTokenTier, vectorTokenMaxSess)
+		if err != nil {
+			t.Fatalf("mint the vector token: %v", err)
+		}
+		h.TokenHex = hex.EncodeToString(tok)
+		t.Log("minted a NEW vector token - .NET's packet must be re-emitted or it will not match")
+	}
+
+	goReq, _, err := BuildHandshakeReqToken(devicePriv, mustHex(t, h.TokenHex), cid, now)
+	if err != nil {
+		t.Fatalf("build the token handshake: %v", err)
+	}
+	h.PacketFromGoHex = hex.EncodeToString(goReq)
+
+	h.PacketFromDotnetHex = old.HandshakeReqToken.PacketFromDotnetHex
+	if h.PacketFromDotnetHex == "" {
+		t.Log("no .NET token handshake carried over - produce one and paste it in, or the " +
 			"cross-language half of this check is not running")
 	}
 
@@ -372,5 +468,109 @@ func TestProtocolVectors(t *testing.T) {
 			"which is worse than it failing, because it looks like it passed")
 	} else if !Verify(p256Pub, p256Msg, mustHex(t, v.CryptoP256.SignatureFromDotnetHex)) {
 		t.Error("Go REJECTED a signature made by .NET - the two libraries disagree")
+	}
+
+	checkTokenHandshake(t, v)
+}
+
+// checkTokenHandshake runs the 240-byte v3 token HandshakeReq through the SAME function relayd
+// calls, in both directions.
+//
+// Verifying .NET's packet is the half that matters and the reason this exists at all. Go
+// verifying its own packet proves only that Go is self-consistent, which it would be even if
+// every offset in the format had moved.
+func checkTokenHandshake(t *testing.T, v *vectorFile) {
+	t.Helper()
+	h := &v.HandshakeReqToken
+
+	// The frozen instant everything here is judged against. Using time.Now() would make the
+	// clock-skew check fail a minute after the file was written, and the expiry check fail a day
+	// after - a test that rots rather than one that catches drift.
+	now := time.Unix(h.UnixTimeSeconds, 0)
+
+	licencePriv, err := ParsePrivateKey(mustHex(t, h.LicencePrivateKeyHex))
+	if err != nil {
+		t.Fatalf("the committed licence key does not parse: %v", err)
+	}
+	if got := hex.EncodeToString(MarshalPublicKey(&licencePriv.PublicKey)); got != h.LicencePublicKeyHex {
+		t.Errorf("licence public key derived from the committed scalar: got %s, want %s",
+			got, h.LicencePublicKeyHex)
+	}
+	licencePub, err := ParsePublicKey(mustHex(t, h.LicencePublicKeyHex))
+	if err != nil {
+		t.Fatalf("the committed licence public key does not parse: %v", err)
+	}
+
+	// The token on its own, before any packet is involved. If this drifts, both packets fail and
+	// the reason would otherwise be hard to see.
+	tok, err := VerifyToken(licencePub, mustHex(t, h.TokenHex), now)
+	if err != nil {
+		t.Fatalf("the committed token no longer verifies: %v", err)
+	}
+	if tok.UserID != h.UserID {
+		t.Errorf("token user id is %d, want %d", tok.UserID, h.UserID)
+	}
+	if got := hex.EncodeToString(tok.DeviceKeyRaw()); got != h.DevicePublicKeyHex {
+		t.Errorf("token names device key: got %s, want %s", got, h.DevicePublicKeyHex)
+	}
+	if tok.Expiry.Unix() != h.ExpiryUnixSeconds {
+		t.Errorf("token expiry is %d, want %d", tok.Expiry.Unix(), h.ExpiryUnixSeconds)
+	}
+
+	var wantID ClientID
+	copy(wantID[:], mustHex(t, h.ClientIDHex))
+
+	verify := func(label, packetHex string) {
+		pkt := mustHex(t, packetHex)
+		if len(pkt) != HandshakeReqTokenLen {
+			t.Errorf("%s: packet is %d bytes, want %d", label, len(pkt), HandshakeReqTokenLen)
+			return
+		}
+		if pkt[hsOffMode] != AuthModeToken {
+			t.Errorf("%s: auth mode byte is %d, want AuthModeToken", label, pkt[hsOffMode])
+		}
+
+		// The whole point: the same call relayd makes. It checks the header, the version, the
+		// type, the auth mode, the token's signature by the LICENCE key, the request's signature
+		// by the DEVICE key the token names, and the clock skew.
+		gotTok, gotID, _, err := VerifyHandshakeReqToken(licencePub, pkt, now)
+		if err != nil {
+			t.Errorf("%s: a relay would REJECT this handshake: %v", label, err)
+			return
+		}
+		if gotID != wantID {
+			t.Errorf("%s: client id read as %x, want %x", label, gotID, wantID)
+		}
+		if gotTok.UserID != h.UserID {
+			t.Errorf("%s: user id read as %d, want %d", label, gotTok.UserID, h.UserID)
+		}
+		if got := hex.EncodeToString(gotTok.DeviceKeyRaw()); got != h.DevicePublicKeyHex {
+			t.Errorf("%s: device key read as %s, want %s", label, got, h.DevicePublicKeyHex)
+		}
+
+		// A test that only ever accepts is a test that cannot fail. Flip one bit of the signed
+		// span and the same call must refuse it - otherwise the acceptance above means nothing.
+		tampered := append([]byte(nil), pkt...)
+		tampered[hsOffClientID] ^= 0x01
+		if _, _, _, err := VerifyHandshakeReqToken(licencePub, tampered, now); err == nil {
+			t.Errorf("%s: a packet with one flipped bit was ACCEPTED", label)
+		}
+	}
+
+	verify("packet built by Go", h.PacketFromGoHex)
+
+	if h.PacketFromDotnetHex == "" {
+		t.Error("no .NET token handshake in the vectors: the cross-language check is not " +
+			"running, which is worse than it failing, because it looks like it passed")
+		return
+	}
+	verify("packet built by .NET", h.PacketFromDotnetHex)
+
+	// The two packets must differ. ECDSA is randomised and each side picks its own nonce, so
+	// identical bytes would mean the file was generated wrongly - most likely .NET's slot
+	// holding a copy of Go's packet, which would make the cross-language check verify Go's own
+	// output under a label that says otherwise.
+	if h.PacketFromGoHex == h.PacketFromDotnetHex {
+		t.Error("the Go and .NET packets are byte-identical, so one of them is not what it claims")
 	}
 }
