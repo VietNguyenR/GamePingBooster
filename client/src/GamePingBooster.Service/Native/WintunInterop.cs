@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 
 namespace GamePingBooster.Service.Native;
 
@@ -23,20 +23,29 @@ internal static partial class WintunInterop
     internal const uint MaxRingCapacity = 0x4000000; // 64 MB
 
     internal const int ErrorNoMoreItems = 259;
+    // SetLastError = true on every import whose failure code is actually read.
+    //
+    // Without it the source-generated marshalling never captures the Win32 error, and
+    // Marshal.GetLastPInvokeError() returns 0 for a call that certainly failed. That is how the
+    // most useful diagnostic in this project came to be useless: "WintunCreateAdapter returns
+    // error 5 - the process is not running as LocalSystem" is the first thing README tells
+    // people to check, and the message it prints could only ever say "error 0". Verified by
+    // running --install-driver as a normal user: 0 before this line, 5 after.
+
     internal const int ErrorBufferOverflow = 111;
     internal const int ErrorInvalidData = 13;
 
-    [LibraryImport(Dll, EntryPoint = "WintunCreateAdapter", StringMarshalling = StringMarshalling.Utf16)]
+    [LibraryImport(Dll, EntryPoint = "WintunCreateAdapter", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
     internal static partial nint WintunCreateAdapter(string name, string tunnelType, nint requestedGuid);
 
-    [LibraryImport(Dll, EntryPoint = "WintunOpenAdapter", StringMarshalling = StringMarshalling.Utf16)]
+    [LibraryImport(Dll, EntryPoint = "WintunOpenAdapter", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
     internal static partial nint WintunOpenAdapter(string name);
 
     [LibraryImport(Dll, EntryPoint = "WintunCloseAdapter")]
     internal static partial void WintunCloseAdapter(nint adapter);
 
     /// <summary>Removes the driver from the system entirely - only call this on uninstall.</summary>
-    [LibraryImport(Dll, EntryPoint = "WintunDeleteDriver")]
+    [LibraryImport(Dll, EntryPoint = "WintunDeleteDriver", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool WintunDeleteDriver();
 
@@ -47,7 +56,7 @@ internal static partial class WintunInterop
     [LibraryImport(Dll, EntryPoint = "WintunGetRunningDriverVersion")]
     internal static partial uint WintunGetRunningDriverVersion();
 
-    [LibraryImport(Dll, EntryPoint = "WintunStartSession")]
+    [LibraryImport(Dll, EntryPoint = "WintunStartSession", SetLastError = true)]
     internal static partial nint WintunStartSession(nint adapter, uint capacity);
 
     [LibraryImport(Dll, EntryPoint = "WintunEndSession")]

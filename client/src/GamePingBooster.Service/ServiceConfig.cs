@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace GamePingBooster.Service;
@@ -22,6 +22,33 @@ public sealed class ServiceConfig
     /// <summary>Default relay id; empty means take the first relay in the profile.</summary>
     [JsonPropertyName("defaultRelayId")] public string? DefaultRelayId { get; set; }
 
+    /// <summary>
+    /// Self-hosted relays, set from the settings screen. Each is "host:port".
+    ///
+    /// A LIST, not one address, because the client already measures every relay it knows and
+    /// picks the fastest, and already fails over to the others when one stops answering. A
+    /// single-relay setting would have quietly switched both of those off for exactly the people
+    /// most likely to run more than one server.
+    ///
+    /// When this is non-empty it REPLACES the profile's relay list rather than adding to it.
+    /// Somebody who runs their own relays wants their own, not theirs plus a list of somebody
+    /// else's - silently falling back to a stranger's relay because their own were unreachable
+    /// is the last thing a self-hosted setup should do. The profile still supplies the game
+    /// address ranges, which is the part they cannot produce themselves.
+    /// </summary>
+    [JsonPropertyName("relayEndpoints")] public List<string> RelayEndpoints { get; set; } = [];
+
+    /// <summary>
+    /// True when a key is present. NOT the same as "ready to connect", which also needs a relay
+    /// to reach - and a relay can come from the profile rather than from this file, which this
+    /// class cannot see. TunnelEngine.Snapshot answers that question; do not try to answer it
+    /// here. The first version of this property did, decided an installation whose relays came
+    /// from the profile was unconfigured, and disabled the Connect button on a setup that had
+    /// been working for days.
+    /// </summary>
+    [JsonIgnore]
+    public bool HasKey => !string.IsNullOrWhiteSpace(Psk);
+
     /// <summary>Default game id.</summary>
     [JsonPropertyName("defaultGameId")] public string DefaultGameId { get; set; } = "pubg";
 
@@ -37,6 +64,25 @@ public sealed class ServiceConfig
     public static string DefaultDirectory =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "GamePingBooster");
 
+    private static string FilePath => Path.Combine(DefaultDirectory, "config.json");
+
+    /// <summary>
+    /// Writes the configuration back, atomically.
+    ///
+    /// Via a temporary file and a replace, because the alternative is a half-written config.json
+    /// if the machine loses power mid-save - and a service that cannot parse its own
+    /// configuration does not start, which turns a settings change into a dead installation.
+    /// </summary>
+    public void Save()
+    {
+        Directory.CreateDirectory(DefaultDirectory);
+        var json = JsonSerializer.Serialize(this, ServiceConfigJsonContext.Default.ServiceConfig);
+
+        var tmp = FilePath + ".tmp";
+        File.WriteAllText(tmp, json);
+        File.Move(tmp, FilePath, overwrite: true);
+    }
+
     public static ServiceConfig Load()
     {
         var path = Path.Combine(DefaultDirectory, "config.json");
@@ -47,9 +93,10 @@ public sealed class ServiceConfig
         }
         if (!File.Exists(path))
         {
-            throw new FileNotFoundException(
-                $"config.json not found. Create it at {Path.Combine(DefaultDirectory, "config.json")} " +
-                "(see client/config.example.json).");
+            // Not an error any more. A freshly installed machine has no configuration, and the
+            // service has to come up anyway so the UI can connect and offer the settings screen.
+            // Throwing here meant the service died on first run and the user saw nothing at all.
+            return new ServiceConfig();
         }
 
         var json = File.ReadAllText(path);

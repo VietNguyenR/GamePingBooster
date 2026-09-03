@@ -1,4 +1,4 @@
-using System.IO.Pipes;
+﻿using System.IO.Pipes;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
@@ -16,7 +16,7 @@ namespace GamePingBooster.Service.Ipc;
 /// updates, connection loss).
 ///
 /// Security: the pipe ACL only grants the local Users group read/write. The service accepts no
-/// file paths and no arbitrary commands from the UI - just four fixed verbs, with every
+/// file paths and no arbitrary commands from the UI - five fixed verbs, with every
 /// parameter checked against the profile. This is a privilege boundary; keep it narrow.
 /// </summary>
 internal sealed class PipeServer
@@ -148,6 +148,31 @@ internal sealed class PipeServer
             case "status":
                 await PushAsync(_engine.Snapshot()).ConfigureAwait(false);
                 break;
+
+            // The fifth verb, and the only one that carries data. It is WRITE-ONLY: the key goes
+            // down, and nothing ever sends one back up. The pipe is open to BuiltinUsers, so a
+            // readable key here would be readable by any process running as the user.
+            //
+            // The engine validates. This is a privilege boundary and the UI is on the wrong side
+            // of it - anything at all can write to this pipe, so trusting the UI to have checked
+            // would mean not checking.
+            case "set-relay":
+            {
+                var error = await _engine.SetRelayAsync(cmd.RelayEndpoints, cmd.Psk, ct)
+                    .ConfigureAwait(false);
+                if (error is not null)
+                {
+                    _log($"set-relay rejected: {error}");
+                    var bad = _engine.Snapshot();
+                    bad.Error = error;
+                    await PushAsync(bad).ConfigureAwait(false);
+                }
+                else
+                {
+                    await PushAsync(_engine.Snapshot()).ConfigureAwait(false);
+                }
+                break;
+            }
 
             default:
                 _log($"Unsupported verb: {cmd.Verb}");

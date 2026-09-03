@@ -1,4 +1,4 @@
-using System.ServiceProcess;
+﻿using System.ServiceProcess;
 using GamePingBooster.Service.Ipc;
 using GamePingBooster.Service.Tunnel;
 
@@ -13,11 +13,27 @@ namespace GamePingBooster.Service;
 /// opening the app, and a UI crash does not tear down a running tunnel.
 ///
 /// Run in console mode for debugging:  gpb-service.exe --console
+///
+/// The installer calls two more, both as SYSTEM and both before any configuration exists:
+///
+///   gpb-service.exe --install-driver     put the Wintun driver in place during setup
+///   gpb-service.exe --remove-driver      take it away again at uninstall
 /// </summary>
 public static class Program
 {
     public static int Main(string[] args)
     {
+        // Driver setup comes first and deliberately never touches ServiceConfig. The installer
+        // calls these before config.json exists, and a missing file must not fail an install.
+        if (args.Contains("--install-driver", StringComparer.OrdinalIgnoreCase))
+        {
+            return DriverSetup.Install(Console.Error.WriteLine);
+        }
+        if (args.Contains("--remove-driver", StringComparer.OrdinalIgnoreCase))
+        {
+            return DriverSetup.Remove(Console.Error.WriteLine);
+        }
+
         if (args.Contains("--console", StringComparer.OrdinalIgnoreCase))
         {
             return RunConsoleAsync().GetAwaiter().GetResult();

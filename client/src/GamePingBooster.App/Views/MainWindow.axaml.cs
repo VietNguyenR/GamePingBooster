@@ -1,6 +1,7 @@
-using Avalonia.Controls;
+﻿using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
+using GamePingBooster.App.Services;
 using GamePingBooster.App.ViewModels;
 
 namespace GamePingBooster.App.Views;
@@ -13,6 +14,24 @@ public partial class MainWindow : Window
     }
 
     private void InitializeComponent() => AvaloniaXamlLoader.Load(this);
+
+    private PipeClient? _pipe;
+
+    public void Attach(PipeClient pipe) => _pipe = pipe;
+
+    private async void OnSettingsClick(object? sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainViewModel vm || _pipe is null) return;
+
+        // Opened with what is CONFIGURED, never with the key: the service does not send one up,
+        // deliberately. See the set-relay verb in PipeServer.
+        var dialog = new SettingsWindow
+        {
+            DataContext = new SettingsViewModel(vm.RelayEndpoints, vm.Configured),
+        };
+        dialog.Attach(_pipe);
+        await dialog.ShowDialog(this);
+    }
 
     private async void OnActionClick(object? sender, RoutedEventArgs e)
     {

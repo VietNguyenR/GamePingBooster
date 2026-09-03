@@ -169,8 +169,30 @@ seconds from cold.
    prints - they go into two different files, as step 3 says.
 2. Download the signed `wintun.dll` into `client/native/wintun/` - see
    [client/native/wintun/README.md](client/native/wintun/README.md).
-3. Copy `client/config.example.json` to `client/config.json` and fill in the PSK. Put the relay's
-   endpoint into `profiles/pubg-vn.json`.
+3. Copy `client/config.example.json` to `client/config.json` and fill in the PSK. Set the relay
+   from the app's Settings screen once it starts, or put its endpoint into `relayEndpoint` by
+   hand.
+
+   **Two files, and the split matters.** `config.json` is *this machine's settings* - the key,
+   which relay to use, the adapter name. The profile is *content* - the game's IP ranges, and
+   the relays the vendor offers. Keep your own relay out of the profile: a profile is replaced
+   wholesale every time it is fetched from a server, so anything of yours written into it
+   disappears silently on the next update.
+
+   There are two ways to name a relay, and they are mutually exclusive:
+
+   | Setting | Means |
+   |---|---|
+   | `defaultRelayId` | Use one of the relays the profile lists, by id. |
+   | `relayEndpoints` | Use your own relays. **Replaces** the profile's list entirely - somebody running their own relays wants those, not a silent fallback to somebody else's. |
+
+   `relayEndpoints` is a list, and giving it more than one is worth doing: the client measures
+   every relay it knows before connecting and takes the fastest, then falls back to the others
+   if that one stops answering. One address turns both of those off.
+
+   `profilePath` is relative to the install directory and should stay that way; an absolute path
+   only works on the machine it was written on. It is not in Settings on purpose - it is
+   something the installer knows, not something a user should have to.
 4. Build and start both halves:
    ```
    ./gpb dev

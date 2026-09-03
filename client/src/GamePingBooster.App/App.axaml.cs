@@ -1,4 +1,4 @@
-using Avalonia;
+﻿using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using GamePingBooster.App.Services;
@@ -20,7 +20,11 @@ public partial class App : Application
             _pipe = new PipeClient();
             var vm = new MainViewModel(_pipe);
 
-            desktop.MainWindow = new MainWindow { DataContext = vm };
+            // The window needs the pipe as well as the view model: the settings screen sends
+            // on it directly, and listens on it for the service's verdict.
+            var window = new MainWindow { DataContext = vm };
+            window.Attach(_pipe);
+            desktop.MainWindow = window;
             desktop.ShutdownRequested += async (_, _) =>
             {
                 if (_pipe is not null) await _pipe.DisposeAsync();

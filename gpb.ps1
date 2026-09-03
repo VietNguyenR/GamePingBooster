@@ -19,6 +19,7 @@
         .\gpb.ps1 test                every test on both sides
         .\gpb.ps1 publish             Native AOT build and install into ProgramData
         .\gpb.ps1 diag                collect a diagnostics bundle to send
+        .\gpb.ps1 installer           publish, then package a setup .exe (needs Inno Setup 6)
 
         .\gpb.ps1 relay build         cross-compile relayd for Linux
         .\gpb.ps1 relay list          show the relays gpb.conf declares
@@ -80,13 +81,28 @@ function Get-AppExe {
 
 function Stop-Everything {
     $stopped = @()
+    $stubborn = @()
     foreach ($name in 'GamePingBooster', 'gpb-service') {
         $procs = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
         foreach ($p in $procs) {
-            try { Stop-Process -Id $p.Id -Force -ErrorAction Stop; $stopped += "$name($($p.Id))" } catch { }
+            try { Stop-Process -Id $p.Id -Force -ErrorAction Stop; $stopped += "$name($($p.Id))" }
+            catch { $stubborn += "$name($($p.Id))" }
         }
     }
     if ($stopped.Count -gt 0) { Say "Stopped: $($stopped -join ', ')" 'DarkGray' }
+
+    # A failure here used to be swallowed, and that is expensive.
+    #
+    # gpb-service runs as LocalSystem, so a non-elevated shell cannot kill it: Stop-Process
+    # throws, the catch ate it, and the build then quietly left the OLD service running while
+    # the new UI talked to it. The symptom appears much later and somewhere else - an
+    # "Unsupported verb" line buried in the service log, or a feature that simply does nothing -
+    # and nothing points back at this function.
+    if ($stubborn.Count -gt 0) {
+        Warn "COULD NOT STOP: $($stubborn -join ', ')"
+        Warn "gpb-service runs as LocalSystem and a normal shell cannot stop it. Whatever you"
+        Warn "build next will NOT be what is running. Re-run this from an Administrator terminal."
+    }
     return $stopped.Count
 }
 
@@ -348,6 +364,55 @@ switch ($Verb.ToLowerInvariant()) {
 
     'diag' {
         & (Join-Path $tools 'Collect-Diagnostics.ps1')
+    }
+
+    'installer' {
+        # Inno Setup, not WiX: WiX v7 refuses to run until its Open Source Maintenance Fee EULA
+        # is accepted, which is a licensing commitment for a commercial product. Inno is free for
+        # commercial use. See installer/GamePingBooster.iss.
+        $iscc = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+        ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+        if (-not $iscc) {
+            throw "Inno Setup 6 not found. Install it from https://jrsoftware.org/isdl.php - " +
+                  "the default location is fine, this looks in Program Files."
+        }
+
+        # Publish first. Packaging whatever happens to be lying in the publish folder is how an
+        # installer ends up shipping last week's binary, and nothing about the result would say
+        # so.
+        Say "Publishing before packaging"
+        & $PSCommandPath publish
+        if ($LASTEXITCODE -ne 0) { throw "publish failed" }
+
+        # Refuse early and name the missing file. Inno's own error for a missing source is a
+        # line number in a .iss most people will never have read.
+        $required = @{
+            'the service'  = Join-Path $client 'src\GamePingBooster.Service\bin\Release\net9.0-windows\win-x64\publish\gpb-service.exe'
+            'the UI'       = Join-Path $client 'src\GamePingBooster.App\bin\Release\net9.0-windows\win-x64\publish\GamePingBooster.exe'
+            'wintun.dll'   = Join-Path $client 'native\wintun\wintun.dll'
+            # Avalonia's renderer. Native AOT leaves it beside the binary rather than inside it,
+            # and an installer that shipped without it produced an app that crashed on launch
+            # with a TypeInitializationException naming neither the file nor the installer.
+            'libSkiaSharp' = Join-Path $client 'src\GamePingBooster.App\bin\Release\net9.0-windows\win-x64\publish\libSkiaSharp.dll'
+            'the profile'  = Join-Path $root 'profiles\pubg-vn.json'
+        }
+        foreach ($what in $required.Keys) {
+            if (-not (Test-Path $required[$what])) {
+                throw "Cannot package: $what is missing at $($required[$what])"
+            }
+        }
+
+        Say "Building the installer"
+        & $iscc (Join-Path $root 'installer\GamePingBooster.iss')
+        if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+
+        $out = Join-Path $root 'installer\dist'
+        Say "Installer written to $out" 'Green'
+        Warn "It is NOT code signed. Windows SmartScreen will warn every person who runs it,"
+        Warn "and many will stop there. Signing needs a certificate you have to buy."
     }
 
     'relay' {

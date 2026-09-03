@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Text.Json;
 using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Profiles;
@@ -71,6 +71,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
                     Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
                     await File.WriteAllTextAsync(cachePath, json, ct).ConfigureAwait(false);
                     _log($"Fetched the profile from {_config.ProfileUrl} (generated {fetched.GeneratedUtc:u})");
+                    ApplySelfHostedRelay();
                     return;
                 }
             }
@@ -80,9 +81,24 @@ internal sealed class TunnelEngine : IAsyncDisposable
             }
         }
 
+        // Where the installer puts it, and what the default in ServiceConfig resolves to.
+        var shipped = Path.Combine(AppContext.BaseDirectory, "profiles", "pubg-vn.json");
+
         var local = Path.IsPathRooted(_config.ProfilePath)
             ? _config.ProfilePath
             : Path.Combine(AppContext.BaseDirectory, _config.ProfilePath);
+
+        // A configured path that no longer exists is not a dead end. It usually means an
+        // absolute path written by hand on a developer's machine, or an install that moved -
+        // and in both cases the profile the installer shipped is sitting right there. Falling
+        // straight to the cache instead would fail for anyone self-hosting, because the cache
+        // only exists once a profileUrl fetch has succeeded, and the error would name a path
+        // the user has never seen.
+        if (!File.Exists(local) && File.Exists(shipped))
+        {
+            _log($"No profile at {local}; falling back to the one installed at {shipped}.");
+            local = shipped;
+        }
         if (!File.Exists(local))
         {
             local = Path.Combine(ServiceConfig.DefaultDirectory, "profile.cache.json");
@@ -96,6 +112,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
         _profile = JsonSerializer.Deserialize(localJson, ProfileJsonContext.Default.ProfileBundle)
                    ?? throw new InvalidOperationException($"The profile at {local} is not valid.");
         _log($"Loaded the local profile from {local}");
+        ApplySelfHostedRelay();
     }
 
     // -------------------------------------------------------------- connect
@@ -609,6 +626,14 @@ internal sealed class TunnelEngine : IAsyncDisposable
         Error = _error,
         RelayId = _relay?.Id,
         RelayName = _relay?.Name,
+        // What is CONFIGURED, not what is connected, so the settings screen can show the current
+        // value before anything has been tried. The key is deliberately absent - see the
+        // set-relay comment in PipeServer.
+        RelayEndpoints = _config.RelayEndpoints,
+        // Ready to connect: a key, and somewhere to send packets. The relay may come from the
+        // self-hosted setting OR from the profile's own list - both are normal, and treating
+        // only the first as configured disabled Connect on installations that worked fine.
+        Configured = _config.HasKey && Relays.Count > 0,
         TunnelPingMs = _tunnel?.LastRttMs,
         LossRatio = _tunnel?.LossRatio,
         GameRunning = _watcher?.IsGameRunning ?? false,
@@ -621,6 +646,122 @@ internal sealed class TunnelEngine : IAsyncDisposable
 
     /// <summary>Relay list for the UI to offer to the user.</summary>
     public IReadOnlyList<RelayEntry> Relays => _profile?.Relays ?? [];
+
+    /// <summary>
+    /// Applies the self-hosted relay from the configuration, if there is one, by replacing the
+    /// profile's relay list with it.
+    ///
+    /// Replacing rather than appending is deliberate: somebody running their own relay wants
+    /// that relay. Falling back to a relay they do not control, because theirs was briefly
+    /// unreachable, is the last thing a self-hosted setup should do - and it would do it
+    /// silently, which is worse.
+    ///
+    /// Called after every profile load, so a fetched profile cannot quietly reintroduce the
+    /// list it was told to ignore.
+    /// </summary>
+    private void ApplySelfHostedRelay()
+    {
+        if (_profile is null || _config.RelayEndpoints.Count == 0) return;
+
+        // Each is named after its own address. A single friendly label across several relays
+        // would be meaningless, and inventing "Relay 1", "Relay 2" tells the user less than the
+        // address they typed - which is also what they need to see when one of them is failing.
+        _profile.Relays = [.. _config.RelayEndpoints.Select((endpoint, i) => new RelayEntry
+        {
+            Id = $"self-{i + 1}",
+            Name = endpoint,
+            Location = string.Empty,
+            Endpoint = endpoint,
+        })];
+
+        _log($"Using {_profile.Relays.Count} self-hosted relay(s) and ignoring the profile's list: " +
+             string.Join(", ", _config.RelayEndpoints));
+    }
+
+    /// <summary>
+    /// Replaces the stored relay and key, then reloads so the change takes effect without a
+    /// restart. Returns an error message, or null on success.
+    ///
+    /// Validation happens here rather than in the UI because the UI is not a privilege boundary:
+    /// the pipe is open to BuiltinUsers, so anything can send this. Rejecting a malformed
+    /// endpoint here is what stops a bad value reaching the tunnel.
+    /// </summary>
+    public async Task<string?> SetRelayAsync(IReadOnlyList<string>? endpoints, string? psk, CancellationToken ct)
+    {
+        psk = psk?.Trim();
+
+        var cleaned = (endpoints ?? [])
+            .Select(e => e.Trim())
+            .Where(e => e.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (cleaned.Count == 0) return "Enter at least one relay address.";
+
+        // A blank key means "keep the one already stored", which is what lets somebody move
+        // their relay to a new address without retyping a 44-character key they no longer have
+        // to hand. It is only an error when there is nothing to keep.
+        var keepExisting = string.IsNullOrWhiteSpace(psk);
+        if (keepExisting)
+        {
+            if (string.IsNullOrWhiteSpace(_config.Psk)) return "Enter the pre-shared key.";
+            psk = _config.Psk;
+        }
+
+        // Every address is checked, and the message names the one that is wrong. Reporting only
+        // that "an address is invalid" when four were pasted in is not much of a report.
+        foreach (var endpoint in cleaned)
+        {
+            var colon = endpoint.LastIndexOf(':');
+            if (colon <= 0 || colon == endpoint.Length - 1)
+            {
+                return $"\"{endpoint}\" needs a port, for example 203.0.113.10:51820";
+            }
+            if (!int.TryParse(endpoint[(colon + 1)..], out var port) || port < 1 || port > 65535)
+            {
+                return $"\"{endpoint}\" does not end in a port between 1 and 65535.";
+            }
+        }
+        // The relay refuses anything shorter, so catching it here saves a handshake that could
+        // only ever fail, and says why.
+        if (!keepExisting && psk!.Length < 16)
+        {
+            return "The key is too short - it must be at least 16 characters.";
+        }
+
+        _config.RelayEndpoints = cleaned;
+        _config.Psk = psk;
+
+        // Clear the preferred relay id along with it.
+        //
+        // A self-hosted endpoint REPLACES the profile's relay list, so an id that referred to an
+        // entry in that list now refers to nothing. Leaving it behind produces a configuration
+        // file that contradicts itself - "defaultRelayId": "sg-1" sitting next to a Hong Kong
+        // endpoint - and the next person to read it, including a future me, has to work out
+        // which half is a lie.
+        _config.DefaultRelayId = null;
+        try
+        {
+            _config.Save();
+        }
+        catch (Exception ex)
+        {
+            return $"Could not save the settings: {ex.Message}";
+        }
+
+        try
+        {
+            await LoadProfileAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // The settings ARE saved at this point, so this is not a failure of the save. Say so,
+            // rather than leaving the user to guess whether to type it all again.
+            return $"Saved, but the profile could not be reloaded: {ex.Message}";
+        }
+        _log("Relay settings updated.");
+        return null;
+    }
 
     private void SetState(TunnelState state, string detail)
     {

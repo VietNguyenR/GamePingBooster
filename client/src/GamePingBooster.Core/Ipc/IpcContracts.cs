@@ -1,4 +1,4 @@
-using System.Text.Json.Serialization;
+﻿using System.Text.Json.Serialization;
 
 namespace GamePingBooster.Core.Ipc;
 
@@ -29,8 +29,28 @@ public sealed class CommandMessage
 {
     [JsonPropertyName("v")] public int Version { get; set; } = IpcConstants.ProtocolVersion;
 
-    /// <summary>"connect" | "disconnect" | "status" | "reload-profile"</summary>
+    /// <summary>"connect" | "disconnect" | "status" | "reload-profile" | "set-relay"</summary>
     [JsonPropertyName("verb")] public string Verb { get; set; } = "status";
+
+    // ------------------------------------------------------------------ set-relay
+    //
+    // The fifth verb, and the first one that carries data rather than an enum. It exists because
+    // the UI runs as a normal user and cannot write %ProgramData%, where the service reads its
+    // configuration from; the service owns that file and writes it on the UI's behalf.
+    //
+    // It is WRITE-ONLY on purpose. StatusMessage carries the relay's name and endpoint back, but
+    // never the key - the pipe is open to BuiltinUsers, so anything readable here is readable by
+    // any process running as the user. Sending a key in is a nuisance; letting one be read out
+    // would be a credential leak.
+
+    /// <summary>
+    /// set-relay: the relay addresses, each "host:port". More than one is normal - the client
+    /// probes them all and fails over between them.
+    /// </summary>
+    [JsonPropertyName("relayEndpoints")] public List<string>? RelayEndpoints { get; set; }
+
+    /// <summary>set-relay: the pre-shared key. Never sent back up. Null means "keep the stored one".</summary>
+    [JsonPropertyName("psk")] public string? Psk { get; set; }
 
     /// <summary>Relay id to use, e.g. "sg-1". Empty means let the service pick by ping.</summary>
     [JsonPropertyName("relayId")] public string? RelayId { get; set; }
@@ -51,6 +71,15 @@ public sealed class StatusMessage
 
     [JsonPropertyName("relayId")] public string? RelayId { get; set; }
     [JsonPropertyName("relayName")] public string? RelayName { get; set; }
+
+    /// <summary>
+    /// The configured relay endpoints, so the settings screen can show what is set without the
+    /// UI needing to read a file it has no permission to read. The key is never included.
+    /// </summary>
+    [JsonPropertyName("relayEndpoints")] public List<string> RelayEndpoints { get; set; } = [];
+
+    /// <summary>False until a relay and a key have been configured. Drives the first-run prompt.</summary>
+    [JsonPropertyName("configured")] public bool Configured { get; set; }
 
     /// <summary>
     /// Round-trip time to the relay in milliseconds; null until measured.

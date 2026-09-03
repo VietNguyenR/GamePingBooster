@@ -1,4 +1,4 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using Avalonia.Media;
 using Avalonia.Threading;
@@ -42,6 +42,29 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private string _detail = "Starting up...";
     public string Detail { get => _detail; private set => Set(ref _detail, value); }
+
+    // ------------------------------------------------------- configuration state
+    //
+    // A freshly installed machine has no relay and no key, and pressing Connect could only fail
+    // with a message about a missing configuration. Knowing this up here means the button can
+    // point at the settings screen instead, which is the only useful thing to do next.
+
+    private bool _configured;
+    public bool Configured
+    {
+        get => _configured;
+        private set
+        {
+            if (!Set(ref _configured, value)) return;
+            Raise(nameof(NeedsSetup));
+            Raise(nameof(CanPressAction));
+        }
+    }
+
+    public bool NeedsSetup => !Configured;
+
+    /// <summary>The configured endpoints, for the settings screen to open with. Never the key.</summary>
+    public IReadOnlyList<string> RelayEndpoints { get; private set; } = [];
 
     private string? _error;
     public string? Error
@@ -164,7 +187,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         : "Connect";
 
     public bool IsBusy => State is TunnelState.Connecting or TunnelState.Reconnecting;
-    public bool CanPressAction => !IsBusy;
+    // Nothing to connect to until a relay and a key exist, so the button is dead until then and
+    // the UI says why. Letting it be pressed would produce a failure whose only cure is the
+    // settings screen the user has not been told about.
+    public bool CanPressAction => !IsBusy && Configured;
 
     public string PingText => PingMs is { } p ? $"{p:F0} ms" : "-";
     public string LossText => LossRatio is { } l ? $"{l * 100:F1}%" : "-";
@@ -219,6 +245,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         GameRunning = status.GameRunning;
         GameName = status.GameName;
         RelayName = status.RelayName;
+        RelayEndpoints = status.RelayEndpoints;
+        Configured = status.Configured;
         ActiveRoutes = status.ActiveRoutes;
         PacketsSent = status.PacketsSent;
         PacketsReceived = status.PacketsReceived;

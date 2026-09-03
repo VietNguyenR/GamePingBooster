@@ -3,6 +3,7 @@
   "profilePath": "profiles/pubg-vn.json",
   "psk": "PASTE-THE-PSK-FROM-THE-VPS-HERE",
   "defaultRelayId": "sg-1",
+  "relayEndpoints": [],
   "defaultGameId": "pubg",
   "adapterName": "Game Ping Booster",
   "routeWithoutGame": false

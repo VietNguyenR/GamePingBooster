@@ -50,3 +50,6 @@ profiles/pubg-vn.json
 gpb.conf
 profiles/pubg-vn.json
 docs/COMMERCIAL.md
+
+# Installer output
+installer/dist/

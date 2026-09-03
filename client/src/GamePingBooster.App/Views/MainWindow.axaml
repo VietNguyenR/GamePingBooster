@@ -1,4 +1,4 @@
-<Window xmlns="https://github.com/avaloniaui"
+﻿<Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:GamePingBooster.App.ViewModels"
         x:Class="GamePingBooster.App.Views.MainWindow"
@@ -91,15 +91,36 @@
     </StackPanel>
 
     <!-- Primary action -->
-    <Button Grid.Row="3"
-            Content="{Binding ActionButtonText}"
-            IsEnabled="{Binding CanPressAction}"
-            Click="OnActionClick"
-            HorizontalAlignment="Stretch"
-            HorizontalContentAlignment="Center"
-            VerticalContentAlignment="Center"
-            Height="46" FontSize="15" FontWeight="SemiBold"
-            Background="#2563EB" Foreground="White"
-            CornerRadius="10" Margin="0,0,0,0" />
+    <Grid Grid.Row="3" ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
+
+      <!-- First run: there is no relay yet, so say so instead of offering a button that
+           could only fail. -->
+      <Border Grid.Row="0" Grid.ColumnSpan="2"
+              Background="#1E3A5F" CornerRadius="8" Padding="12" Margin="0,0,0,12"
+              IsVisible="{Binding NeedsSetup}">
+        <TextBlock Foreground="#BFDBFE" FontSize="12" TextWrapping="Wrap"
+                   Text="No relay configured yet. Open Settings and enter your relay's address and key." />
+      </Border>
+
+      <Button Grid.Row="1" Grid.Column="0"
+              Content="{Binding ActionButtonText}"
+              IsEnabled="{Binding CanPressAction}"
+              Click="OnActionClick"
+              HorizontalAlignment="Stretch"
+              HorizontalContentAlignment="Center"
+              VerticalContentAlignment="Center"
+              Height="46" FontSize="15" FontWeight="SemiBold"
+              Background="#2563EB" Foreground="White"
+              CornerRadius="10" Margin="0,0,8,0" />
+
+      <Button Grid.Row="1" Grid.Column="1"
+              Content="Settings"
+              Click="OnSettingsClick"
+              HorizontalContentAlignment="Center"
+              VerticalContentAlignment="Center"
+              Height="46" Width="96" FontSize="14"
+              Background="#334155" Foreground="#E2E8F0"
+              CornerRadius="10" />
+    </Grid>
   </Grid>
 </Window>
