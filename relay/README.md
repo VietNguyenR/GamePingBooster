@@ -120,12 +120,17 @@ logging each one would cost latency on the path whose latency is the entire poin
 | `-tun` | `gpb0` | TUN interface name |
 | `-subnet` | `10.77.0.0/24` | Inner IP pool; `.1` is the relay, the rest go to clients (253 slots) |
 | `-mtu` | `1400` | **Must match the client** |
-| `-psk-file` | - | Path to the PSK file (or set `GPB_PSK` instead) |
+| `-psk-file` | - | Path to the PSK file (or set `GPB_PSK` instead). This is the mode to use. |
 | `-idle-timeout` | `90s` | Drop a session after this long without packets and return its IP to the pool |
+| `-max-session-age` | `24h` | Force a client to handshake again after this long |
 | `-configure-if` | `true` | Run `ip addr/link` to configure the TUN device |
 | `-log-level` | `info` | `debug` also logs why a handshake was rejected |
 | `-rate-limit` | `512` | Per-session cap in **KB/s each way**. `0` disables it |
 | `-rate-burst` | `0` | Burst allowance in KB; `0` means four seconds at the sustained rate |
+
+`relayd -h` lists two further flags that belong to an authentication mode this repository does
+not document. Running your own relay does not involve them: use `-psk-file`, which is what the
+deploy script sets up for you.
 
 ## Rate limiting
 

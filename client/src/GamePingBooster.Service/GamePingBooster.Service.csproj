@@ -32,6 +32,12 @@
   <ItemGroup>
     <PackageReference Include="System.IO.Pipes.AccessControl" Version="5.0.0" />
     <PackageReference Include="System.ServiceProcess.ServiceController" Version="9.0.0" />
+    <!-- DPAPI. ProtectedData is NOT in the base framework for net9.0-windows - checked by
+         compiling against it, not assumed - so it comes from here. This is Microsoft's own thin
+         shim over CryptProtectData, and it is the alternative to hand-rolling crypt32 interop
+         with DATA_BLOB marshalling and LocalFree, which is where a subtle leak would live.
+         Verified Native AOT publishes and runs with it before it was added. -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
   </ItemGroup>
 
 </Project>

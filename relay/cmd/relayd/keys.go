@@ -14,21 +14,22 @@ package main
 //     forged reply. Its public half goes into the profile beside the endpoint.
 //
 // Both are hex on a single line, because that survives being pasted through a terminal, an SSH
-// session and a JSON file without anybody having to think about encoding.
+// session and a JSON file without anybody having to think about encoding. The reading and
+// writing of that format lives in internal/keyfile, shared with licence-gen, which is the tool
+// that produces these files.
 
 import (
 	"crypto/ecdsa"
-	"encoding/hex"
 	"fmt"
 	"os"
-	"strings"
 
+	"github.com/gamepingbooster/relay/internal/keyfile"
 	"github.com/gamepingbooster/relay/internal/protocol"
 )
 
 // loadLicenceKey reads the licence server's public key: 65 bytes of hex, uncompressed P-256.
 func loadLicenceKey(path string) (*ecdsa.PublicKey, error) {
-	raw, err := readHexFile(path)
+	raw, err := keyfile.ReadHex(path)
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +52,7 @@ func loadLicenceKey(path string) (*ecdsa.PublicKey, error) {
 // the profile, and every client would start refusing its answers - a failure that would look
 // like a network problem and be nothing of the sort.
 func loadOrCreateRelayKey(path string) (*ecdsa.PrivateKey, bool, error) {
-	raw, err := readHexFile(path)
+	raw, err := keyfile.ReadHex(path)
 	switch {
 	case err == nil:
 		if len(raw) != protocol.PrivateKeyLen {
@@ -72,7 +73,7 @@ func loadOrCreateRelayKey(path string) (*ecdsa.PrivateKey, bool, error) {
 		d := make([]byte, protocol.PrivateKeyLen)
 		key.D.FillBytes(d)
 		// 0600: it is a private key, and the directory it lives in is usually /etc/gpb.
-		if err := os.WriteFile(path, []byte(hex.EncodeToString(d)+"\n"), 0o600); err != nil {
+		if err := keyfile.WriteHex(path, d, 0o600); err != nil {
 			return nil, false, fmt.Errorf("could not save the new relay key to %s: %w", path, err)
 		}
 		return key, true, nil
@@ -80,21 +81,4 @@ func loadOrCreateRelayKey(path string) (*ecdsa.PrivateKey, bool, error) {
 	default:
 		return nil, false, err
 	}
-}
-
-func readHexFile(path string) ([]byte, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	// Tolerate a trailing newline, spaces and an 0x prefix, because all three arrive sooner or
-	// later from a copy and paste.
-	text := strings.TrimSpace(string(b))
-	text = strings.TrimPrefix(text, "0x")
-	text = strings.ReplaceAll(text, " ", "")
-	raw, err := hex.DecodeString(text)
-	if err != nil {
-		return nil, fmt.Errorf("%s is not hex: %w", path, err)
-	}
-	return raw, nil
 }

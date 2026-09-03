@@ -18,6 +18,10 @@ namespace GamePingBooster.Service;
 ///
 ///   gpb-service.exe --install-driver     put the Wintun driver in place during setup
 ///   gpb-service.exe --remove-driver      take it away again at uninstall
+///
+/// And one for support and development, which prints this machine's device public key:
+///
+///   gpb-service.exe --device-key
 /// </summary>
 public static class Program
 {
@@ -32,6 +36,20 @@ public static class Program
         if (args.Contains("--remove-driver", StringComparer.OrdinalIgnoreCase))
         {
             return DriverSetup.Remove(Console.Error.WriteLine);
+        }
+
+        // Prints the device public key and nothing else, so it can be piped somewhere. It has
+        // the side effect of CREATING the identity if there is not one yet, which is the same
+        // thing starting the service does - there is no separate "generate" step to forget.
+        //
+        // Run it as SYSTEM (psexec -s) to see what the service sees. Run as a normal user it
+        // still works, because DPAPI here is machine scope, but %ProgramData% may not be
+        // writable, in which case it reports a key that will not survive.
+        if (args.Contains("--device-key", StringComparer.OrdinalIgnoreCase))
+        {
+            using var device = DeviceIdentity.LoadOrCreate(Console.Error.WriteLine);
+            Console.WriteLine(device.PublicKeyHex);
+            return 0;
         }
 
         if (args.Contains("--console", StringComparer.OrdinalIgnoreCase))

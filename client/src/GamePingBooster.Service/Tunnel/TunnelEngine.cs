@@ -33,6 +33,23 @@ internal sealed class TunnelEngine : IAsyncDisposable
     private Task? _supervisor;
     private readonly ulong _clientId = ClientIdentity.Load();
 
+    /// <summary>
+    /// This machine's P-256 keypair. Loaded here rather than where it is used, because it must
+    /// exist from the moment the service starts: the UI reads its public half to register the
+    /// device, and that happens long before anything connects. See DeviceIdentity for why it is
+    /// a different kind of thing from _clientId above.
+    /// </summary>
+    private readonly DeviceIdentity _device;
+
+    /// <summary>
+    /// The stored licence token, or null when this installation has never signed in.
+    ///
+    /// Held in a field rather than read from disk per connect because a failover reconnects
+    /// without any user action, and re-reading a DPAPI blob on that path buys nothing. Replaced
+    /// wholesale by SetToken when the UI pushes a new one.
+    /// </summary>
+    private volatile byte[]? _token;
+
     private GameEntry? _game;
     private RelayEntry? _relay;
     private volatile TunnelState _state = TunnelState.Disconnected;
@@ -46,6 +63,43 @@ internal sealed class TunnelEngine : IAsyncDisposable
     {
         _config = config;
         _log = log;
+        _device = DeviceIdentity.LoadOrCreate(log);
+        _token = TokenStore.Load(log);
+        if (_token is not null)
+        {
+            log($"Licence token loaded, expires {TokenStore.ExpiryOf(_token):u}.");
+        }
+    }
+
+    /// <summary>
+    /// Stores a licence token pushed down from the UI, replacing any previous one.
+    ///
+    /// WRITE-ONLY by design, and the reason is the pipe's ACL: it is open to BuiltinUsers so the
+    /// normal-user UI can drive the LocalSystem service, which means anything readable over it is
+    /// readable by every process running as the user. A token going in is a nuisance - the relay
+    /// still verifies it, so the worst a hostile local process achieves is making the tunnel use
+    /// a token it already had. A token coming back out would be a credential leak.
+    ///
+    /// It does NOT take effect on a live tunnel. The token is presented at handshake time, and
+    /// tearing down a working session to re-present one would drop the player out of a match for
+    /// no benefit - the session already in progress was authorised when it started, and the relay
+    /// caps its age anyway.
+    /// </summary>
+    /// <summary>Forgets the stored token. Signing out, or a token the server has revoked.</summary>
+    public void ClearToken()
+    {
+        TokenStore.Clear(_log);
+        _token = null;
+        StatusChanged?.Invoke(Snapshot());
+    }
+
+    public bool SetToken(ReadOnlySpan<byte> token)
+    {
+        if (!TokenStore.Save(token, _log)) return false;
+        _token = token.ToArray();
+        _log($"Licence token stored, expires {TokenStore.ExpiryOf(_token):u}. It applies from the next connect.");
+        StatusChanged?.Invoke(Snapshot());
+        return true;
     }
 
     // -------------------------------------------------------------- profile
@@ -195,6 +249,48 @@ internal sealed class TunnelEngine : IAsyncDisposable
         }
     }
 
+    // ------------------------------------------------------- authentication
+
+    /// <summary>
+    /// Decides how to authenticate to ONE relay, and says so in the log.
+    ///
+    /// Token mode needs three things at once: a stored token, a device key, and a public key for
+    /// this particular relay. Miss any of them and the only thing that can work is the PSK, so
+    /// that is what is used. The order matters: a self-hosted endpoint has no public key and must
+    /// therefore keep taking the PSK path exactly as it always has, even on a machine that has
+    /// signed in and holds a perfectly good token.
+    ///
+    /// An expired token is treated as no token. The relay would refuse it anyway, and refusing it
+    /// here turns "the relay rejected you" into a connection that simply uses the other mode.
+    /// </summary>
+    private TunnelAuth AuthFor(RelayEntry relay, byte[] psk)
+    {
+        var token = _token;
+        if (token is not null && !string.IsNullOrWhiteSpace(relay.PublicKey))
+        {
+            var expiry = TokenStore.ExpiryOf(token);
+            if (expiry > DateTimeOffset.UtcNow)
+            {
+                try
+                {
+                    return TunnelAuth.FromToken(token, _device.Key, relay.PublicKey!);
+                }
+                catch (Exception ex)
+                {
+                    // A bad public key in the profile. Say which relay, because the profile may
+                    // list several and the message is otherwise unactionable.
+                    _log($"{relay.Name}: the relay public key in the profile is not usable ({ex.Message}). Falling back to the pre-shared key.");
+                }
+            }
+            else
+            {
+                _log($"The licence token expired {expiry:u}. Sign in again; using the pre-shared key meanwhile.");
+            }
+        }
+
+        return TunnelAuth.FromPsk(psk);
+    }
+
     // ------------------------------------------------------- relay selection
 
     /// <summary>
@@ -215,7 +311,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             var pinned = candidates.FirstOrDefault(r => r.Id.Equals(preferredId, StringComparison.OrdinalIgnoreCase));
             if (pinned is not null)
             {
-                var client = new TunnelClient(ParseEndpoint(pinned.Endpoint), psk, _clientId, _log);
+                var client = new TunnelClient(ParseEndpoint(pinned.Endpoint), AuthFor(pinned, psk), _clientId, _log);
                 await client.HandshakeAsync(attempts: 4, ct).ConfigureAwait(false);
                 return (pinned, client);
             }
@@ -225,7 +321,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
         if (candidates.Count == 1)
         {
             var only = candidates[0];
-            var client = new TunnelClient(ParseEndpoint(only.Endpoint), psk, _clientId, _log);
+            var client = new TunnelClient(ParseEndpoint(only.Endpoint), AuthFor(only, psk), _clientId, _log);
             await client.HandshakeAsync(attempts: 4, ct).ConfigureAwait(false);
             return (only, client);
         }
@@ -237,7 +333,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             TunnelClient? client = null;
             try
             {
-                client = new TunnelClient(ParseEndpoint(relay.Endpoint), psk, _clientId, _log);
+                client = new TunnelClient(ParseEndpoint(relay.Endpoint), AuthFor(relay, psk), _clientId, _log);
                 await client.HandshakeAsync(attempts: 2, ct).ConfigureAwait(false);
                 probes.Add((relay, client, client.HandshakeRttMs));
                 _log($"  {relay.Name} ({relay.Location}): {client.HandshakeRttMs:F0} ms");
@@ -411,7 +507,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
                 TunnelClient? client = null;
                 try
                 {
-                    client = new TunnelClient(ParseEndpoint(relay.Endpoint), psk, _clientId, _log);
+                    client = new TunnelClient(ParseEndpoint(relay.Endpoint), AuthFor(relay, psk), _clientId, _log);
                     var session = await client.HandshakeAsync(attempts: 3, ct).ConfigureAwait(false);
 
                     // Pin the relay through the physical adapter BEFORE anything can point into
@@ -642,6 +738,15 @@ internal sealed class TunnelEngine : IAsyncDisposable
         PacketsSent = _tunnel?.PacketsSent ?? 0,
         PacketsReceived = _tunnel?.PacketsReceived ?? 0,
         PacketsDropped = _tunnel?.PacketsDropped ?? 0,
+        // The PUBLIC half only. It is not a secret - it is the device's name, and the UI has to
+        // send it to the licence server to register this machine, so it has to be readable here.
+        // The private half never crosses the pipe in any form; see the set-relay note about the
+        // pipe being open to BuiltinUsers.
+        DevicePublicKey = _device.PublicKeyHex,
+        // Whether there IS a token and when it runs out - never the token itself. The UI needs
+        // both to know when to sign in and when to refresh; neither is a credential.
+        HasToken = _token is not null,
+        TokenExpiresAt = _token is null ? null : TokenStore.ExpiryOf(_token).ToUnixTimeSeconds(),
     };
 
     /// <summary>Relay list for the UI to offer to the user.</summary>
@@ -792,5 +897,9 @@ internal sealed class TunnelEngine : IAsyncDisposable
         return ep;
     }
 
-    public async ValueTask DisposeAsync() => await TeardownAsync().ConfigureAwait(false);
+    public async ValueTask DisposeAsync()
+    {
+        await TeardownAsync().ConfigureAwait(false);
+        _device.Dispose();
+    }
 }

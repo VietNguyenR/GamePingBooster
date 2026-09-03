@@ -53,3 +53,13 @@ docs/COMMERCIAL.md
 
 # Installer output
 installer/dist/
+
+# Cong cu va tai lieu van hanh, khong public
+licence-gen
+licence-gen.ps1
+relay/cmd/licence-gen/
+docs/LICENCE-KEYS.md
+
+# Khoa va token sinh ra khi thu nghiem (*.key da duoc ignore o tren)
+*.pub
+token.hex

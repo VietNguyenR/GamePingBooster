@@ -4,6 +4,7 @@ using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using GamePingBooster.Core.Ipc;
+using GamePingBooster.Core.Protocol;
 using GamePingBooster.Service.Tunnel;
 
 namespace GamePingBooster.Service.Ipc;
@@ -16,8 +17,13 @@ namespace GamePingBooster.Service.Ipc;
 /// updates, connection loss).
 ///
 /// Security: the pipe ACL only grants the local Users group read/write. The service accepts no
-/// file paths and no arbitrary commands from the UI - five fixed verbs, with every
-/// parameter checked against the profile. This is a privilege boundary; keep it narrow.
+/// file paths and no arbitrary commands from the UI - six fixed verbs, with every
+/// parameter checked here rather than in the UI. This is a privilege boundary; keep it narrow.
+///
+/// Two of the six carry data, and both are WRITE-ONLY: set-relay takes the pre-shared key,
+/// set-token takes the licence token. Nothing ever sends either back up. Anything readable over
+/// this pipe is readable by every process running as the user, which is the whole reason the
+/// status message reports that a token EXISTS and when it expires, and never what it is.
 /// </summary>
 internal sealed class PipeServer
 {
@@ -163,6 +169,61 @@ internal sealed class PipeServer
                 if (error is not null)
                 {
                     _log($"set-relay rejected: {error}");
+                    var bad = _engine.Snapshot();
+                    bad.Error = error;
+                    await PushAsync(bad).ConfigureAwait(false);
+                }
+                else
+                {
+                    await PushAsync(_engine.Snapshot()).ConfigureAwait(false);
+                }
+                break;
+            }
+
+            // Same rule as set-relay: validate here, not in the UI. Anything at all can write to
+            // this pipe, so trusting the sender to have checked would mean not checking.
+            //
+            // Note what is NOT validated, deliberately: whether the token is genuine. This side
+            // cannot know - the signing key is on the licence server and the verifying key is on
+            // the relay. All that happens here is a shape check, and the relay decides.
+            case "set-token":
+            {
+                string? error = null;
+
+                if (string.IsNullOrWhiteSpace(cmd.Token))
+                {
+                    // An explicit clear: signing out, or the UI discarding a token the licence
+                    // server has revoked.
+                    _engine.ClearToken();
+                    _log("Licence token cleared.");
+                }
+                else if (cmd.Token.Length != GpbProtocol.TokenLen * 2)
+                {
+                    error = $"A licence token is {GpbProtocol.TokenLen * 2} hex characters, got {cmd.Token.Length}.";
+                }
+                else
+                {
+                    byte[]? raw = null;
+                    try
+                    {
+                        raw = Convert.FromHexString(cmd.Token);
+                    }
+                    catch (FormatException)
+                    {
+                        error = "The licence token is not valid hex.";
+                    }
+
+                    if (raw is not null && !_engine.SetToken(raw))
+                    {
+                        error = "The licence token could not be stored. Check the service log.";
+                    }
+                }
+
+                if (error is not null)
+                {
+                    // Never echo the token back, not even the part that was wrong. The message
+                    // says what shape was expected and nothing about what arrived.
+                    _log($"set-token rejected: {error}");
                     var bad = _engine.Snapshot();
                     bad.Error = error;
                     await PushAsync(bad).ConfigureAwait(false);

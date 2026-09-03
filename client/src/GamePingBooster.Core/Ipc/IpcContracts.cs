@@ -29,7 +29,7 @@ public sealed class CommandMessage
 {
     [JsonPropertyName("v")] public int Version { get; set; } = IpcConstants.ProtocolVersion;
 
-    /// <summary>"connect" | "disconnect" | "status" | "reload-profile" | "set-relay"</summary>
+    /// <summary>"connect" | "disconnect" | "status" | "reload-profile" | "set-relay" | "set-token"</summary>
     [JsonPropertyName("verb")] public string Verb { get; set; } = "status";
 
     // ------------------------------------------------------------------ set-relay
@@ -57,6 +57,23 @@ public sealed class CommandMessage
 
     /// <summary>Id of the game to accelerate, e.g. "pubg".</summary>
     [JsonPropertyName("gameId")] public string? GameId { get; set; }
+
+    // ------------------------------------------------------------------ set-token
+    //
+    // The sixth verb, and the second one carrying data. The UI signs in to the licence server,
+    // is handed a 150-byte token, and pushes it down here because the service is the half that
+    // presents it at handshake time and the half that can write %ProgramData%.
+    //
+    // WRITE-ONLY, for the same reason as the key in set-relay: the pipe is open to BuiltinUsers,
+    // so anything readable over it is readable by any process running as the user. StatusMessage
+    // reports whether a token exists and when it expires - never the token.
+    //
+    // Pushing a token is not the same as being authorised. The relay verifies the signature
+    // against the licence server's public key, so the worst a hostile local process achieves is
+    // making the tunnel present a token it already had.
+
+    /// <summary>set-token: the licence token as hex, 300 characters. Null clears the stored one.</summary>
+    [JsonPropertyName("token")] public string? Token { get; set; }
 }
 
 /// <summary>State the service pushes up to the UI (on request, and on every change).</summary>
@@ -115,6 +132,35 @@ public sealed class StatusMessage
     /// is worth looking there at all.
     /// </summary>
     [JsonPropertyName("packetsDropped")] public long PacketsDropped { get; set; }
+
+    /// <summary>
+    /// This machine's device public key, 65 bytes as lowercase hex, or null on a service too old
+    /// to have one.
+    ///
+    /// The PUBLIC half, and only ever that. It is the device's name, not a credential: the UI
+    /// sends it to the licence server to register this machine against the signed-in account,
+    /// which is why it has to be readable from a normal-user process at all. The private half
+    /// stays in the service, wrapped with DPAPI, and has no representation in this contract -
+    /// the pipe is open to BuiltinUsers, so anything readable here is readable by any process
+    /// running as the user.
+    ///
+    /// Additive, so no contract version bump: an older UI ignores the field, and a newer UI
+    /// reads null from an older service rather than failing.
+    /// </summary>
+    [JsonPropertyName("devicePublicKey")] public string? DevicePublicKey { get; set; }
+
+    /// <summary>
+    /// Whether a licence token is stored. Not whether it is VALID - only the relay knows that.
+    /// </summary>
+    [JsonPropertyName("hasToken")] public bool HasToken { get; set; }
+
+    /// <summary>
+    /// When the stored token expires, unix seconds, or null when there is none.
+    ///
+    /// Not a credential: it is a date. The UI needs it to refresh at 50% of remaining life, which
+    /// is the whole reason a handshake never carries a nearly expired token.
+    /// </summary>
+    [JsonPropertyName("tokenExpiresAt")] public long? TokenExpiresAt { get; set; }
 
     /// <summary>Error detail when State is Faulted.</summary>
     [JsonPropertyName("error")] public string? Error { get; set; }

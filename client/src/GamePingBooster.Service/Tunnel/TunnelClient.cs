@@ -17,7 +17,7 @@ namespace GamePingBooster.Service.Tunnel;
 internal sealed class TunnelClient : IDisposable
 {
     private readonly IPEndPoint _relayEndpoint;
-    private readonly byte[] _psk;
+    private readonly TunnelAuth _auth;
     private readonly ulong _clientId;
     private readonly Action<string> _log;
 
@@ -108,10 +108,10 @@ internal sealed class TunnelClient : IDisposable
 
     public GpbProtocol.HandshakeResult Session { get; private set; }
 
-    public TunnelClient(IPEndPoint relayEndpoint, byte[] psk, ulong clientId, Action<string> log)
+    public TunnelClient(IPEndPoint relayEndpoint, TunnelAuth auth, ulong clientId, Action<string> log)
     {
         _relayEndpoint = relayEndpoint;
-        _psk = psk;
+        _auth = auth;
         _clientId = clientId;
         _log = log;
     }
@@ -140,17 +140,17 @@ internal sealed class TunnelClient : IDisposable
             // during attempt 2 is then rejected on the echo instead of being adopted - which
             // is the retry race that used to leave the client talking into a session the
             // relay had already retired.
-            var req = GpbProtocol.BuildHandshakeReq(_psk, _clientId, DateTimeOffset.UtcNow, out var nonce);
+            var req = _auth.BuildRequest(_clientId, DateTimeOffset.UtcNow, out var nonce);
             var sentAt = _clock.ElapsedTicks;
             await _socket.SendAsync(req, SocketFlags.None, ct).ConfigureAwait(false);
-            _log($"Sent handshake to {_relayEndpoint} (attempt {attempt}/{attempts})");
+            _log($"Sent handshake to {_relayEndpoint} using a {_auth.Describe} (attempt {attempt}/{attempts})");
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(TimeSpan.FromSeconds(2));
             try
             {
                 var n = await _socket.ReceiveAsync(buffer, SocketFlags.None, timeout.Token).ConfigureAwait(false);
-                if (!GpbProtocol.TryParseHandshakeResp(_psk, buffer.AsSpan(0, n), nonce, out var result))
+                if (!_auth.TryParseResponse(buffer.AsSpan(0, n), nonce, out var result))
                 {
                     _log("Got a reply with a bad signature or a nonce we did not send - ignoring " +
                          "(stray internet noise, or a late answer to an earlier attempt).");
@@ -191,7 +191,10 @@ internal sealed class TunnelClient : IDisposable
         }
         throw new TimeoutException(
             $"The relay at {_relayEndpoint} did not answer after {attempts} attempts. " +
-            "Check that the relay is running, that the VPS firewall allows the UDP port, and that both sides share the same PSK.");
+            "Check that the relay is running and that the VPS firewall allows the UDP port. " +
+            (_auth.IsToken
+                ? "A relay running in PSK mode will not answer a token handshake at all, so check which mode it was started in."
+                : "Also check that both sides share the same PSK."));
     }
 
     /// <summary>Starts both pump threads plus the keepalive loop.</summary>

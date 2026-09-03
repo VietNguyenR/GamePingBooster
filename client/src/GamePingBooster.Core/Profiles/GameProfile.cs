@@ -64,6 +64,21 @@ public sealed class RelayEntry
 
     /// <summary>Display location for the UI, e.g. "Singapore".</summary>
     [JsonPropertyName("location")] public string? Location { get; set; }
+
+    /// <summary>
+    /// The relay's own public key, 65 bytes as hex. Null for a self-hosted relay.
+    ///
+    /// Only token mode needs it, and token mode cannot work without it. Under PSK both ends hold
+    /// the same secret, so a forged answer is impossible by construction; with per-client tokens
+    /// there is no shared secret left, so the relay signs its answer with a key of its own and
+    /// this is how the client learns which key to expect. Without it a client would accept any
+    /// well-formed reply from anywhere - see TryParseHandshakeRespToken.
+    ///
+    /// Absent means "this relay speaks PSK", which is exactly right for the endpoints a
+    /// self-hoster types into the settings screen: those are turned into entries with no key,
+    /// and they must keep working untouched.
+    /// </summary>
+    [JsonPropertyName("publicKey")] public string? PublicKey { get; set; }
 }
 
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]

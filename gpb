@@ -449,7 +449,9 @@ relay_deploy() {
 }
 
 usage() {
-    sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
+    # Everything from line 2 until the comment block ends. This used to be `sed -n '2,33p'`,
+    # which silently swallowed the last line of the help the moment a command was added above.
+    awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"
 }
 
 [ $# -gt 0 ] || { usage; exit 0; }
