@@ -1,4 +1,4 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using GamePingBooster.App.Services;
 
@@ -25,11 +25,15 @@ public sealed class LoginViewModel : INotifyPropertyChanged
     private readonly string _devicePublicKey;
     private readonly PipeClient _pipe;
 
-    public LoginViewModel(string licenceUrl, string devicePublicKey, PipeClient pipe)
+    private readonly ProfileSync? _profileSync;
+
+    public LoginViewModel(string licenceUrl, string devicePublicKey, PipeClient pipe,
+        ProfileSync? profileSync = null)
     {
         _licenceUrl = licenceUrl;
         _devicePublicKey = devicePublicKey;
         _pipe = pipe;
+        _profileSync = profileSync;
     }
 
     /// <summary>Shown so somebody can tell which server they are about to hand a password to.</summary>
@@ -118,6 +122,18 @@ public sealed class LoginViewModel : INotifyPropertyChanged
             // and from the box on screen.
             Password = string.Empty;
             Succeeded = true;
+
+            // Fetch the game list now, while the person is watching and expects something to
+            // happen. Forced past the interval check for the same reason: a sign-in that leaves
+            // the ranges on yesterday's copy has not really finished.
+            //
+            // Failures are reported, not thrown: the sign-in itself succeeded, and saying "sign
+            // in failed" because a second request did would be a lie.
+            if (_profileSync is not null)
+            {
+                await _profileSync.SyncAsync(_licenceUrl, _devicePublicKey, "pubg", true, ct)
+                    .ConfigureAwait(true);
+            }
         }
         catch (LicenceException ex)
         {

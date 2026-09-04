@@ -1,4 +1,5 @@
-using System.Net.Http;
+﻿using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -69,6 +70,102 @@ public sealed class LicenceClient : IDisposable
     }
 
     /// <summary>
+    /// Fetches the profile, SEALED to this machine's device key.
+    ///
+    /// What comes back is not readable here and is not meant to be: it is encrypted to the
+    /// device key, which lives in the background service. This process passes it straight
+    /// through. The ranges therefore never exist in the UI's memory, never cross the IPC pipe in
+    /// readable form, and never reach the disk unsealed.
+    /// </summary>
+    public async Task<string> FetchProfileAsync(string refreshToken, string devicePublicKey,
+        string gameId, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get,
+            $"profile?game={Uri.EscapeDataString(gameId)}&device={Uri.EscapeDataString(devicePublicKey)}");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshToken);
+
+        using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
+        if (response.IsSuccessStatusCode)
+        {
+            var body = await response.Content
+                .ReadFromJsonAsync(LicenceJsonContext.Default.SealedProfileResult, ct)
+                .ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(body?.Envelope))
+            {
+                throw new LicenceException("The licence server sent an empty game list.");
+            }
+            return body.Envelope;
+        }
+
+        throw await ErrorAsync(response, ct, new()
+        {
+            [System.Net.HttpStatusCode.Unauthorized] = "Sign in again to update the game list.",
+            [System.Net.HttpStatusCode.PaymentRequired] = "This account has no active subscription.",
+            [System.Net.HttpStatusCode.TooManyRequests] = "Asked for the game list too often. It will update later.",
+        }).ConfigureAwait(false);
+    }
+
+    /// <summary>The account, for the Account screen. Nothing here is a credential.</summary>
+    public async Task<AccountResult> FetchAccountAsync(string refreshToken, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, "account");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshToken);
+
+        using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
+        if (response.IsSuccessStatusCode)
+        {
+            return await response.Content
+                .ReadFromJsonAsync(LicenceJsonContext.Default.AccountResult, ct)
+                .ConfigureAwait(false)
+                ?? throw new LicenceException("The licence server sent an empty answer.");
+        }
+
+        throw await ErrorAsync(response, ct, new()
+        {
+            [System.Net.HttpStatusCode.Unauthorized] = "This sign-in has expired. Sign in again.",
+        }).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Ends the sign-in on the server.
+    ///
+    /// Best effort: signing out locally must succeed whether or not this does, because a person
+    /// who wants their credentials off a machine should not be blocked by a network that is
+    /// down. The credential is short-lived and revoking it is hygiene, not the mechanism.
+    /// </summary>
+    public async Task LogoutAsync(string refreshToken, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "auth/logout");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshToken);
+        using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
+        _ = response.IsSuccessStatusCode;
+    }
+
+    private static async Task<LicenceException> ErrorAsync(HttpResponseMessage response,
+        CancellationToken ct, Dictionary<System.Net.HttpStatusCode, string> known)
+    {
+        string? serverMessage = null;
+        try
+        {
+            var error = await response.Content
+                .ReadFromJsonAsync(LicenceJsonContext.Default.ErrorResponse, ct).ConfigureAwait(false);
+            serverMessage = error?.Error;
+        }
+        catch (Exception)
+        {
+            // Not JSON. Fall through to the status code.
+        }
+
+        if (serverMessage is not null) return new LicenceException(serverMessage, response.StatusCode);
+        if (known.TryGetValue(response.StatusCode, out var message))
+        {
+            return new LicenceException(message, response.StatusCode);
+        }
+        return new LicenceException($"The licence server answered {(int)response.StatusCode}.",
+            response.StatusCode);
+    }
+
+    /// <summary>
     /// Turns a response into either a result or an exception carrying a message worth showing.
     ///
     /// The server's own message is preferred over a status code, because the two failures that
@@ -104,12 +201,24 @@ public sealed class LicenceClient : IDisposable
             System.Net.HttpStatusCode.Forbidden => "This account is not allowed to add another device.",
             System.Net.HttpStatusCode.NotFound => "The licence server does not recognise this request. Check the address in settings.",
             _ => $"The licence server answered {(int)response.StatusCode}.",
-        });
+        }, response.StatusCode);
     }
 }
 
-/// <summary>A failure worth putting in front of the user, already worded for them.</summary>
-public sealed class LicenceException(string message) : Exception(message);
+/// <summary>
+/// A failure worth putting in front of the user, already worded for them.
+///
+/// It carries the status code as well as the sentence, because one caller has to tell apart two
+/// refusals that read the same to a person: "the server said no this time", which is worth
+/// retrying, and "this account has no subscription", which is not and which should drop the
+/// licence rather than keep presenting it. Every other caller still reads only Message.
+/// </summary>
+public sealed class LicenceException(string message, System.Net.HttpStatusCode? status = null)
+    : Exception(message)
+{
+    /// <summary>The HTTP status behind it, or null when the request never got an answer.</summary>
+    public System.Net.HttpStatusCode? StatusCode { get; } = status;
+}
 
 public sealed class LoginRequest
 {
@@ -120,7 +229,20 @@ public sealed class LoginRequest
 public sealed class LoginResult
 {
     [JsonPropertyName("refreshToken")] public string RefreshToken { get; set; } = "";
-    [JsonPropertyName("userId")] public ulong UserId { get; set; }
+
+    /// <summary>
+    /// The account id, as a STRING.
+    ///
+    /// Not a number, and not only because the licence server uses cuids. A JSON number is a
+    /// double, exact only to 2^53, so a 64-bit id cannot survive the trip - the development stub
+    /// got away with declaring uint64 purely because its ids were 1, 2 and 3. The first real
+    /// server returned a cuid and the client failed with "The JSON value could not be converted
+    /// to System.UInt64".
+    ///
+    /// Nothing here reads it. It is carried so a support conversation can name an account.
+    /// </summary>
+    [JsonPropertyName("userId")] public string UserId { get; set; } = "";
+
     [JsonPropertyName("deviceLimit")] public int DeviceLimit { get; set; }
 }
 
@@ -137,7 +259,30 @@ public sealed class TokenResult
     [JsonPropertyName("token")] public string Token { get; set; } = "";
 
     [JsonPropertyName("expiresAt")] public long ExpiresAt { get; set; }
-    [JsonPropertyName("userId")] public ulong UserId { get; set; }
+
+    /// <summary>A string, for the same reason as on LoginResult.</summary>
+    [JsonPropertyName("userId")] public string UserId { get; set; } = "";
+}
+
+public sealed class SealedProfileResult
+{
+    [JsonPropertyName("profileVersion")] public int ProfileVersion { get; set; }
+
+    /// <summary>The sealed envelope as hex. Opaque here - only the service can open it.</summary>
+    [JsonPropertyName("envelope")] public string Envelope { get; set; } = "";
+}
+
+public sealed class AccountResult
+{
+    [JsonPropertyName("email")] public string Email { get; set; } = "";
+    [JsonPropertyName("plan")] public string? Plan { get; set; }
+    [JsonPropertyName("status")] public string? Status { get; set; }
+
+    /// <summary>Unix seconds, or null when there is no subscription.</summary>
+    [JsonPropertyName("expiresAt")] public long? ExpiresAt { get; set; }
+
+    [JsonPropertyName("deviceCount")] public int DeviceCount { get; set; }
+    [JsonPropertyName("deviceLimit")] public int DeviceLimit { get; set; }
 }
 
 public sealed class ErrorResponse
@@ -151,5 +296,7 @@ public sealed class ErrorResponse
 [JsonSerializable(typeof(LoginResult))]
 [JsonSerializable(typeof(TokenRequest))]
 [JsonSerializable(typeof(TokenResult))]
+[JsonSerializable(typeof(SealedProfileResult))]
+[JsonSerializable(typeof(AccountResult))]
 [JsonSerializable(typeof(ErrorResponse))]
 public partial class LicenceJsonContext : JsonSerializerContext;

@@ -88,8 +88,15 @@ Source: "{#Root}\profiles\pubg-vn.json"; DestDir: "{app}\profiles"; Flags: ignor
 ; The service writes its configuration and logs here, as LocalSystem. Nothing is placed in it at
 ; install time: there is no key to write, and the user sets the relay from the app's settings
 ; screen once it starts.
-Name: "{commonappdata}\{#AppName}"
-Name: "{commonappdata}\{#AppName}\logs"
+;
+; GamePingBooster, NOT {#AppName}. The display name has spaces in it and the data directory does
+; not - ServiceConfig.DefaultDirectory is Combine(CommonApplicationData, "GamePingBooster"). This
+; used to say {#AppName}, so setup created an empty "Game Ping Booster" folder that nothing ever
+; opened, while the folder the service actually uses was created at run time by whichever code
+; path got there first. Nothing broke, which is why it survived; it just meant the installer was
+; not doing the one thing this section is here for.
+Name: "{commonappdata}\GamePingBooster"
+Name: "{commonappdata}\GamePingBooster\logs"
 
 [Icons]
 Name: "{group}\{#AppName}";            Filename: "{app}\{#UiExe}"

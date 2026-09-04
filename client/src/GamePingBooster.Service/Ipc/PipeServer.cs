@@ -17,10 +17,10 @@ namespace GamePingBooster.Service.Ipc;
 /// updates, connection loss).
 ///
 /// Security: the pipe ACL only grants the local Users group read/write. The service accepts no
-/// file paths and no arbitrary commands from the UI - six fixed verbs, with every
+/// file paths and no arbitrary commands from the UI - seven fixed verbs, with every
 /// parameter checked here rather than in the UI. This is a privilege boundary; keep it narrow.
 ///
-/// Two of the six carry data, and both are WRITE-ONLY: set-relay takes the pre-shared key,
+/// Two of the seven carry a SECRET, and both are write-only: set-relay takes the pre-shared key,
 /// set-token takes the licence token. Nothing ever sends either back up. Anything readable over
 /// this pipe is readable by every process running as the user, which is the whole reason the
 /// status message reports that a token EXISTS and when it expires, and never what it is.
@@ -164,7 +164,8 @@ internal sealed class PipeServer
             // would mean not checking.
             case "set-relay":
             {
-                var error = await _engine.SetRelayAsync(cmd.RelayEndpoints, cmd.Psk, cmd.LicenceUrl, ct)
+                var error = await _engine
+                    .SetRelayAsync(cmd.RelayEndpoints, cmd.Psk, cmd.LicenceUrl, ct)
                     .ConfigureAwait(false);
                 if (error is not null)
                 {
@@ -224,6 +225,36 @@ internal sealed class PipeServer
                     // Never echo the token back, not even the part that was wrong. The message
                     // says what shape was expected and nothing about what arrived.
                     _log($"set-token rejected: {error}");
+                    var bad = _engine.Snapshot();
+                    bad.Error = error;
+                    await PushAsync(bad).ConfigureAwait(false);
+                }
+                else
+                {
+                    await PushAsync(_engine.Snapshot()).ConfigureAwait(false);
+                }
+                break;
+            }
+
+            // The seventh verb. Unlike the two above it, what it carries is NOT a secret: every
+            // CIDR in a profile becomes a Windows route, so the whole list is readable with
+            // Get-NetRoute while the tunnel is up. It is still validated here, because a file
+            // that does not parse would leave the service unable to load any profile at all -
+            // a denial of service any local process could trigger.
+            case "set-profile":
+            {
+                if (string.IsNullOrWhiteSpace(cmd.Profile))
+                {
+                    var bad = _engine.Snapshot();
+                    bad.Error = "No profile was sent.";
+                    await PushAsync(bad).ConfigureAwait(false);
+                    break;
+                }
+
+                var error = await _engine.SetProfileAsync(cmd.Profile, ct).ConfigureAwait(false);
+                if (error is not null)
+                {
+                    _log($"set-profile rejected: {error}");
                     var bad = _engine.Snapshot();
                     bad.Error = error;
                     await PushAsync(bad).ConfigureAwait(false);

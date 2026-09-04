@@ -65,3 +65,6 @@ docs/LICENCE-KEYS.md
 # Khoa va token sinh ra khi thu nghiem (*.key da duoc ignore o tren)
 *.pub
 token.hex
+
+# Ban sao device.key / token / config truoc khi chay `gpb reset`
+.reset-backup/

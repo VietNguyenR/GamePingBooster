@@ -12,6 +12,7 @@ public partial class App : Application
 {
     private PipeClient? _pipe;
     private TokenRefresher? _refresher;
+    private ProfileSync? _profileSync;
 
     public override void Initialize() => AvaloniaXamlLoader.Load(this);
 
@@ -42,6 +43,24 @@ public partial class App : Application
                 // surface much later and somewhere else.
                 message => Dispatcher.UIThread.Post(() => vm.LicenceNotice = message));
             _pipe.StatusReceived += _refresher.OnStatus;
+
+            // Fetches the game list and hands it to the service. In the UI because only the UI
+            // holds the credential the licence server asks for - see ProfileSync.
+            _profileSync = new ProfileSync(
+                _pipe,
+                message => Dispatcher.UIThread.Post(() => vm.LicenceNotice = message));
+            window.AttachProfileSync(_profileSync);
+
+            // One attempt shortly after the service has had time to report its configuration.
+            // Not on the first status push: that arrives before the pipe has settled, and a
+            // fetch that races the connection reports a failure nobody needs to see.
+            _pipe.StatusReceived += OnFirstStatus;
+
+            void OnFirstStatus(Core.Ipc.StatusMessage status)
+            {
+                _pipe.StatusReceived -= OnFirstStatus;
+                _ = _profileSync.SyncAsync(status.LicenceUrl, status.DevicePublicKey, "pubg", false);
+            }
 
             desktop.ShutdownRequested += async (_, _) =>
             {

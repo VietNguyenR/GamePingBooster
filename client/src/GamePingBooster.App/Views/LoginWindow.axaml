@@ -41,7 +41,7 @@
 
     <StackPanel Spacing="0">
       <TextBlock Classes="label" Text="Email" />
-      <TextBox Text="{Binding Email}" Watermark="you@example.com" />
+      <TextBox Text="{Binding Email}" PlaceholderText="you@example.com" />
     </StackPanel>
 
     <StackPanel Spacing="0">

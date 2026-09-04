@@ -20,6 +20,7 @@
         .\gpb.ps1 publish             Native AOT build and install into ProgramData
         .\gpb.ps1 diag                collect a diagnostics bundle to send
         .\gpb.ps1 installer           publish, then package a setup .exe (needs Inno Setup 6)
+        .\gpb.ps1 reset               remove EVERYTHING this software installed, to test setup
 
         .\gpb.ps1 relay build         cross-compile relayd for Linux
         .\gpb.ps1 relay list          show the relays gpb.conf declares
@@ -40,7 +41,16 @@ param(
     [Parameter(Position = 0)][string]$Verb = 'help',
     [Parameter(Position = 1)][string]$Arg1,
     [Parameter(Position = 2)][string]$Arg2,
-    [switch]$Release
+    [switch]$Release,
+
+    # Anything left over, verbatim - including tokens that look like switches.
+    #
+    # `reset` has six of its own and they have to survive the trip. Without this, PowerShell
+    # tries to bind `-DryRun` as a parameter of THIS script and fails with "a parameter cannot
+    # be found", which points at the wrong file entirely. ValueFromRemainingArguments collects
+    # them as plain strings instead, both on a direct call and through `powershell -File`, which
+    # is how ./gpb reaches here.
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -364,6 +374,26 @@ switch ($Verb.ToLowerInvariant()) {
 
     'diag' {
         & (Join-Path $tools 'Collect-Diagnostics.ps1')
+    }
+
+    'reset' {
+        # Its own file rather than a block here, because it is the only verb that deletes things
+        # and it needs room to say why for each one.
+        #
+        # The switches arrive as strings in $Rest and are turned back into a splat rather than
+        # forwarded as an array: passing @('-DryRun') as arguments would make PowerShell bind it
+        # positionally to a script that has no positional parameters, so the flag would be
+        # accepted and then silently ignored. An unknown one is refused here, by name, instead of
+        # producing a parameter-binding error against a file the user did not run.
+        $known = 'DryRun', 'Yes', 'KeepIdentity', 'KeepDriver', 'UseUninstaller', 'Force'
+        $switches = @{}
+        foreach ($a in @($Arg1, $Arg2) + @($Rest)) {
+            if (-not $a) { continue }
+            $match = $known | Where-Object { $_ -eq $a.TrimStart('-') }
+            if (-not $match) { throw "Unknown option '$a'. reset takes: -$($known -join ' -')" }
+            $switches[$match] = $true
+        }
+        & (Join-Path $tools 'Reset-Machine.ps1') @switches
     }
 
     'installer' {

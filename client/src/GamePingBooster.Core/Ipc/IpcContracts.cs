@@ -29,7 +29,10 @@ public sealed class CommandMessage
 {
     [JsonPropertyName("v")] public int Version { get; set; } = IpcConstants.ProtocolVersion;
 
-    /// <summary>"connect" | "disconnect" | "status" | "reload-profile" | "set-relay" | "set-token"</summary>
+    /// <summary>
+    /// "connect" | "disconnect" | "status" | "reload-profile" | "set-relay" | "set-token" |
+    /// "set-profile"
+    /// </summary>
     [JsonPropertyName("verb")] public string Verb { get; set; } = "status";
 
     // ------------------------------------------------------------------ set-relay
@@ -84,6 +87,31 @@ public sealed class CommandMessage
 
     /// <summary>set-token: the licence token as hex, 300 characters. Null clears the stored one.</summary>
     [JsonPropertyName("token")] public string? Token { get; set; }
+
+    // ------------------------------------------------------------------ set-profile
+    //
+    // The seventh verb. The UI fetches the profile and pushes it down; the service does not
+    // fetch it itself, and the split is not arbitrary.
+    //
+    // The licence server authenticates the profile request with the account's refresh token.
+    // That credential belongs to the PERSON, is wrapped with DPAPI at USER scope, and lives in
+    // the signed-in user's own profile directory. The service runs as LocalSystem and cannot
+    // read it - nor should it: pulling a user credential across that boundary to save an IPC
+    // message would widen the one privilege boundary this project keeps narrow.
+    //
+    // Unlike the key and the token, the profile is not write-only, because it is not a secret in
+    // the first place: RouteManager turns every CIDR in it into a Windows route, so anyone can
+    // read the whole list back with Get-NetRoute while the tunnel is up. Sending it over a pipe
+    // open to BuiltinUsers gives away nothing that is not already visible.
+
+    /// <summary>
+    /// set-profile: the SEALED profile as hex, exactly as the licence server sent it.
+    ///
+    /// The UI never opens it and could not: it is encrypted to the device key, which lives in
+    /// the service. So the ranges do not cross this pipe in readable form, and the UI does not
+    /// hold them even briefly.
+    /// </summary>
+    [JsonPropertyName("profile")] public string? Profile { get; set; }
 }
 
 /// <summary>State the service pushes up to the UI (on request, and on every change).</summary>
@@ -178,6 +206,34 @@ public sealed class StatusMessage
     /// A URL, not a credential.
     /// </summary>
     [JsonPropertyName("licenceUrl")] public string? LicenceUrl { get; set; }
+
+    /// <summary>
+    /// Why a connection would be refused for licence reasons right now, already worded for the
+    /// user, or null when it would not be.
+    ///
+    /// The service decides this, because the service is what acts on it: ConnectAsync throws
+    /// with this same sentence. The UI only reflects it - a second copy of the rule up there
+    /// would eventually disagree with the one that matters, and leave a button enabled for a
+    /// connection that cannot happen.
+    ///
+    /// It is NOT the enforcement. The relay verifies the licence token offline against the
+    /// licence server's public key and refuses an expired one by itself; nothing on this side
+    /// of the pipe can be trusted, because all of it runs on the user's machine. This exists so
+    /// the refusal arrives as a sentence rather than as a timeout.
+    ///
+    /// Additive, so no contract version bump: an older UI ignores it, and a newer UI reads null
+    /// from an older service - which is what an unblocked installation reports anyway.
+    /// </summary>
+    [JsonPropertyName("licenceRefusal")] public string? LicenceRefusal { get; set; }
+
+    /// <summary>
+    /// Which profile the service is actually using: "shipped", "pushed", or "cached".
+    ///
+    /// Worth reporting because the failure this answers is silent. A profile fetch that goes
+    /// wrong falls back to the local copy and carries on, so the only visible symptom of a
+    /// licence server nobody can reach is that the ranges are older than they should be.
+    /// </summary>
+    [JsonPropertyName("profileSource")] public string? ProfileSource { get; set; }
 
     /// <summary>Error detail when State is Faulted.</summary>
     [JsonPropertyName("error")] public string? Error { get; set; }

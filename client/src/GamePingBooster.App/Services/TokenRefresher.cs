@@ -35,6 +35,26 @@ public sealed class TokenRefresher : IAsyncDisposable
     /// <summary>Do not hammer the server if something is wrong; back off and try again.</summary>
     private static readonly TimeSpan RetryAfterFailure = TimeSpan.FromMinutes(5);
 
+    /// <summary>
+    /// How long to wait after the server has ANSWERED and said no.
+    ///
+    /// Longer than RetryAfterFailure because the two failures are not the same kind of thing. A
+    /// timeout or a DNS failure is a guess about the network and is worth revisiting soon; a 401
+    /// or a 402 is a considered decision, and asking again in five minutes gets the same decision
+    /// three hundred times a day.
+    /// </summary>
+    private static readonly TimeSpan RetryAfterRefusal = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// Never schedule a refresh closer than this; wait for the expiry itself instead.
+    ///
+    /// Halving a remainder that is already small is a poll, not a schedule: three minutes, then
+    /// ninety seconds, then forty-five. It matters now that the licence server clamps a token to
+    /// the end of the subscription, because every refresh in the last hour of a subscription
+    /// comes back with the SAME expiry - there is nothing left for halving to win back.
+    /// </summary>
+    private static readonly TimeSpan MinRefreshGap = TimeSpan.FromMinutes(5);
+
     private readonly PipeClient _pipe;
     private readonly Func<string?> _licenceUrl;
     private readonly Func<string?> _devicePublicKey;
@@ -44,6 +64,34 @@ public sealed class TokenRefresher : IAsyncDisposable
 
     private Task? _loop;
     private DateTimeOffset? _expiry;
+
+    /// <summary>
+    /// When the next refresh should happen, or null when there is nothing to refresh.
+    ///
+    /// A DEADLINE, computed once from each expiry the service reports, rather than a delay
+    /// recomputed on every pass of the loop. That distinction was a bug: NextDelay returned half
+    /// of the life remaining and the loop slept for exactly that, so every pass halved the
+    /// remainder and no pass ever reached zero. A refresh therefore only happened once the token
+    /// had ALREADY expired - the opposite of the property the halving exists to buy, and it meant
+    /// every handshake in the second half of a token's life carried one about to run out.
+    /// </summary>
+    private DateTimeOffset? _due;
+
+    /// <summary>
+    /// Whether this run of the app has asked the licence server anything yet.
+    ///
+    /// The FIRST expiry the service reports is refreshed straight away instead of in half a
+    /// token's time, because a stored token says nothing about the account behind it. A
+    /// subscription that lapsed while the app was closed leaves a token that is still perfectly
+    /// signed and still hours from expiring, and without this the app would go on connecting
+    /// with it until the ordinary half-life refresh came round - which on a 24-hour token is up
+    /// to twelve hours of service nobody is paying for, and, worse, twelve hours of the app
+    /// disagreeing with the account screen sitting right next to it.
+    ///
+    /// One request per app start. Volatile because the loop writes it and OnStatus, on the
+    /// pipe's read thread, reads it; the worst a lost write costs is one extra refresh.
+    /// </summary>
+    private volatile bool _askedThisSession;
 
     public TokenRefresher(PipeClient pipe, Func<string?> licenceUrl, Func<string?> devicePublicKey,
         Action<string> report)
@@ -68,6 +116,7 @@ public sealed class TokenRefresher : IAsyncDisposable
 
         if (expiry == _expiry) return;
         _expiry = expiry;
+        _due = _askedThisSession ? DueFor(expiry) : DateTimeOffset.UtcNow;
 
         // Release only if nothing is already pending, hence the (0, 1) semaphore: this is called
         // from the pipe's read loop and must never block or throw.
@@ -93,33 +142,58 @@ public sealed class TokenRefresher : IAsyncDisposable
                 return;
             }
 
-            if (!await TryRefreshAsync(ct).ConfigureAwait(false))
-            {
-                try { await Task.Delay(RetryAfterFailure, ct).ConfigureAwait(false); }
-                catch (OperationCanceledException) { return; }
-            }
+            // Move the deadline BEFORE attempting, not after. A due time left in the past is a
+            // hot loop: the attempt returns, NextDelay reads the same passed deadline, and the
+            // licence server is asked again with no pause at all. That is what an account whose
+            // subscription had lapsed used to produce - the refresh could never succeed, so
+            // nothing ever moved the deadline forward.
+            //
+            // A success moves it again through OnStatus, which sees the new expiry the service
+            // reports and recomputes it properly.
+            _due = DateTimeOffset.UtcNow + RetryAfterFailure;
+            _askedThisSession = true;
+            await TryRefreshAsync(ct).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// The moment to refresh a token that runs out at <paramref name="expiry"/>: halfway through
+    /// whatever life it has left right now.
+    ///
+    /// Half, so that by the time a refresh is due there has already been a window as long as the
+    /// one still to come in which to do it - a licence server down for an afternoon is then
+    /// invisible. Measured against the life LEFT rather than the full term, so a token picked up
+    /// when it is already old is replaced soon rather than in twelve hours.
+    /// </summary>
+    private static DateTimeOffset? DueFor(DateTimeOffset? expiry)
+    {
+        if (expiry is not { } value) return null;
+
+        var now = DateTimeOffset.UtcNow;
+        var remaining = value - now;
+        if (remaining <= TimeSpan.Zero) return now;
+
+        var half = remaining / 2;
+        return half < MinRefreshGap ? value : now + half;
     }
 
     /// <summary>How long until a refresh is due, clamped to <see cref="MaxSleep"/>.</summary>
     private TimeSpan NextDelay()
     {
         // Nothing to refresh: there is no token, or no server to ask. Sleep until told otherwise.
-        if (_expiry is not { } expiry || string.IsNullOrWhiteSpace(_licenceUrl())) return MaxSleep;
+        if (_due is not { } due || string.IsNullOrWhiteSpace(_licenceUrl())) return MaxSleep;
         if (RefreshTokenStore.Load() is null) return MaxSleep;
 
-        var remaining = expiry - DateTimeOffset.UtcNow;
-        if (remaining <= TimeSpan.Zero) return TimeSpan.Zero;
-
-        // Half of what is LEFT. Applied repeatedly this converges on the expiry rather than
-        // overshooting it, and it means a token picked up when it is already old is replaced
-        // soon rather than in twelve hours.
-        var due = remaining / 2;
-        return due > MaxSleep ? MaxSleep : due;
+        var wait = due - DateTimeOffset.UtcNow;
+        if (wait <= TimeSpan.Zero) return TimeSpan.Zero;
+        return wait > MaxSleep ? MaxSleep : wait;
     }
 
-    /// <summary>One attempt. Returns false when the caller should back off.</summary>
-    private async Task<bool> TryRefreshAsync(CancellationToken ct)
+    /// <summary>
+    /// One attempt. The caller has already armed a backoff, so nothing here has to return one -
+    /// only lengthen it when the server answered rather than failed to.
+    /// </summary>
+    private async Task TryRefreshAsync(CancellationToken ct)
     {
         var url = _licenceUrl();
         var deviceKey = _devicePublicKey();
@@ -127,7 +201,12 @@ public sealed class TokenRefresher : IAsyncDisposable
 
         if (string.IsNullOrWhiteSpace(url) || string.IsNullOrWhiteSpace(deviceKey) || refresh is null)
         {
-            return true; // Nothing to do, and nothing wrong.
+            // Nothing to do, and nothing wrong: self-hosted, or never signed in. Stand down
+            // entirely rather than keeping the backoff the caller armed - re-deciding this every
+            // five minutes for the life of the process would be a timer that can only ever reach
+            // the same conclusion. A status carrying an expiry is what starts things again.
+            _due = null;
+            return;
         }
 
         try
@@ -139,8 +218,15 @@ public sealed class TokenRefresher : IAsyncDisposable
             await _pipe.SendAsync(new CommandMessage { Verb = "set-token", Token = result.Token })
                 .ConfigureAwait(false);
 
-            _report($"Licence renewed, valid until {DateTimeOffset.FromUnixTimeSeconds(result.ExpiresAt).LocalDateTime:g}.");
-            return true;
+            // Schedule from what the SERVER said, not from waiting for the status to come back
+            // and look different. Near the end of a subscription a renewal returns the same
+            // expiry it returned last time, because both are clamped to the same period end;
+            // OnStatus would see no change, leave the deadline where the loop armed it, and turn
+            // the last hour of every subscription into a request every five minutes.
+            var renewed = DateTimeOffset.FromUnixTimeSeconds(result.ExpiresAt);
+            _due = DueFor(renewed);
+
+            _report($"Licence renewed, valid until {renewed.LocalDateTime:g}.");
         }
         catch (OperationCanceledException)
         {
@@ -148,18 +234,45 @@ public sealed class TokenRefresher : IAsyncDisposable
         }
         catch (LicenceException ex)
         {
-            // The server answered and said no. If the sign-in itself is dead there is no point
-            // retrying with the same credential, so drop it and let the user sign in again -
-            // silently retrying every five minutes forever would hide the reason from them.
+            // The server answered and said no. Show its own sentence rather than inventing one,
+            // and back off further than a network failure would - see RetryAfterRefusal.
             _report($"Could not renew the licence: {ex.Message}");
-            return true;
+
+            // 402 is the one refusal that means the licence itself is finished: there is no
+            // active subscription behind this account any more. Holding on to the token already
+            // stored would leave the app offering Connect until that token ran out on its own,
+            // which is precisely the gap that let a lapsed account keep connecting.
+            //
+            // Discarding it is not the enforcement - the relay refuses an expired token by
+            // itself, and web-service no longer signs one that outlives the subscription. It is
+            // what makes this side agree with them within the minute instead of within the day.
+            //
+            // Only 402. A 401, a 429 or a device-limit 403 are all things that can be true this
+            // minute and false the next, and throwing away a working licence over one of them
+            // would sign the user out of a session they were entitled to.
+            if (ex.StatusCode == System.Net.HttpStatusCode.PaymentRequired)
+            {
+                try
+                {
+                    await _pipe.SendAsync(new CommandMessage { Verb = "set-token", Token = null })
+                        .ConfigureAwait(false);
+                }
+                catch (Exception clear)
+                {
+                    // The service being unreachable is its own visible problem; do not turn it
+                    // into a second message about the licence.
+                    _report($"Could not clear the expired licence ({clear.Message}).");
+                }
+            }
+
+            _due = DateTimeOffset.UtcNow + RetryAfterRefusal;
         }
         catch (Exception ex)
         {
-            // Network, DNS, the server being down. Worth retrying: the whole reason for
-            // refreshing at 50% is that an outage this side of the expiry does not matter.
+            // Network, DNS, the server being down. Worth retrying sooner, and the backoff the
+            // caller armed is already that one: the whole reason for refreshing at 50% is that an
+            // outage this side of the expiry does not matter.
             _report($"Could not reach the licence server ({ex.Message}). Will try again shortly.");
-            return false;
         }
     }
 

@@ -4,6 +4,7 @@ using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Profiles;
 using GamePingBooster.Service.Native;
 using GamePingBooster.Service.Network;
+using System.Security.Cryptography;
 
 namespace GamePingBooster.Service.Tunnel;
 
@@ -50,6 +51,15 @@ internal sealed class TunnelEngine : IAsyncDisposable
     /// </summary>
     private volatile byte[]? _token;
 
+    /// <summary>
+    /// Which copy of the profile is loaded: "shipped", "pushed" or "cached".
+    ///
+    /// Reported in the status because the failure it describes is otherwise silent. A profile
+    /// that cannot be fetched falls back and the tunnel works; the only symptom is ranges that
+    /// are quietly out of date, which nobody notices until a match is not accelerated.
+    /// </summary>
+    private volatile string _profileSource = "none";
+
     private GameEntry? _game;
     private RelayEntry? _relay;
     private volatile TunnelState _state = TunnelState.Disconnected;
@@ -85,6 +95,95 @@ internal sealed class TunnelEngine : IAsyncDisposable
     /// no benefit - the session already in progress was authorised when it started, and the relay
     /// caps its age anyway.
     /// </summary>
+    /// <summary>
+    /// Stores a profile the UI fetched from the licence server, and reloads from it.
+    ///
+    /// Everything arriving here is untrusted: the pipe is open to BuiltinUsers, so a hostile
+    /// local process can call this. It is parsed before it is written - a file that does not
+    /// deserialise would leave the service unable to load a profile at all on the next start,
+    /// which is a denial of service anybody could trigger.
+    ///
+    /// The worst a hostile caller achieves after those checks is routing their own choice of
+    /// addresses through the relay from their own machine, which they could do by editing the
+    /// routing table directly. This is not a new capability.
+    /// </summary>
+    public async Task<string?> SetProfileAsync(string envelopeHex, CancellationToken ct)
+    {
+        // A sealed profile is tens of kilobytes of hex. A megabyte is not one.
+        const int MaxChars = 8 * 1024 * 1024;
+        if (envelopeHex.Length > MaxChars) return "That profile is too large.";
+
+        byte[] envelope;
+        try
+        {
+            envelope = Convert.FromHexString(envelopeHex.Trim());
+        }
+        catch (FormatException)
+        {
+            return "That is not a sealed profile.";
+        }
+
+        // Opened BEFORE it is written. The envelope is authenticated, so this is the check that
+        // makes the verb safe: the pipe is open to BuiltinUsers, and without it any local
+        // process could drop a file the service cannot use and leave it unable to load a profile
+        // at all on the next start.
+        string json;
+        try
+        {
+            var plaintext = _device.OpenSealedProfile(envelope);
+            try
+            {
+                json = System.Text.Encoding.UTF8.GetString(plaintext);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(plaintext);
+            }
+        }
+        catch (CryptographicException ex)
+        {
+            return ex.Message;
+        }
+
+        ProfileBundle? parsed;
+        try
+        {
+            parsed = JsonSerializer.Deserialize(json, ProfileJsonContext.Default.ProfileBundle);
+        }
+        catch (JsonException ex)
+        {
+            return $"The sealed profile did not contain a valid one: {ex.Message}";
+        }
+        if (parsed is null || parsed.Games.Count == 0) return "That profile names no games.";
+
+        try
+        {
+            Directory.CreateDirectory(ServiceConfig.DefaultDirectory);
+            var tmp = SealedProfilePath + ".tmp";
+            await File.WriteAllBytesAsync(tmp, envelope, ct).ConfigureAwait(false);
+            File.Move(tmp, SealedProfilePath, overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            return $"Could not store the profile: {ex.Message}";
+        }
+
+        try
+        {
+            await LoadProfileAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return $"Stored, but could not load it: {ex.Message}";
+        }
+
+        var cidrs = parsed.Games.Sum(g => g.Regions.Sum(r => r.Cidrs.Count));
+        _log($"Profile updated from the licence server: {parsed.Games.Count} game(s), " +
+             $"{cidrs} ranges, {parsed.Relays.Count} relay(s). It applies from the next connect.");
+        StatusChanged?.Invoke(Snapshot());
+        return null;
+    }
+
     /// <summary>Forgets the stored token. Signing out, or a token the server has revoked.</summary>
     public void ClearToken()
     {
@@ -105,35 +204,42 @@ internal sealed class TunnelEngine : IAsyncDisposable
     // -------------------------------------------------------------- profile
 
     /// <summary>
-    /// Loads the profile: prefers the copy fetched from the server (when ProfileUrl is set and
-    /// reachable), otherwise falls back to the local file shipped with the app.
+    /// Where the profile the licence server sent is kept.
+    ///
+    /// It holds the SEALED envelope, not the profile. Nothing readable is ever written: opening
+    /// it needs the device key, which is itself DPAPI machine-scoped, so a copy of this file on
+    /// any other machine - or in a backup, or in a support bundle - is inert. It used to be
+    /// plaintext JSON with every captured range in it, which is exactly what this product is
+    /// meant not to hand out.
+    /// </summary>
+    internal static string SealedProfilePath =>
+        Path.Combine(ServiceConfig.DefaultDirectory, "profile.sealed");
+
+    /// <summary>
+    /// Loads the profile.
+    ///
+    /// The service does NOT fetch it, even though ProfileUrl is stored in its configuration. It
+    /// used to, with a bare HttpClient and no credential, which worked only against a server
+    /// that did not ask for one. The real licence server authenticates the request with the
+    /// account's refresh token - a credential belonging to the PERSON, wrapped with DPAPI at
+    /// USER scope in their own profile directory. This process is LocalSystem and cannot read
+    /// it, and reaching across that boundary to fetch a list of IP ranges would be a poor
+    /// trade. So the UI fetches and pushes it down with set-profile.
+    ///
+    /// Order, and it matters:
+    ///
+    ///   licence server configured -> the PUSHED copy wins, because it is the current one and
+    ///                                the shipped file is whatever the installer happened to
+    ///                                carry. Falls back to the shipped copy when nothing has
+    ///                                been pushed yet, so a fresh install still connects.
+    ///   self-hosted               -> the local file, exactly as before. Nothing pushes.
     /// </summary>
     public async Task LoadProfileAsync(CancellationToken ct)
     {
-        if (!string.IsNullOrWhiteSpace(_config.ProfileUrl))
-        {
-            try
-            {
-                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-                var json = await http.GetStringAsync(_config.ProfileUrl, ct).ConfigureAwait(false);
-                var fetched = JsonSerializer.Deserialize(json, ProfileJsonContext.Default.ProfileBundle);
-                if (fetched is not null)
-                {
-                    _profile = fetched;
-                    // Keep a copy as the fallback for the next time the machine is offline.
-                    var cachePath = Path.Combine(ServiceConfig.DefaultDirectory, "profile.cache.json");
-                    Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
-                    await File.WriteAllTextAsync(cachePath, json, ct).ConfigureAwait(false);
-                    _log($"Fetched the profile from {_config.ProfileUrl} (generated {fetched.GeneratedUtc:u})");
-                    ApplySelfHostedRelay();
-                    return;
-                }
-            }
-            catch (Exception ex)
-            {
-                _log($"Could not fetch the profile from the server ({ex.Message}) - using the local copy.");
-            }
-        }
+        // "Licensed" is having a licence server, full stop. There is no separate profile
+        // address to configure: the endpoints all hang off the one URL somebody typed, and
+        // asking for a second address for the same server was needless.
+        var licensed = !string.IsNullOrWhiteSpace(_config.LicenceUrl);
 
         // Where the installer puts it, and what the default in ServiceConfig resolves to.
         var shipped = Path.Combine(AppContext.BaseDirectory, "profiles", "pubg-vn.json");
@@ -144,28 +250,59 @@ internal sealed class TunnelEngine : IAsyncDisposable
 
         // A configured path that no longer exists is not a dead end. It usually means an
         // absolute path written by hand on a developer's machine, or an install that moved -
-        // and in both cases the profile the installer shipped is sitting right there. Falling
-        // straight to the cache instead would fail for anyone self-hosting, because the cache
-        // only exists once a profileUrl fetch has succeeded, and the error would name a path
-        // the user has never seen.
+        // and in both cases the profile the installer shipped is sitting right there.
         if (!File.Exists(local) && File.Exists(shipped))
         {
             _log($"No profile at {local}; falling back to the one installed at {shipped}.");
             local = shipped;
         }
-        if (!File.Exists(local))
+
+        var sealedExists = File.Exists(SealedProfilePath);
+        string source;
+        string json;
+
+        if ((licensed || !File.Exists(local)) && sealedExists)
         {
-            local = Path.Combine(ServiceConfig.DefaultDirectory, "profile.cache.json");
+            // Opened in memory. The plaintext exists only for as long as it takes to parse.
+            var envelope = await File.ReadAllBytesAsync(SealedProfilePath, ct).ConfigureAwait(false);
+            var plaintext = _device.OpenSealedProfile(envelope);
+            try
+            {
+                json = System.Text.Encoding.UTF8.GetString(plaintext);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(plaintext);
+            }
+            source = licensed ? "pushed" : "cached";
         }
-        if (!File.Exists(local))
+        else if (File.Exists(local))
         {
-            throw new FileNotFoundException($"No profile at {_config.ProfilePath} and no cached copy either.");
+            json = await File.ReadAllTextAsync(local, ct).ConfigureAwait(false);
+            source = "shipped";
+        }
+        else
+        {
+            throw new FileNotFoundException(
+                $"No profile at {_config.ProfilePath} and nothing from the licence server either.");
         }
 
-        var localJson = await File.ReadAllTextAsync(local, ct).ConfigureAwait(false);
-        _profile = JsonSerializer.Deserialize(localJson, ProfileJsonContext.Default.ProfileBundle)
-                   ?? throw new InvalidOperationException($"The profile at {local} is not valid.");
-        _log($"Loaded the local profile from {local}");
+        _profile = JsonSerializer.Deserialize(json, ProfileJsonContext.Default.ProfileBundle)
+                   ?? throw new InvalidOperationException("The profile is not valid.");
+        _profileSource = source;
+        var chosen = source == "shipped" ? local : SealedProfilePath;
+
+        if (licensed && source != "pushed")
+        {
+            // Loud, because it is the silent failure this whole path exists to avoid: the tunnel
+            // will work perfectly on ranges that may be months old.
+            _log($"Loaded the {source} profile from {chosen}. A licence server is configured but " +
+                 "nothing has been pushed yet - sign in so the app can fetch the current one.");
+        }
+        else
+        {
+            _log($"Loaded the {source} profile from {chosen}");
+        }
         ApplySelfHostedRelay();
     }
 
@@ -182,6 +319,15 @@ internal sealed class TunnelEngine : IAsyncDisposable
         try
         {
             SetState(TunnelState.Connecting, "Preparing...");
+
+            // The licence gate, before anything is created and before a packet is sent. An
+            // expired subscription is a refusal the relay would make anyway; making it here as
+            // well turns a four-attempt timeout into a sentence that says what to do. See
+            // LicenceRefusal for why this is not the same question as Configured.
+            if (LicenceRefusal() is { } refusal)
+            {
+                throw new InvalidOperationException(refusal);
+            }
 
             // Reload every time the user connects. This used to be "load it once and keep it",
             // which meant rebuilding the profile changed nothing until the service was restarted,
@@ -252,42 +398,121 @@ internal sealed class TunnelEngine : IAsyncDisposable
     // ------------------------------------------------------- authentication
 
     /// <summary>
+    /// Why this installation may not connect right now, or null when it may.
+    ///
+    /// This is the LICENCE gate, and it is deliberately separate from Configured: an
+    /// installation whose subscription has lapsed is not misconfigured, and sending that person
+    /// to the settings screen - which is what an unconfigured installation does - would be the
+    /// wrong destination. They need to renew and sign in again.
+    ///
+    /// The rule has exactly two escapes, and both are the same idea: the licence pays for the
+    /// vendor's relays, so where those are not in play there is nothing for it to gate.
+    ///
+    ///   - no licence server configured. A self-hosted installation, which is the default and
+    ///     has never had a licence to expire.
+    ///   - the user's own relays are set. ApplySelfHostedRelay REPLACES the profile's list with
+    ///     them, so on this connect the vendor's relays are not being used at all; the PSK is
+    ///     the credential for the machines the user is paying for themselves.
+    ///
+    /// Anything else - a licensed installation reaching for the relays the profile lists -
+    /// needs a licence token that has not run out. This check is COURTESY, not enforcement:
+    /// the relay verifies the token offline against the licence server's public key and
+    /// refuses an expired one with StatusCredentialExpired, and that half cannot be patched
+    /// out by anybody sitting at this machine. What this buys is that the refusal arrives
+    /// immediately, in words, instead of as four handshake attempts and a timeout.
+    /// </summary>
+    private string? LicenceRefusal()
+    {
+        if (string.IsNullOrWhiteSpace(_config.LicenceUrl)) return null;
+        if (_config.RelayEndpoints.Count > 0) return null;
+
+        var token = _token;
+        if (token is null)
+        {
+            return "This installation connects through a licensed relay and is not signed in. " +
+                   "Sign in from the menu to get a licence.";
+        }
+
+        var expiry = TokenStore.ExpiryOf(token);
+        if (expiry <= DateTimeOffset.UtcNow)
+        {
+            return $"The licence expired {expiry.ToLocalTime():g}. Renew the subscription and " +
+                   "sign in again - the relay will not accept an expired licence.";
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Decides how to authenticate to ONE relay, and says so in the log.
     ///
     /// Token mode needs three things at once: a stored token, a device key, and a public key for
-    /// this particular relay. Miss any of them and the only thing that can work is the PSK, so
-    /// that is what is used. The order matters: a self-hosted endpoint has no public key and must
-    /// therefore keep taking the PSK path exactly as it always has, even on a machine that has
-    /// signed in and holds a perfectly good token.
+    /// this particular relay. The order matters: a self-hosted endpoint has no public key and
+    /// must therefore keep taking the PSK path exactly as it always has, even on a machine that
+    /// has signed in and holds a perfectly good token.
     ///
-    /// An expired token is treated as no token. The relay would refuse it anyway, and refusing it
-    /// here turns "the relay rejected you" into a connection that simply uses the other mode.
+    /// What it must NOT do is fall back to the PSK on a LICENSED installation. That was the
+    /// original behaviour and it was wrong twice over: a relay that publishes a public key runs
+    /// in token mode and never answers a PSK handshake, so the fallback could only ever produce
+    /// four attempts, an eight-second wait and a message naming four possible causes; and on a
+    /// machine that happens to still hold a PSK - every development machine does - it turned
+    /// "your licence expired" into a connection that quietly worked, which is exactly the hole
+    /// this whole path exists to close.
     /// </summary>
     private TunnelAuth AuthFor(RelayEntry relay, byte[] psk)
     {
+        // No key published: a PSK endpoint. That is what a self-hoster's typed-in address is,
+        // and it must keep working untouched on a machine that also holds a licence.
+        if (string.IsNullOrWhiteSpace(relay.PublicKey)) return TunnelAuth.FromPsk(psk);
+
+        var licensed = !string.IsNullOrWhiteSpace(_config.LicenceUrl);
         var token = _token;
-        if (token is not null && !string.IsNullOrWhiteSpace(relay.PublicKey))
+
+        if (token is null)
         {
-            var expiry = TokenStore.ExpiryOf(token);
-            if (expiry > DateTimeOffset.UtcNow)
-            {
-                try
-                {
-                    return TunnelAuth.FromToken(token, _device.Key, relay.PublicKey!);
-                }
-                catch (Exception ex)
-                {
-                    // A bad public key in the profile. Say which relay, because the profile may
-                    // list several and the message is otherwise unactionable.
-                    _log($"{relay.Name}: the relay public key in the profile is not usable ({ex.Message}). Falling back to the pre-shared key.");
-                }
-            }
-            else
-            {
-                _log($"The licence token expired {expiry:u}. Sign in again; using the pre-shared key meanwhile.");
-            }
+            return NotTokenMode(relay, psk, licensed,
+                $"{relay.Name} authenticates with a licence and this installation holds none.",
+                "Sign in from the menu.");
         }
 
+        var expiry = TokenStore.ExpiryOf(token);
+        if (expiry <= DateTimeOffset.UtcNow)
+        {
+            return NotTokenMode(relay, psk, licensed,
+                $"The licence expired {expiry.ToLocalTime():g}.",
+                "Renew the subscription and sign in again.");
+        }
+
+        try
+        {
+            return TunnelAuth.FromToken(token, _device.Key, relay.PublicKey!);
+        }
+        catch (Exception ex)
+        {
+            // A bad public key in the profile. Say which relay, because the profile may list
+            // several and the message is otherwise unactionable.
+            return NotTokenMode(relay, psk, licensed,
+                $"{relay.Name}: the relay public key in the profile is not usable ({ex.Message}).",
+                "The profile needs replacing; sign in again to fetch a current one.");
+        }
+    }
+
+    /// <summary>
+    /// What to do when a relay asked for token mode and token mode is not available.
+    ///
+    /// On a licensed installation this THROWS rather than returning a PSK. Both call sites -
+    /// relay selection and the failover loop - already catch per relay, so the message lands
+    /// against the relay it is about instead of becoming a timeout that blames the network.
+    ///
+    /// On a self-hosted installation it stays a fallback and a log line. Somebody who put a
+    /// public key in a profile of their own making and is not using a licence server has some
+    /// reason for it, and refusing to connect would take away a setup that worked.
+    /// </summary>
+    private TunnelAuth NotTokenMode(RelayEntry relay, byte[] psk, bool licensed, string why, string next)
+    {
+        if (licensed) throw new InvalidOperationException($"{why} {next}");
+
+        _log($"{why} Using the pre-shared key for {relay.Name} instead.");
         return TunnelAuth.FromPsk(psk);
     }
 
@@ -754,6 +979,12 @@ internal sealed class TunnelEngine : IAsyncDisposable
         HasToken = _token is not null,
         TokenExpiresAt = _token is null ? null : TokenStore.ExpiryOf(_token).ToUnixTimeSeconds(),
         LicenceUrl = _config.LicenceUrl,
+        // Why Connect would be refused right now, in words, or null when it would not. Computed
+        // in the service rather than worked out again in the UI: the rule decides whether a
+        // connection is attempted at all, and two copies of it would drift into a button that is
+        // enabled for a connection that cannot happen, or disabled for one that could.
+        LicenceRefusal = LicenceRefusal(),
+        ProfileSource = _profileSource,
     };
 
     /// <summary>Relay list for the UI to offer to the user.</summary>
@@ -809,13 +1040,9 @@ internal sealed class TunnelEngine : IAsyncDisposable
         if (licenceUrl is not null)
         {
             licenceUrl = licenceUrl.Trim();
-            if (licenceUrl.Length > 0)
+            if (licenceUrl.Length > 0 && !IsHttpUrl(licenceUrl))
             {
-                if (!Uri.TryCreate(licenceUrl, UriKind.Absolute, out var uri) ||
-                    (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
-                {
-                    return "The licence server must be a full http:// or https:// address.";
-                }
+                return "The licence server must be a full http:// or https:// address.";
             }
         }
 
@@ -924,6 +1151,11 @@ internal sealed class TunnelEngine : IAsyncDisposable
         return null;
     }
 
+    /// <summary>An absolute http or https URL. Anything else is a typo, not a scheme.</summary>
+    private static bool IsHttpUrl(string value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
+        (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
+
     private void SetState(TunnelState state, string detail)
     {
         _state = state;
@@ -959,3 +1191,4 @@ internal sealed class TunnelEngine : IAsyncDisposable
         _device.Dispose();
     }
 }
+

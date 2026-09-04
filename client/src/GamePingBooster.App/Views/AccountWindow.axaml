@@ -1,0 +1,89 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:GamePingBooster.App.ViewModels"
+        x:Class="GamePingBooster.App.Views.AccountWindow"
+        x:DataType="vm:AccountViewModel"
+        Title="Account"
+        Width="400" SizeToContent="Height"
+        MinWidth="400"
+        WindowStartupLocation="CenterOwner"
+        CanResize="False"
+        Background="#0F172A">
+
+  <Window.Styles>
+    <Style Selector="TextBlock.label">
+      <Setter Property="Foreground" Value="#94A3B8" />
+      <Setter Property="FontSize" Value="11" />
+    </Style>
+    <Style Selector="TextBlock.value">
+      <Setter Property="Foreground" Value="#E2E8F0" />
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="Margin" Value="0,2,0,0" />
+    </Style>
+    <Style Selector="Button">
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="16,8" />
+    </Style>
+  </Window.Styles>
+
+  <StackPanel Margin="24" Spacing="16">
+
+    <StackPanel Spacing="2">
+      <TextBlock Text="Account" Foreground="#E2E8F0" FontSize="18" FontWeight="SemiBold" />
+      <TextBlock Classes="label" Text="{Binding ServerText}" />
+    </StackPanel>
+
+    <TextBlock Classes="label" Text="Loading..." IsVisible="{Binding Loading}" />
+
+    <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto,Auto"
+          IsVisible="{Binding Ready}">
+      <StackPanel Grid.Row="0" Grid.ColumnSpan="2" Margin="0,0,0,12">
+        <TextBlock Classes="label" Text="Signed in as" />
+        <TextBlock Classes="value" Text="{Binding Email}" />
+      </StackPanel>
+
+      <StackPanel Grid.Row="1" Grid.Column="0" Margin="0,0,8,12">
+        <TextBlock Classes="label" Text="Plan" />
+        <TextBlock Classes="value" Text="{Binding Plan}" />
+      </StackPanel>
+      <StackPanel Grid.Row="1" Grid.Column="1" Margin="0,0,0,12">
+        <TextBlock Classes="label" Text="Status" />
+        <TextBlock Classes="value" Text="{Binding Status}" />
+      </StackPanel>
+
+      <StackPanel Grid.Row="2" Grid.Column="0" Margin="0,0,8,0">
+        <TextBlock Classes="label" Text="Renews / expires" />
+        <TextBlock Classes="value" Text="{Binding Expires}" />
+      </StackPanel>
+      <StackPanel Grid.Row="2" Grid.Column="1">
+        <TextBlock Classes="label" Text="Devices" />
+        <TextBlock Classes="value" Text="{Binding Devices}" />
+      </StackPanel>
+    </Grid>
+
+    <Border Background="#1E293B" CornerRadius="8" Padding="12" IsVisible="{Binding Ready}">
+      <StackPanel Spacing="2">
+        <TextBlock Classes="label" Text="This device" />
+        <TextBlock Classes="value" Text="{Binding DeviceText}" FontFamily="Consolas,monospace" FontSize="11" />
+      </StackPanel>
+    </Border>
+
+    <Border Background="#7F1D1D" CornerRadius="8" Padding="12,8" IsVisible="{Binding HasError}">
+      <TextBlock Text="{Binding Error}" Foreground="#FECACA" FontSize="12" TextWrapping="Wrap" />
+    </Border>
+
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+      <Button Content="Sign out" Click="OnSignOutClick"
+              IsEnabled="{Binding Ready}"
+              Background="#7F1D1D" Foreground="#FECACA" />
+      <Button Content="Close" Click="OnCloseClick"
+              Background="#334155" Foreground="#E2E8F0" />
+    </StackPanel>
+
+    <!-- Said plainly, because the opposite is what people assume. Signing out stops this
+         machine using the account; it does not end a session already running. -->
+    <TextBlock Classes="label" TextWrapping="Wrap"
+               Text="Signing out removes this account from this computer. A connection already running keeps going until you disconnect." />
+
+  </StackPanel>
+</Window>

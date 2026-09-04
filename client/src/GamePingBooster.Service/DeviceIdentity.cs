@@ -1,4 +1,4 @@
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 using GamePingBooster.Core.Protocol;
 
 namespace GamePingBooster.Service;
@@ -68,6 +68,27 @@ internal sealed class DeviceIdentity : IDisposable
     }
 
     public void Dispose() => _key.Dispose();
+
+    /// <summary>
+    /// Opens a profile the licence server sealed to this machine.
+    ///
+    /// The private scalar is exported, used and zeroed inside this method rather than handed to
+    /// the caller. TunnelEngine has no business holding it, and a scalar passed around is a
+    /// scalar that ends up logged.
+    /// </summary>
+    /// <exception cref="CryptographicException">Not sealed to this device, or malformed.</exception>
+    public byte[] OpenSealedProfile(ReadOnlySpan<byte> envelope)
+    {
+        var scalar = ExportScalar(_key);
+        try
+        {
+            return ProfileEnvelope.Open(envelope, scalar);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(scalar);
+        }
+    }
 
     /// <summary>
     /// Loads the keypair, generating and saving one the first time.

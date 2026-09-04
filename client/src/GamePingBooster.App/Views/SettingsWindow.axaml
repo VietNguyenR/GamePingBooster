@@ -61,7 +61,7 @@
       <TextBlock Classes="label" Text="Licence server (optional)" />
       <TextBox Text="{Binding LicenceUrl}" PlaceholderText="https://licence.example.com" />
       <TextBlock Classes="hint"
-                 Text="Only if you have an account. Leave blank to run entirely on your own relays with the key above - that is the normal setup. Filling this in adds a Sign in button to the main window." />
+                 Text="Only if you have an account. Leave blank to run entirely on your own relays with the key above - that is the normal setup. Filling this in adds an Account button, and the game list comes from there too." />
     </StackPanel>
 
     <Border Background="#7F1D1D" CornerRadius="8" Padding="12"

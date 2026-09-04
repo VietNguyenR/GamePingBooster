@@ -38,6 +38,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// <summary>This machine's device public key, hex. Public, and needed to sign in.</summary>
     public string? DevicePublicKey { get; private set; }
 
+    /// <summary>Which copy the service is actually using: shipped, pushed or cached.</summary>
+    private string? _profileSource;
+    public string? ProfileSource
+    {
+        get => _profileSource;
+        private set { if (Set(ref _profileSource, value)) Raise(nameof(LicenceText)); }
+    }
+
     private bool _hasToken;
     public bool HasToken
     {
@@ -46,7 +54,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             if (!Set(ref _hasToken, value)) return;
             Raise(nameof(LicenceText));
-            Raise(nameof(SignInButtonText));
+            Raise(nameof(AccountMenuText));
         }
     }
 
@@ -65,10 +73,47 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// Why the service would refuse to connect for licence reasons, or null when it would not.
+    ///
+    /// Decided in the service and only displayed here. Working it out again in the UI would put
+    /// two copies of one rule on either side of the pipe, and the copy that matters is the one
+    /// that can actually stop a handshake.
+    /// </summary>
+    private string? _licenceRefusal;
+    public string? LicenceRefusal
+    {
+        get => _licenceRefusal;
+        private set
+        {
+            if (!Set(ref _licenceRefusal, value)) return;
+            Raise(nameof(LicenceBlocked));
+            Raise(nameof(LicenceText));
+            Raise(nameof(LicenceBrush));
+            Raise(nameof(CanPressAction));
+        }
+    }
+
+    public bool LicenceBlocked => !string.IsNullOrWhiteSpace(LicenceRefusal);
+
+    /// <summary>
+    /// The licence line is normally a quiet footnote and should stay one - "signed in, valid
+    /// until Thursday" is not news. A refusal is the opposite: it is the reason the only button
+    /// on the window does nothing, so it stops being grey.
+    ///
+    /// A ready-made brush rather than a colour string, for the same reason as StatusBrush: a
+    /// string bound to IBrush goes through a TypeConverter, and TypeConverters are exactly what
+    /// the Native AOT trimmer removes.
+    /// </summary>
+    private static readonly IBrush LicenceQuiet = new SolidColorBrush(Color.FromRgb(0x94, 0xA3, 0xB8));
+
+    public IBrush LicenceBrush => LicenceBlocked ? Brushes.Orange : LicenceQuiet;
+
     /// <summary>Whether this installation has a licence server at all.</summary>
     public bool ShowLicence => !string.IsNullOrWhiteSpace(LicenceUrl);
 
-    public string SignInButtonText => HasToken ? "Account" : "Sign in";
+    /// <summary>What the menu item says. One entry, two states, no dead end either way.</summary>
+    public string AccountMenuText => HasToken ? "Account" : "Sign in";
 
     /// <summary>
     /// The last thing the renewer had to say, if anything.
@@ -88,8 +133,19 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         get
         {
+            // A refusal outranks everything else here. It is the reason Connect is dead, and a
+            // line saying "signed in, licence valid until..." next to a button that will not
+            // work is worse than no line at all.
+            if (LicenceBlocked) return LicenceRefusal!;
             if (!string.IsNullOrEmpty(LicenceNotice)) return LicenceNotice!;
             if (!HasToken) return "Not signed in";
+
+            // A licence server that is set but has never sent a game list means the ranges are
+            // whatever the installer carried. The tunnel works, so nothing else would say so.
+            if (!string.IsNullOrWhiteSpace(LicenceUrl) && ProfileSource == "shipped")
+            {
+                return "Signed in - using the installed game list, not the current one";
+            }
             if (TokenExpiresAt is not { } expiry) return "Signed in";
 
             // Renewal happens on its own at half of remaining life, so an expiry hours away is
@@ -269,7 +325,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
     // Nothing to connect to until a relay and a key exist, so the button is dead until then and
     // the UI says why. Letting it be pressed would produce a failure whose only cure is the
     // settings screen the user has not been told about.
-    public bool CanPressAction => !IsBusy && Configured;
+    //
+    // A licence refusal kills it for the same reason, with one exception: Disconnect stays
+    // available. A licence that lapses while a tunnel is up must not trap the user in a session
+    // they cannot end - the session was authorised when it started, and the button that ends it
+    // has nothing to do with the licence.
+    public bool CanPressAction => !IsBusy && Configured
+        && (State is TunnelState.Connected or TunnelState.Connecting || !LicenceBlocked);
 
     public string PingText => PingMs is { } p ? $"{p:F0} ms" : "-";
     public string LossText => LossRatio is { } l ? $"{l * 100:F1}%" : "-";
@@ -327,6 +389,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         RelayEndpoints = status.RelayEndpoints;
         Configured = status.Configured;
         LicenceUrl = status.LicenceUrl;
+        LicenceRefusal = status.LicenceRefusal;
+        ProfileSource = status.ProfileSource;
         DevicePublicKey = status.DevicePublicKey;
         HasToken = status.HasToken;
         TokenExpiresAt = status.TokenExpiresAt is { } unix

@@ -4,10 +4,12 @@
         x:Class="GamePingBooster.App.Views.MainWindow"
         x:DataType="vm:MainViewModel"
         Title="Game Ping Booster"
-        Width="420" Height="520"
-        MinWidth="380" MinHeight="480"
+        Width="420" Height="560"
+        MinWidth="380" MinHeight="500"
         WindowStartupLocation="CenterScreen"
-        Background="#0F172A">
+        Background="#0F172A"
+        ExtendClientAreaToDecorationsHint="True"
+        ExtendClientAreaTitleBarHeightHint="-1">
 
   <Window.Styles>
     <Style Selector="TextBlock.label">
@@ -20,6 +22,22 @@
       <Setter Property="FontWeight" Value="SemiBold" />
       <Setter Property="HorizontalAlignment" Value="Right" />
     </Style>
+    <Style Selector="Button.caption">
+      <Setter Property="Width" Value="42" />
+      <Setter Property="Height" Value="38" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="0" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.caption:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#1E293B" />
+    </Style>
+    <Style Selector="Button.caption.close:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#B91C1C" />
+    </Style>
     <Style Selector="Border.card">
       <Setter Property="Background" Value="#1E293B" />
       <Setter Property="CornerRadius" Value="12" />
@@ -27,15 +45,56 @@
     </Style>
   </Window.Styles>
 
-  <Grid RowDefinitions="Auto,Auto,*,Auto" Margin="24">
+  <Grid RowDefinitions="Auto,*">
+
+    <!--
+      A spacer, not a title bar.
+
+      ExtendClientAreaToDecorationsHint makes the client area reach under the system caption, so
+      the window is one continuous surface in our own colour instead of an app sitting below a
+      grey Windows bar. Avalonia 12 still draws the title and the caption buttons on top of it,
+      which is what we want - drawing our own as well produced two titles in the same place and
+      seven caption buttons, which is what the first attempt at this looked like.
+      (ExtendClientAreaChromeHints, the Avalonia 11 way of suppressing them, no longer exists.)
+
+      All this row does is keep the content clear of the buttons, and give somewhere to drag.
+    -->
+    <Border Grid.Row="0" Height="34" Background="Transparent"
+            PointerPressed="OnTitleBarPressed" />
+
+  <Grid Grid.Row="1" RowDefinitions="Auto,Auto,*,Auto" Margin="24,4,24,24">
 
     <!-- Header -->
-    <StackPanel Grid.Row="0" Spacing="4">
-      <TextBlock Text="Game Ping Booster"
-                 Foreground="#F8FAFC" FontSize="20" FontWeight="Bold" />
-      <TextBlock Text="PUBG - Southeast Asia servers"
-                 Foreground="#64748B" FontSize="12" />
-    </StackPanel>
+    <Grid Grid.Row="0" ColumnDefinitions="*,Auto">
+      <StackPanel Grid.Column="0" Spacing="4">
+        <TextBlock Text="Game Ping Booster"
+                   Foreground="#F8FAFC" FontSize="20" FontWeight="Bold" />
+        <TextBlock Text="PUBG - Southeast Asia servers"
+                   Foreground="#64748B" FontSize="12" />
+      </StackPanel>
+
+      <!--
+        Everything that is not Connect lives here. There were three buttons competing with the
+        one that matters; now there is one primary action and a menu.
+      -->
+      <Button Grid.Column="1" VerticalAlignment="Top"
+              Width="36" Height="36" Padding="0"
+              Background="Transparent" BorderThickness="0"
+              ToolTip.Tip="Menu">
+        <Button.Content>
+          <Path Data="M0,0 H14 M0,5 H14 M0,10 H14" Stroke="#94A3B8" StrokeThickness="1.6" />
+        </Button.Content>
+        <Button.Flyout>
+          <MenuFlyout Placement="BottomEdgeAlignedRight">
+            <MenuItem Header="{Binding AccountMenuText}" Click="OnAccountClick"
+                      IsVisible="{Binding ShowLicence}" />
+            <MenuItem Header="Settings" Click="OnSettingsClick" />
+            <Separator />
+            <MenuItem Header="Open logs folder" Click="OnLogsClick" />
+          </MenuFlyout>
+        </Button.Flyout>
+      </Button>
+    </Grid>
 
     <!-- Primary status -->
     <Border Grid.Row="1" Classes="card" Margin="0,20,0,0">
@@ -102,7 +161,7 @@
                    Text="No relay configured yet. Open Settings and enter your relay's address and key." />
       </Border>
 
-      <Button Grid.Row="1" Grid.Column="0"
+      <Button Grid.Row="1" Grid.ColumnSpan="2"
               Content="{Binding ActionButtonText}"
               IsEnabled="{Binding CanPressAction}"
               Click="OnActionClick"
@@ -111,34 +170,19 @@
               VerticalContentAlignment="Center"
               Height="46" FontSize="15" FontWeight="SemiBold"
               Background="#2563EB" Foreground="White"
-              CornerRadius="10" Margin="0,0,8,0" />
+              CornerRadius="10" />
 
       <!-- Only on an installation that has a licence server. A self-hosted one never sees any
            of this, which is the default and stays the default. -->
       <TextBlock Grid.Row="2" Grid.ColumnSpan="2"
                  IsVisible="{Binding ShowLicence}"
                  Text="{Binding LicenceText}"
-                 Foreground="#94A3B8" FontSize="11"
+                 TextWrapping="Wrap"
+                 Foreground="{Binding LicenceBrush}" FontSize="11"
                  Margin="0,10,0,0" />
 
-      <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Spacing="8">
-        <!-- Sign in only exists where there is something to sign in to. -->
-        <Button Content="{Binding SignInButtonText}"
-                Click="OnSignInClick"
-                IsVisible="{Binding ShowLicence}"
-                HorizontalContentAlignment="Center"
-                VerticalContentAlignment="Center"
-                Height="46" Width="88" FontSize="14"
-                Background="#334155" Foreground="#E2E8F0"
-                CornerRadius="10" />
-        <Button Content="Settings"
-                Click="OnSettingsClick"
-                HorizontalContentAlignment="Center"
-                VerticalContentAlignment="Center"
-                Height="46" Width="96" FontSize="14"
-                Background="#334155" Foreground="#E2E8F0"
-                CornerRadius="10" />
-      </StackPanel>
+
     </Grid>
+  </Grid>
   </Grid>
 </Window>

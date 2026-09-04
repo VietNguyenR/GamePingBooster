@@ -81,6 +81,7 @@ internal static class Program
         CheckDisconnect(root.GetProperty("disconnect"));
         CheckCryptoP256(root.GetProperty("cryptoP256"));
         CheckHandshakeReqToken(root.GetProperty("handshakeReqToken"));
+        CheckProfileEnvelope(root);
 
         Console.WriteLine();
         if (_failures == 0)
@@ -481,6 +482,72 @@ internal static class Program
 
         Console.WriteLine(ToHex(pkt));
         return 0;
+    }
+
+    /// <summary>
+    /// The sealed profile.
+    ///
+    /// The half that matters is opening an envelope the LICENCE SERVER sealed, in JavaScript -
+    /// this side sealing and opening its own would pass even if the two disagreed completely.
+    /// That sample lives in the vectors as profileEnvelope.envelopeFromNodeHex; emit a fresh one
+    /// with `npm run envelope:emit` in the web-service repository.
+    /// </summary>
+    private static void CheckProfileEnvelope(JsonElement root)
+    {
+        // A round trip here first, so a failure below can be read as "the two languages
+        // disagree" rather than "this side is broken".
+        var deviceKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var scalar = deviceKey.ExportParameters(true).D!;
+        var devicePublic = GpbCrypto.ExportPublicKey(deviceKey);
+        var message = "the quick brown fox"u8.ToArray();
+
+        var sealedHere = ProfileEnvelope.Seal(message, devicePublic);
+        Check("profile envelope: round trip",
+            ProfileEnvelope.Open(sealedHere, scalar).AsSpan().SequenceEqual(message),
+            "sealing and opening on this side disagree, which is a bug here and not a drift");
+
+        // An accept-only check cannot fail.
+        var tampered = (byte[])sealedHere.Clone();
+        tampered[70] ^= 0x01;
+        var refused = false;
+        try { ProfileEnvelope.Open(tampered, scalar); }
+        catch (CryptographicException) { refused = true; }
+        Check("profile envelope: one flipped bit is refused", refused,
+            "a tampered envelope opened, so the tag is not being checked");
+
+        // Sealed to somebody else's device.
+        using var other = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var otherScalar = other.ExportParameters(true).D!;
+        var wrongDevice = false;
+        try { ProfileEnvelope.Open(sealedHere, otherScalar); }
+        catch (CryptographicException) { wrongDevice = true; }
+        Check("profile envelope: another device cannot open it", wrongDevice,
+            "an envelope sealed to one device opened with another key");
+
+        if (!root.TryGetProperty("profileEnvelope", out var v))
+        {
+            Fail("profile envelope: sealed by Node",
+                "no profileEnvelope in the vectors - the cross-language check is not running, " +
+                "which is worse than it failing because it looks like it passed");
+            return;
+        }
+
+        var vectorScalar = Hex(v.GetProperty("devicePrivateKeyHex").GetString()!);
+        var expected = v.GetProperty("plaintext").GetString()!;
+        var fromNode = Hex(v.GetProperty("envelopeFromNodeHex").GetString()!);
+
+        try
+        {
+            var opened = ProfileEnvelope.Open(fromNode, vectorScalar);
+            Check("profile envelope: sealed by Node, opened here",
+                Encoding.UTF8.GetString(opened) == expected,
+                $"opened to \"{Encoding.UTF8.GetString(opened)}\", expected \"{expected}\"");
+        }
+        catch (CryptographicException ex)
+        {
+            Fail("profile envelope: sealed by Node, opened here",
+                $"{ex.Message} - the licence server and this client disagree about the format");
+        }
     }
 
     private static void Check(string name, bool ok, string detail)
