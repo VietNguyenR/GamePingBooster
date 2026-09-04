@@ -22,7 +22,25 @@
 ;      the machine forever and cannot be removed from the UI.
 
 #define AppName        "Game Ping Booster"
-#define AppVersion     "0.1.0"
+
+; The version comes from ..\VERSION, the one place the whole product agrees on it, and
+; `gpb.ps1 installer` passes it in with /DAppVersion. This used to be a hand-written "0.1.0"
+; here and nothing else in the tree said anything at all, so every binary shipped as 1.0.0 - the
+; MSBuild default - inside a setup .exe that called itself something different.
+;
+; #ifndef, not a bare #define: a #define here would overwrite whatever /D put in, which is the
+; quiet way for a command-line version to be accepted and then ignored. The fallback is for
+; running ISCC directly on this file, where nothing passes it.
+#ifndef AppVersion
+  #define AppVersion "0.0.0-dev"
+#endif
+
+; The same version with any pre-release suffix removed. Windows version resources are four
+; numbers and nothing else, so "1.0.0-beta1" cannot go in one - Inno refuses to compile. The
+; suffix stays in AppVersion, which is free text and is what the user actually reads.
+#ifndef AppVersionNumeric
+  #define AppVersionNumeric "0.0.0"
+#endif
 #define AppPublisher   "Game Ping Booster"
 #define ServiceName    "GamePingBooster"
 #define ServiceExe     "gpb-service.exe"
@@ -37,6 +55,11 @@
 AppId={{6E7A4C21-8D3F-4B62-9E15-2C4A7F9D0B83}
 AppName={#AppName}
 AppVersion={#AppVersion}
+; So the setup .exe itself reports a version in its file properties. Without it a folder of
+; these is distinguishable only by filename, and a renamed one by nothing at all.
+VersionInfoVersion={#AppVersionNumeric}
+VersionInfoProductVersion={#AppVersionNumeric}
+VersionInfoProductTextVersion={#AppVersion}
 AppPublisher={#AppPublisher}
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}

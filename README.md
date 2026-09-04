@@ -146,9 +146,57 @@ meaning on another system and say so instead of failing oddly.
 | `./gpb capture` | Waits for the game to start, captures its traffic, and appends the server addresses it sees to `observed.txt`. Safe to Ctrl+C. |
 | `./gpb profile` | Turns what `capture` collected into `profiles/pubg-vn.json`. No arguments. |
 | `./gpb diag` | Collects everything needed to diagnose a client-side problem into one text file, with the PSK redacted. Attach it to a bug report. |
+| `./gpb installer [version]` | Publishes and then packages a setup `.exe` into `installer/dist/`. Needs [Inno Setup 6](https://jrsoftware.org/isdl.php). Give it a version to change one; see [Version](#version). |
+| `./gpb version [x.y.z]` | Prints the version everything is stamped with, or sets it. |
+| `./gpb reset` | **Deletes every trace of an installed Game Ping Booster from this machine**, so the installer can be tested on a development PC. See [Testing the installer](#testing-the-installer). |
 
 `capture` and `profile` are a pair and are how the profile grows: play, capture, rebuild. A
 profile is only as good as the number of matches behind it.
+
+### Version
+
+One number for the whole product, in the `VERSION` file at the root of `application/`.
+
+`client/Directory.Build.props` reads it and stamps all four assemblies; `./gpb installer` reads
+the same file and hands it to Inno Setup with `/DAppVersion`. So the setup filename, the entry in
+Programs and Features, and the file properties of every `.exe` inside cannot disagree with each
+other.
+
+Change it as part of a build, which is when it matters:
+
+```
+./gpb installer 0.2.0        sets VERSION, then publishes and packages
+./gpb version                prints what it is now
+./gpb version 0.2.0          sets it without building anything
+```
+
+`x.y.z`, optionally with a suffix (`1.0.0-beta1`). The suffix reaches the product version and the
+installer filename; the numeric part alone goes into `AssemblyVersion` and `FileVersion`, because
+Windows will not accept anything else in a file version resource.
+
+### Testing the installer
+
+An installer's job is to work on a machine that has never seen the software, and a development
+machine is the opposite of that: the service is already registered, the Wintun driver is already
+in the driver store, and there is already a device key, a licence token and a sealed profile.
+Installing over all that exercises almost none of the steps that matter.
+
+```
+./gpb reset -DryRun          read what it would remove; runs without Administrator
+./gpb reset                  do it; needs an Administrator terminal
+./gpb reset -UseUninstaller  run the real uninstaller first, then sweep up what it missed
+```
+
+It removes the processes, the service, the firewall rule, the leftover routes, the virtual
+adapter and the Wintun driver, everything under `%ProgramData%`, `%LOCALAPPDATA%` and
+`%ProgramFiles%`, the shortcuts and the uninstall registry entry - then re-checks and prints
+whatever survived.
+
+Two things to know before the first run. It deletes `device.key`, so the machine becomes a **new
+device** to the licence server and spends a device slot; every identity file is copied to
+`.reset-backup/` first and `-KeepIdentity` skips the deletion. And it removes the Wintun driver,
+which is shared with anything else that uses Wintun - WireGuard, most likely - so use
+`-KeepDriver` if that applies to you.
 
 ### Both halves
 
@@ -225,14 +273,18 @@ Windows, through the Wintun adapter, through the relay on a VPS, out to the inte
 confirmed with both ICMP and TCP, the latter proving MSS clamping and stateful NAT on the return
 path are correct.
 
+It has since been played on. A three-hour PUBG session over the relay took the in-game ping
+from **80 ms to 43 ms** and held it there (2026-09-02), and the installer has been run on a
+machine that had never had the software, configured from the settings screen, and used for a
+real match (2026-09-03).
+
 Not yet done:
 
-- **Never tested with PUBG itself.** The code path that installs routes when `TslGame.exe`
-  starts has not run against the real game.
-- **The profile is not saturated.** `profiles/pubg-vn.json` holds 3 prefixes derived from about
-  a dozen matches. Every gameplay server observed so far was on Azure `southeastasia`; none on
-  AWS. More capture sessions are needed before the list can be trusted.
-- **No installer.** The client currently has to be started by hand.
+- **The profile is not saturated.** Roughly eight matches in ten land on a covered server. That
+  only improves by playing and capturing; see `./gpb capture`.
+- **The installer is not code signed.** SmartScreen warns everybody who runs it, and many will
+  stop there. This needs a certificate that has to be bought, and it is the last thing between
+  the build and somebody who is not the author.
 - **The tunnel authenticates but does not encrypt.** See the security section of
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what that costs and when it has to change.
 

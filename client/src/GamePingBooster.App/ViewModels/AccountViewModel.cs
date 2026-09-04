@@ -122,23 +122,29 @@ public sealed class AccountViewModel : INotifyPropertyChanged
     /// <summary>
     /// Signs out of this machine.
     ///
-    /// Four things happen, in an order chosen so that a failure part way through still leaves
+    /// Five things happen, in an order chosen so that a failure part way through still leaves
     /// the machine signed out rather than half signed in:
     ///
     ///   1. the server is asked to revoke the credential - best effort, because somebody on a
     ///      dead network still has the right to sign out of their own computer
     ///   2. the refresh token is deleted locally, which is what actually ends the session here
     ///   3. the licence token is cleared from the service, so nothing presents it again
-    ///   4. the sealed profile is left alone
+    ///   4. a tunnel that is up is brought down
+    ///   5. the sealed profile is left alone
     ///
-    /// Point 4 is a decision, not an oversight. The profile is sealed to this machine's device
-    /// key and is useless to anybody else; deleting it would mean a person who signs back in
-    /// cannot connect until they are online again, which punishes the wrong case. Signing out is
-    /// not "leave no trace" - it is "stop using this account".
+    /// **Point 4 replaces the opposite decision**, which was to let a live tunnel finish on the
+    /// grounds that the relay had already authorised that session and dropping somebody out of a
+    /// match would be worse. That reasoning was about the relay and ignored the person: signing
+    /// out and then watching the app go on saying "Connected" does not read as a considerate
+    /// choice, it reads as a sign-out that did not work. If somebody wants to keep playing they
+    /// have not pressed Sign out. Best effort, like the revoke: the credential is already gone
+    /// from disk by this point, and a service that cannot be reached must not turn a completed
+    /// sign-out into an error.
     ///
-    /// A live tunnel is also left running. The relay authorised that session when it started and
-    /// caps its age anyway; dropping somebody out of a match because they pressed Sign out in
-    /// another window would be worse than letting it finish.
+    /// Point 5 is a decision too. The profile is sealed to this machine's device key and is
+    /// useless to anybody else; deleting it would mean a person who signs back in cannot connect
+    /// until they are online again, which punishes the wrong case. Signing out is not "leave no
+    /// trace" - it is "stop using this account".
     /// </summary>
     public async Task SignOutAsync(CancellationToken ct)
     {
@@ -162,10 +168,16 @@ public sealed class AccountViewModel : INotifyPropertyChanged
 
             RefreshTokenStore.Clear();
 
-            // Null clears it. The service stops presenting a licence from the next connect; the
-            // one in progress, if any, was already authorised by the relay.
+            // Null clears it, so nothing presents this account's licence again.
             await _pipe.SendAsync(new CommandMessage { Verb = "set-token", Token = null })
                 .ConfigureAwait(true);
+
+            // And bring down anything running on it. Unconditional rather than checked first:
+            // this window does not receive the status, so asking "is it connected" would mean
+            // wiring the tunnel state through to a screen that has no other use for it. The verb
+            // is idempotent - the service returns immediately when there is nothing to tear
+            // down - so sending it always is both simpler and correct.
+            await _pipe.DisconnectTunnelAsync().ConfigureAwait(true);
 
             SignedOut = true;
         }

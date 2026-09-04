@@ -19,7 +19,8 @@
         .\gpb.ps1 test                every test on both sides
         .\gpb.ps1 publish             Native AOT build and install into ProgramData
         .\gpb.ps1 diag                collect a diagnostics bundle to send
-        .\gpb.ps1 installer           publish, then package a setup .exe (needs Inno Setup 6)
+        .\gpb.ps1 installer [version] publish, then package a setup .exe (needs Inno Setup 6)
+        .\gpb.ps1 version [x.y.z]     show or set the version everything is stamped with
         .\gpb.ps1 reset               remove EVERYTHING this software installed, to test setup
 
         .\gpb.ps1 relay build         cross-compile relayd for Linux
@@ -89,6 +90,43 @@ function Get-AppExe {
     Join-Path $client 'src\GamePingBooster.App\bin\Debug\net9.0-windows\win-x64\GamePingBooster.exe'
 }
 
+# The one place the product's version lives.
+#
+# Read by client\Directory.Build.props, which stamps all four assemblies, and passed to Inno
+# Setup with /DAppVersion. Both from this file rather than each side keeping its own copy: two
+# copies is how a setup .exe ends up called 0.1.0 with 1.0.0 binaries inside it, which is exactly
+# what this repository shipped before the file existed.
+$versionFile = Join-Path $root 'VERSION'
+
+function Get-GpbVersion {
+    if (-not (Test-Path $versionFile)) { return '0.0.0' }
+    return (Get-Content $versionFile -Raw).Trim()
+}
+
+<#
+.SYNOPSIS
+    Writes VERSION, after checking the string is one every consumer will accept.
+.DESCRIPTION
+    Validated here rather than left to fail later, because "later" is three different places
+    with three different error messages: MSBuild rejects a non-numeric AssemblyVersion, Inno
+    puts whatever it is given straight into a filename, and Programs and Features sorts it as
+    text. x.y.z with an optional -suffix is what all three handle.
+
+    Written without a trailing newline dance: Directory.Build.props trims, and so does
+    Get-GpbVersion, so a file edited by hand in any editor still works.
+#>
+function Set-GpbVersion {
+    param([string]$Version)
+
+    $clean = $Version.Trim().TrimStart('v')
+    if ($clean -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9.]+)?$') {
+        throw "'$Version' is not a version. Use x.y.z, optionally with a suffix: 0.2.0, 1.0.0-beta1."
+    }
+
+    Set-Content -Path $versionFile -Value $clean -Encoding ascii -NoNewline
+    return $clean
+}
+
 function Stop-Everything {
     $stopped = @()
     $stubborn = @()
@@ -114,6 +152,56 @@ function Stop-Everything {
         Warn "build next will NOT be what is running. Re-run this from an Administrator terminal."
     }
     return $stopped.Count
+}
+
+<#
+.SYNOPSIS
+    Starts the UI as the LOGGED-IN user, even when this script is running elevated.
+.DESCRIPTION
+    `dev` has to be run from an Administrator terminal, because psexec needs it. A plain
+    Start-Process from there hands the UI the elevated token as well - and that is wrong in a way
+    that hides bugs rather than causing them.
+
+    The whole privilege split rests on the UI being unprivileged: the named pipe's ACL is opened
+    to BuiltinUsers precisely so that a normal-user UI can drive a LocalSystem service, and the
+    installer starts the UI with `runasoriginaluser` for the same reason. A dev loop that runs the
+    UI elevated therefore never exercises the boundary that production depends on. It also makes
+    the app untouchable from an ordinary shell - UIPI refuses even WM_CLOSE from a lower
+    integrity level, with ERROR_ACCESS_DENIED - which is how this was noticed.
+
+    Going through explorer.exe is the trick that does it without a token-manipulation helper:
+    Explorer runs as the interactive user, so the process it launches does too. It gives back no
+    process handle, hence the poll rather than a return value. If it does not appear, fall back to
+    launching directly and say plainly what that means, because a UI that does not start at all is
+    worse than one running at the wrong integrity level.
+#>
+function Start-UnelevatedUi {
+    param([string]$Path)
+
+    $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object System.Security.Principal.WindowsPrincipal($id)
+    if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        # Not elevated: nothing to drop, and explorer would only add a layer of indirection.
+        Start-Process $Path | Out-Null
+        return
+    }
+
+    $before = @(Get-Process -Name 'GamePingBooster' -ErrorAction SilentlyContinue).Count
+    Start-Process 'explorer.exe' -ArgumentList "`"$Path`"" | Out-Null
+
+    $deadline = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 400
+        if (@(Get-Process -Name 'GamePingBooster' -ErrorAction SilentlyContinue).Count -gt $before) {
+            Say "UI started as $($env:USERNAME), not elevated - the same as after an install" 'DarkGray'
+            return
+        }
+    }
+
+    Warn "explorer did not start the UI. Falling back to starting it from here, which means it"
+    Warn "runs ELEVATED - unlike a real installation. Fine for a quick look, but do not conclude"
+    Warn "anything about the pipe's permissions from it."
+    Start-Process $Path | Out-Null
 }
 
 function Invoke-Dev {
@@ -155,7 +243,7 @@ function Invoke-Dev {
     $app = Get-AppExe
     if (Test-Path $app) {
         Say "Starting the UI"
-        Start-Process $app | Out-Null
+        Start-UnelevatedUi $app
     } else {
         Warn "No UI binary at $app"
     }
@@ -376,6 +464,17 @@ switch ($Verb.ToLowerInvariant()) {
         & (Join-Path $tools 'Collect-Diagnostics.ps1')
     }
 
+    'version' {
+        if ($Arg1) {
+            $v = Set-GpbVersion $Arg1
+            Say "Version set to $v" 'Green'
+            Warn "Nothing is rebuilt. Run .\gpb.ps1 installer to stamp it into the binaries"
+            Warn "and the setup .exe - a VERSION the build has not seen yet is just a file."
+        } else {
+            Write-Host (Get-GpbVersion)
+        }
+    }
+
     'reset' {
         # Its own file rather than a block here, because it is the only verb that deletes things
         # and it needs room to say why for each one.
@@ -410,6 +509,18 @@ switch ($Verb.ToLowerInvariant()) {
                   "the default location is fine, this looks in Program Files."
         }
 
+        # The version is set BEFORE publishing, not after, because the binaries carry it too:
+        # Directory.Build.props reads VERSION at compile time. Setting it afterwards would
+        # produce a setup .exe named 0.2.0 full of 0.1.0 binaries, which is the exact failure
+        # this whole arrangement exists to prevent.
+        if ($Arg1) {
+            $version = Set-GpbVersion $Arg1
+            Say "Version set to $version (written to VERSION)"
+        } else {
+            $version = Get-GpbVersion
+            Say "Version $version - pass one to change it: .\gpb.ps1 installer 0.2.0"
+        }
+
         # Publish first. Packaging whatever happens to be lying in the publish folder is how an
         # installer ends up shipping last week's binary, and nothing about the result would say
         # so.
@@ -436,11 +547,18 @@ switch ($Verb.ToLowerInvariant()) {
         }
 
         Say "Building the installer"
-        & $iscc (Join-Path $root 'installer\GamePingBooster.iss')
+        # /D overrides the #ifndef fallback in the .iss. One string, three places it has to
+        # appear: the setup filename, AppVersion, and the Programs and Features entry.
+        # Two defines, not one: AppVersion is free text and keeps any -suffix, while a Windows
+        # version resource is four numbers and nothing else. Splitting here rather than in the
+        # .iss because Inno's preprocessor has no string split worth reading.
+        $numeric = ($version -split '-')[0]
+        & $iscc "/DAppVersion=$version" "/DAppVersionNumeric=$numeric" (Join-Path $root 'installer\GamePingBooster.iss')
         if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
 
         $out = Join-Path $root 'installer\dist'
         Say "Installer written to $out" 'Green'
+        Say "  GamePingBooster-Setup-$version.exe" 'Green'
         Warn "It is NOT code signed. Windows SmartScreen will warn every person who runs it,"
         Warn "and many will stop there. Signing needs a certificate you have to buy."
     }

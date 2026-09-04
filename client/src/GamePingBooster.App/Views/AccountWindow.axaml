@@ -1,22 +1,22 @@
-<Window xmlns="https://github.com/avaloniaui"
+<views:SurfaceWindow xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:GamePingBooster.App.ViewModels"
+        xmlns:views="using:GamePingBooster.App.Views"
         x:Class="GamePingBooster.App.Views.AccountWindow"
         x:DataType="vm:AccountViewModel"
         Title="Account"
         Width="400" SizeToContent="Height"
         MinWidth="400"
         WindowStartupLocation="CenterOwner"
-        CanResize="False"
-        Background="#0F172A">
+        CanResize="False">
 
-  <Window.Styles>
+  <views:SurfaceWindow.Styles>
     <Style Selector="TextBlock.label">
-      <Setter Property="Foreground" Value="#94A3B8" />
+      <Setter Property="Foreground" Value="#ababab" />
       <Setter Property="FontSize" Value="11" />
     </Style>
     <Style Selector="TextBlock.value">
-      <Setter Property="Foreground" Value="#E2E8F0" />
+      <Setter Property="Foreground" Value="#ababab" />
       <Setter Property="FontSize" Value="13" />
       <Setter Property="Margin" Value="0,2,0,0" />
     </Style>
@@ -24,12 +24,21 @@
       <Setter Property="CornerRadius" Value="8" />
       <Setter Property="Padding" Value="16,8" />
     </Style>
-  </Window.Styles>
+  </views:SurfaceWindow.Styles>
 
-  <StackPanel Margin="24" Spacing="16">
+  <Grid RowDefinitions="Auto,Auto">
+
+    <!--
+      A spacer, not a title bar - see SurfaceWindow for why there is no title bar to draw.
+      It keeps the content clear of the caption buttons and gives somewhere to drag.
+    -->
+    <Border Grid.Row="0" Height="34" Background="Transparent"
+            PointerPressed="OnTitleBarPressed" />
+
+  <StackPanel Grid.Row="1" Margin="24,4,24,24" Spacing="16">
 
     <StackPanel Spacing="2">
-      <TextBlock Text="Account" Foreground="#E2E8F0" FontSize="18" FontWeight="SemiBold" />
+      <TextBlock Text="Account" Foreground="#ababab" FontSize="18" FontWeight="SemiBold" />
       <TextBlock Classes="label" Text="{Binding ServerText}" />
     </StackPanel>
 
@@ -61,7 +70,7 @@
       </StackPanel>
     </Grid>
 
-    <Border Background="#1E293B" CornerRadius="8" Padding="12" IsVisible="{Binding Ready}">
+    <Border Background="#242424" CornerRadius="8" Padding="12" IsVisible="{Binding Ready}">
       <StackPanel Spacing="2">
         <TextBlock Classes="label" Text="This device" />
         <TextBlock Classes="value" Text="{Binding DeviceText}" FontFamily="Consolas,monospace" FontSize="11" />
@@ -73,17 +82,18 @@
     </Border>
 
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+      <Button Content="Close" Click="OnCloseClick"
+              Background="#111111" Foreground="#ababab" />
       <Button Content="Sign out" Click="OnSignOutClick"
               IsEnabled="{Binding Ready}"
               Background="#7F1D1D" Foreground="#FECACA" />
-      <Button Content="Close" Click="OnCloseClick"
-              Background="#334155" Foreground="#E2E8F0" />
     </StackPanel>
 
-    <!-- Said plainly, because the opposite is what people assume. Signing out stops this
-         machine using the account; it does not end a session already running. -->
+    <!-- Said plainly, because it is the one thing about this button somebody might not
+         expect: it also ends a connection that is running. -->
     <TextBlock Classes="label" TextWrapping="Wrap"
-               Text="Signing out removes this account from this computer. A connection already running keeps going until you disconnect." />
+               Text="Signing out removes this account from this computer and disconnects if the tunnel is up. The game list already downloaded is kept - it is encrypted to this PC and useless anywhere else." />
 
   </StackPanel>
-</Window>
+  </Grid>
+</views:SurfaceWindow>

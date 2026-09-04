@@ -1,41 +1,48 @@
-﻿<Window xmlns="https://github.com/avaloniaui"
+﻿<views:SurfaceWindow xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:GamePingBooster.App.ViewModels"
+        xmlns:views="using:GamePingBooster.App.Views"
         x:Class="GamePingBooster.App.Views.SettingsWindow"
         x:DataType="vm:SettingsViewModel"
         Title="Relay settings"
         Width="440" SizeToContent="Height"
         MinWidth="440"
         WindowStartupLocation="CenterOwner"
-        CanResize="False"
-        Background="#0F172A">
+        CanResize="False">
 
-  <Window.Styles>
+  <views:SurfaceWindow.Styles>
     <Style Selector="TextBlock.label">
-      <Setter Property="Foreground" Value="#94A3B8" />
+      <Setter Property="Foreground" Value="#ababab" />
       <Setter Property="FontSize" Value="12" />
       <Setter Property="Margin" Value="0,0,0,4" />
     </Style>
     <Style Selector="TextBlock.hint">
-      <Setter Property="Foreground" Value="#64748B" />
+      <Setter Property="Foreground" Value="#787878" />
       <Setter Property="FontSize" Value="11" />
       <Setter Property="TextWrapping" Value="Wrap" />
       <Setter Property="Margin" Value="0,4,0,0" />
     </Style>
     <Style Selector="TextBox">
-      <Setter Property="Background" Value="#1E293B" />
-      <Setter Property="Foreground" Value="#E2E8F0" />
-      <Setter Property="BorderBrush" Value="#334155" />
+      <Setter Property="Background" Value="#242424" />
+      <Setter Property="Foreground" Value="#ababab" />
+      <Setter Property="BorderThickness" Value="0" />
       <Setter Property="CornerRadius" Value="8" />
       <Setter Property="Padding" Value="10,8" />
       <Setter Property="FontSize" Value="13" />
     </Style>
-  </Window.Styles>
+  </views:SurfaceWindow.Styles>
 
-  <StackPanel Margin="24" Spacing="16">
+  <Grid RowDefinitions="Auto,Auto">
+    <!--
+      A spacer, not a title bar - see SurfaceWindow for why there is no title bar to draw.
+      It keeps the content clear of the caption buttons and gives somewhere to drag.
+    -->
+    <Border Grid.Row="0" Height="34" Background="Transparent"
+            PointerPressed="OnTitleBarPressed" />
+
+  <StackPanel Grid.Row="1" Margin="24,4,24,24" Spacing="16">
 
     <StackPanel Spacing="4">
-      <TextBlock Text="Relay settings" Foreground="#F8FAFC" FontSize="18" FontWeight="Bold" />
       <TextBlock Classes="hint"
                  Text="The addresses of your relays and the key they were installed with. Both are printed by the relay's installer when you set up a server." />
     </StackPanel>
@@ -79,7 +86,7 @@
       <Button Grid.Column="1" Content="Cancel" Click="OnCancelClick"
               Height="38" Width="92" Margin="0,0,8,0"
               HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
-              Background="#334155" Foreground="#E2E8F0" CornerRadius="8" />
+              Background="#111111" Foreground="#ababab" CornerRadius="8" />
       <Button Grid.Column="2" Content="Save" Click="OnSaveClick"
               IsEnabled="{Binding CanSave}"
               Height="38" Width="92"
@@ -87,4 +94,5 @@
               Background="#2563EB" Foreground="White" CornerRadius="8" />
     </Grid>
   </StackPanel>
-</Window>
+  </Grid>
+</views:SurfaceWindow>

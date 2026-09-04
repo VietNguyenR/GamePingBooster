@@ -1,14 +1,14 @@
 ﻿using System.Diagnostics;
 using Avalonia.Controls;
-using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
 using GamePingBooster.App.Services;
 using GamePingBooster.App.ViewModels;
+using GamePingBooster.Core.Ipc;
 
 namespace GamePingBooster.App.Views;
 
-public partial class MainWindow : Window
+public partial class MainWindow : SurfaceWindow
 {
     public MainWindow()
     {
@@ -99,30 +99,50 @@ public partial class MainWindow : Window
         }
     }
 
-    // ------------------------------------------------------------ our own title bar
-
-    /// <summary>
-    /// Drag the window by the strip under the caption.
-    ///
-    /// Avalonia's own title bar handles dragging in its area; this covers the rest of the strip,
-    /// so the whole top of the window behaves the way people expect rather than only the part
-    /// with the buttons on it.
-    /// </summary>
-    private void OnTitleBarPressed(object? sender, PointerPressedEventArgs e)
-    {
-        if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
-        {
-            BeginMoveDrag(e);
-        }
-    }
-
-
-
     private async void OnActionClick(object? sender, RoutedEventArgs e)
     {
         if (DataContext is MainViewModel vm)
         {
             await vm.ToggleAsync();
         }
+    }
+
+    // ------------------------------------------------------------ closing
+
+    /// <summary>Set once the tunnel is down, so the second Close is allowed through.</summary>
+    private bool _readyToClose;
+
+    /// <summary>
+    /// Closing the window brings the tunnel down first.
+    ///
+    /// It did not, and the result was an app that looked closed while the adapter, the pinned
+    /// relay route and every game route stayed exactly where they were - with no window to press
+    /// Disconnect in. The service is a Windows service and carries on quite happily without a UI,
+    /// which is what made this invisible rather than obviously broken.
+    ///
+    /// The close is cancelled, not delayed: the window stays on screen saying "Disconnecting..."
+    /// while the service tears down, and closes for real afterwards. Hiding it and letting the
+    /// process linger would look like a hang, and this can genuinely take a second or two -
+    /// netsh runs one process per route.
+    ///
+    /// async void is right here and only here: this overrides an event-shaped method, and there
+    /// is nothing to hand a Task to.
+    /// </summary>
+    protected override async void OnClosing(WindowClosingEventArgs e)
+    {
+        base.OnClosing(e);
+
+        if (_readyToClose || e.Cancel) return;
+        if (DataContext is not MainViewModel vm) return;
+        if (vm.State is TunnelState.Disconnected) return;
+
+        e.Cancel = true;
+
+        // Capped, because a window that will not close is worse than a tunnel that takes a
+        // moment longer to go down. The service finishes on its own either way.
+        await vm.DisconnectAndWaitAsync(TimeSpan.FromSeconds(6));
+
+        _readyToClose = true;
+        Close();
     }
 }

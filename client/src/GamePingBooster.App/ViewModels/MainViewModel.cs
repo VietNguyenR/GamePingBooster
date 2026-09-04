@@ -105,7 +105,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// string bound to IBrush goes through a TypeConverter, and TypeConverters are exactly what
     /// the Native AOT trimmer removes.
     /// </summary>
-    private static readonly IBrush LicenceQuiet = new SolidColorBrush(Color.FromRgb(0x94, 0xA3, 0xB8));
+    private static readonly IBrush LicenceQuiet = new SolidColorBrush(Color.FromRgb(0x78, 0x78, 0x78));
 
     public IBrush LicenceBrush => LicenceBlocked ? Brushes.Orange : LicenceQuiet;
 
@@ -351,6 +351,49 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     // ------------------------------------------------------------------- actions
 
+    /// <summary>
+    /// Set while something is waiting for the tunnel to actually be down, so the status push
+    /// that says so can release it.
+    /// </summary>
+    private TaskCompletionSource? _teardown;
+
+    /// <summary>
+    /// Brings the tunnel down and waits for the service to confirm, or for the timeout.
+    ///
+    /// Waiting matters because the caller is on its way out. Sending the verb and leaving
+    /// immediately means the pipe is disposed while the request may still be in the buffer, and
+    /// the tunnel stays up: the adapter, the pinned route and every game route survive an app
+    /// that looks closed, with nothing on screen to say so and no way to press Disconnect.
+    ///
+    /// The timeout is not a formality either. Teardown removes routes through netsh, one process
+    /// per command, releases the adapter and joins two pump threads - seconds, not milliseconds,
+    /// on a bad day. What it must never do is hold the window open indefinitely, so the wait is
+    /// capped and the service is left to finish on its own if it is slow. The verb having been
+    /// sent is the part that matters; the wait is only so the user sees it happen.
+    /// </summary>
+    public async Task DisconnectAndWaitAsync(TimeSpan timeout)
+    {
+        if (State is TunnelState.Disconnected) return;
+
+        var wait = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _teardown = wait;
+        try
+        {
+            Detail = "Disconnecting...";
+            await _pipe.DisconnectTunnelAsync().ConfigureAwait(true);
+            await Task.WhenAny(wait.Task, Task.Delay(timeout)).ConfigureAwait(true);
+        }
+        catch (Exception)
+        {
+            // The service may already be gone, or the pipe broken. Neither is a reason to
+            // refuse to close the window - and a service that is gone has no tunnel either.
+        }
+        finally
+        {
+            _teardown = null;
+        }
+    }
+
     public async Task ToggleAsync()
     {
         try
@@ -379,6 +422,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private void OnStatus(StatusMessage status) => Dispatcher.UIThread.Post(() =>
     {
         State = status.State;
+
+        // Whoever is closing the app can stop waiting. Faulted counts: the tunnel is not up, and
+        // holding the window open for five seconds over a teardown that already failed helps
+        // nobody.
+        if (status.State is TunnelState.Disconnected or TunnelState.Faulted)
+        {
+            _teardown?.TrySetResult();
+        }
         Detail = status.Detail;
         Error = status.Error;
         PingMs = status.TunnelPingMs;
@@ -403,6 +454,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private void OnDisconnected(string reason) => Dispatcher.UIThread.Post(() =>
     {
+        // The pipe itself dropped. Nothing more is coming, so anything waiting on a status that
+        // says "down" would wait out its whole timeout for an answer that cannot arrive.
+        _teardown?.TrySetResult();
+
         State = TunnelState.Disconnected;
         Detail = reason;
         PingMs = null;

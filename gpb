@@ -26,7 +26,8 @@
 #   ./gpb profile                rebuild the profile                      (Windows)
 #   ./gpb check                  is the game going through the relay      (Windows)
 #   ./gpb logs | status | stop | publish | diag                           (Windows)
-#   ./gpb installer              package a setup .exe                     (Windows)
+#   ./gpb installer [version]    package a setup .exe                     (Windows)
+#   ./gpb version [x.y.z]        show or set the product version          (Windows)
 #   ./gpb reset                  strip this machine back to before install (Windows)
 #
 # Relays are declared in gpb.conf - host, port, user, key or password, one block each. Copy
@@ -503,7 +504,7 @@ case "$verb" in
         say "Done"
         ;;
 
-    dev | capture | profile | check | logs | status | stop | publish | diag | installer | reset)
+    dev | capture | profile | check | logs | status | stop | publish | diag | installer | reset | version)
         delegate "$verb" "$@"
         ;;
 

@@ -5,7 +5,7 @@ using GamePingBooster.App.ViewModels;
 
 namespace GamePingBooster.App.Views;
 
-public partial class LoginWindow : Window
+public partial class LoginWindow : SurfaceWindow
 {
     private readonly CancellationTokenSource _cts = new();
 

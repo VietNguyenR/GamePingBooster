@@ -1,30 +1,30 @@
-<Window xmlns="https://github.com/avaloniaui"
+<views:SurfaceWindow xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:GamePingBooster.App.ViewModels"
+        xmlns:views="using:GamePingBooster.App.Views"
         x:Class="GamePingBooster.App.Views.LoginWindow"
         x:DataType="vm:LoginViewModel"
         Title="Sign in"
         Width="400" SizeToContent="Height"
         MinWidth="400"
         WindowStartupLocation="CenterOwner"
-        CanResize="False"
-        Background="#0F172A">
+        CanResize="False">
 
-  <Window.Styles>
+  <views:SurfaceWindow.Styles>
     <Style Selector="TextBlock.label">
-      <Setter Property="Foreground" Value="#94A3B8" />
+      <Setter Property="Foreground" Value="#ababab" />
       <Setter Property="FontSize" Value="12" />
       <Setter Property="Margin" Value="0,0,0,4" />
     </Style>
     <Style Selector="TextBlock.hint">
-      <Setter Property="Foreground" Value="#64748B" />
+      <Setter Property="Foreground" Value="#787878" />
       <Setter Property="FontSize" Value="11" />
       <Setter Property="TextWrapping" Value="Wrap" />
     </Style>
     <Style Selector="TextBox">
-      <Setter Property="Background" Value="#1E293B" />
-      <Setter Property="Foreground" Value="#E2E8F0" />
-      <Setter Property="BorderBrush" Value="#334155" />
+      <Setter Property="Background" Value="#242424" />
+      <Setter Property="Foreground" Value="#ababab" />
+      <Setter Property="BorderThickness" Value="0" />
       <Setter Property="CornerRadius" Value="8" />
       <Setter Property="Padding" Value="10,8" />
     </Style>
@@ -32,11 +32,18 @@
       <Setter Property="CornerRadius" Value="8" />
       <Setter Property="Padding" Value="16,8" />
     </Style>
-  </Window.Styles>
+  </views:SurfaceWindow.Styles>
 
-  <StackPanel Margin="24" Spacing="14">
+  <Grid RowDefinitions="Auto,Auto">
 
-    <TextBlock Text="Sign in" Foreground="#E2E8F0" FontSize="18" FontWeight="SemiBold" />
+    <!--
+      A spacer, not a title bar - see SurfaceWindow for why there is no title bar to draw.
+      It keeps the content clear of the caption buttons and gives somewhere to drag.
+    -->
+    <Border Grid.Row="0" Height="34" Background="Transparent"
+            PointerPressed="OnTitleBarPressed" />
+
+  <StackPanel Grid.Row="1" Margin="24,4,24,24" Spacing="14">
     <TextBlock Classes="hint" Text="{Binding ServerText}" />
 
     <StackPanel Spacing="0">
@@ -60,11 +67,12 @@
 
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
       <Button Content="Cancel" Click="OnCancelClick"
-              Background="#1E293B" Foreground="#94A3B8" />
+              Background="#111111" Foreground="#ababab" />
       <Button Content="{Binding ButtonText}" Click="OnSubmitClick"
               IsEnabled="{Binding CanSubmit}"
               Background="#2563EB" Foreground="White" />
     </StackPanel>
 
   </StackPanel>
-</Window>
+  </Grid>
+</views:SurfaceWindow>

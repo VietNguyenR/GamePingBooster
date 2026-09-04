@@ -8,7 +8,7 @@ using GamePingBooster.Core.Ipc;
 
 namespace GamePingBooster.App.Views;
 
-public partial class SettingsWindow : Window
+public partial class SettingsWindow : SurfaceWindow
 {
     private PipeClient? _pipe;
     private bool _awaitingReply;

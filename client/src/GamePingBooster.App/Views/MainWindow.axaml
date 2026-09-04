@@ -1,23 +1,21 @@
-﻿<Window xmlns="https://github.com/avaloniaui"
+﻿<views:SurfaceWindow xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:GamePingBooster.App.ViewModels"
+        xmlns:views="using:GamePingBooster.App.Views"
         x:Class="GamePingBooster.App.Views.MainWindow"
         x:DataType="vm:MainViewModel"
         Title="Game Ping Booster"
         Width="420" Height="560"
         MinWidth="380" MinHeight="500"
-        WindowStartupLocation="CenterScreen"
-        Background="#0F172A"
-        ExtendClientAreaToDecorationsHint="True"
-        ExtendClientAreaTitleBarHeightHint="-1">
+        WindowStartupLocation="CenterScreen">
 
-  <Window.Styles>
+  <views:SurfaceWindow.Styles>
     <Style Selector="TextBlock.label">
-      <Setter Property="Foreground" Value="#94A3B8" />
+      <Setter Property="Foreground" Value="#ababab" />
       <Setter Property="FontSize" Value="13" />
     </Style>
     <Style Selector="TextBlock.value">
-      <Setter Property="Foreground" Value="#E2E8F0" />
+      <Setter Property="Foreground" Value="#ababab" />
       <Setter Property="FontSize" Value="13" />
       <Setter Property="FontWeight" Value="SemiBold" />
       <Setter Property="HorizontalAlignment" Value="Right" />
@@ -33,31 +31,27 @@
       <Setter Property="VerticalContentAlignment" Value="Center" />
     </Style>
     <Style Selector="Button.caption:pointerover /template/ ContentPresenter">
-      <Setter Property="Background" Value="#1E293B" />
+      <Setter Property="Background" Value="#242424" />
     </Style>
     <Style Selector="Button.caption.close:pointerover /template/ ContentPresenter">
       <Setter Property="Background" Value="#B91C1C" />
     </Style>
     <Style Selector="Border.card">
-      <Setter Property="Background" Value="#1E293B" />
+      <Setter Property="Background" Value="#242424" />
       <Setter Property="CornerRadius" Value="12" />
       <Setter Property="Padding" Value="16" />
     </Style>
-  </Window.Styles>
+    <Style Selector="MenuFlyoutPresenter.custom-bg">
+      <Setter Property="Background" Value="#111111" />
+      <Setter Property="BorderBrush" Value="#242424" />
+    </Style>
+  </views:SurfaceWindow.Styles>
 
   <Grid RowDefinitions="Auto,*">
 
     <!--
-      A spacer, not a title bar.
-
-      ExtendClientAreaToDecorationsHint makes the client area reach under the system caption, so
-      the window is one continuous surface in our own colour instead of an app sitting below a
-      grey Windows bar. Avalonia 12 still draws the title and the caption buttons on top of it,
-      which is what we want - drawing our own as well produced two titles in the same place and
-      seven caption buttons, which is what the first attempt at this looked like.
-      (ExtendClientAreaChromeHints, the Avalonia 11 way of suppressing them, no longer exists.)
-
-      All this row does is keep the content clear of the buttons, and give somewhere to drag.
+      A spacer, not a title bar - see SurfaceWindow for why there is no title bar to draw.
+      It keeps the content clear of the caption buttons and gives somewhere to drag.
     -->
     <Border Grid.Row="0" Height="34" Background="Transparent"
             PointerPressed="OnTitleBarPressed" />
@@ -66,30 +60,23 @@
 
     <!-- Header -->
     <Grid Grid.Row="0" ColumnDefinitions="*,Auto">
-      <StackPanel Grid.Column="0" Spacing="4">
-        <TextBlock Text="Game Ping Booster"
-                   Foreground="#F8FAFC" FontSize="20" FontWeight="Bold" />
-        <TextBlock Text="PUBG - Southeast Asia servers"
-                   Foreground="#64748B" FontSize="12" />
-      </StackPanel>
-
       <!--
         Everything that is not Connect lives here. There were three buttons competing with the
         one that matters; now there is one primary action and a menu.
       -->
       <Button Grid.Column="1" VerticalAlignment="Top"
-              Width="36" Height="36" Padding="0"
+              Padding="10"
               Background="Transparent" BorderThickness="0"
               ToolTip.Tip="Menu">
         <Button.Content>
-          <Path Data="M0,0 H14 M0,5 H14 M0,10 H14" Stroke="#94A3B8" StrokeThickness="1.6" />
+          <Path Data="M0,0 H14 M0,5 H14 M0,10 H14" Stroke="#ababab" StrokeThickness="1.6" />
         </Button.Content>
         <Button.Flyout>
-          <MenuFlyout Placement="BottomEdgeAlignedRight">
+          <MenuFlyout Placement="BottomEdgeAlignedRight" FlyoutPresenterClasses="custom-bg">
             <MenuItem Header="{Binding AccountMenuText}" Click="OnAccountClick"
                       IsVisible="{Binding ShowLicence}" />
             <MenuItem Header="Settings" Click="OnSettingsClick" />
-            <Separator />
+            <Separator Background="#242424" />
             <MenuItem Header="Open logs folder" Click="OnLogsClick" />
           </MenuFlyout>
         </Button.Flyout>
@@ -108,7 +95,7 @@
         </StackPanel>
 
         <TextBlock Text="{Binding Detail}"
-                   Foreground="#94A3B8" FontSize="12"
+                   Foreground="#ababab" FontSize="12"
                    TextWrapping="Wrap" TextAlignment="Center"
                    MaxWidth="320" />
 
@@ -155,9 +142,9 @@
       <!-- First run: there is no relay yet, so say so instead of offering a button that
            could only fail. -->
       <Border Grid.Row="0" Grid.ColumnSpan="2"
-              Background="#1E3A5F" CornerRadius="8" Padding="12" Margin="0,0,0,12"
+              Background="#20252b" CornerRadius="8" Padding="12" Margin="0,0,0,12"
               IsVisible="{Binding NeedsSetup}">
-        <TextBlock Foreground="#BFDBFE" FontSize="12" TextWrapping="Wrap"
+        <TextBlock Foreground="#869bb3" FontSize="12" TextWrapping="Wrap"
                    Text="No relay configured yet. Open Settings and enter your relay's address and key." />
       </Border>
 
@@ -185,4 +172,4 @@
     </Grid>
   </Grid>
   </Grid>
-</Window>
+</views:SurfaceWindow>

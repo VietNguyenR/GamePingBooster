@@ -1,0 +1,47 @@
+<Project>
+
+  <!--
+    One version for the whole product, read from application\VERSION.
+
+    Before this file there was no <Version> anywhere, so every binary shipped as 1.0.0 - the
+    default MSBuild uses when nothing says otherwise - while the installer called itself 0.1.0
+    because that number was written out by hand in GamePingBooster.iss. Two answers to "which
+    build is this", and the one a user can actually see in a file's properties was the wrong one.
+
+    A plain text file rather than a property here, because two things need to read it and only
+    one of them is MSBuild: `gpb.ps1 installer` passes the same string to Inno Setup with
+    /DAppVersion, so the setup .exe, its filename, the Programs and Features entry and the
+    binaries inside it cannot disagree. Changing the version is `./gpb installer 0.2.0`, which
+    writes this file and then builds.
+  -->
+  <PropertyGroup>
+    <GpbVersionFile>$(MSBuildThisFileDirectory)..\VERSION</GpbVersionFile>
+    <GpbVersion Condition="Exists('$(GpbVersionFile)')">$([System.IO.File]::ReadAllText('$(GpbVersionFile)').Trim())</GpbVersion>
+    <!-- A missing VERSION must not fail the build: a shallow checkout, or somebody building one
+         project out of the tree, is not a reason to refuse to compile. -->
+    <GpbVersion Condition="'$(GpbVersion)' == ''">0.0.0</GpbVersion>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- The full string, pre-release suffix and all. This is what shows as "Product version". -->
+    <Version>$(GpbVersion)</Version>
+    <InformationalVersion>$(GpbVersion)</InformationalVersion>
+    <!-- Otherwise the SDK appends "+<git sha>" and the product version a user reads in file
+         properties is forty characters of hash after the part they wanted. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+
+    <!--
+      AssemblyVersion and FileVersion are numeric-only: Windows rejects "0.2.0-beta1" in a file
+      version resource, and the build fails with an error naming the attribute rather than the
+      version. Strip anything from the first '-' onwards, which leaves x.y.z, and let the full
+      string live in InformationalVersion where it is allowed.
+    -->
+    <GpbNumericVersion>$(GpbVersion.Split('-')[0])</GpbNumericVersion>
+    <AssemblyVersion>$(GpbNumericVersion).0</AssemblyVersion>
+    <FileVersion>$(GpbNumericVersion).0</FileVersion>
+
+    <Product>Game Ping Booster</Product>
+    <Company>Game Ping Booster</Company>
+  </PropertyGroup>
+
+</Project>
