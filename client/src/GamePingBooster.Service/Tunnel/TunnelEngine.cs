@@ -741,7 +741,31 @@ internal sealed class TunnelEngine : IAsyncDisposable
     /// </summary>
     private void RecordPath(LandmarkProbe.Result target, double legOne, double endToEnd)
     {
-        _path = new PathMeasurement(target.RegionName, endToEnd - legOne);
+        // Clamped at zero, because the two legs are NOT measured with equal rigour and the
+        // difference between them is not a pure physical quantity.
+        //
+        // legOne is a single sample - whichever handshake attempt happened to succeed. endToEnd is
+        // the BEST of three echoes. On a jittery connection an unlucky handshake against a lucky
+        // echo makes the subtraction negative, and a negative offset would put "Ping in game"
+        // BELOW "Ping to relay" on the screen: a number that cannot happen, since the echo travels
+        // the relay leg too. This connection already measures 46/46 to Singapore, so it sits right
+        // on that boundary rather than safely away from it.
+        //
+        // Making legOne a best-of-three too would cost three handshakes per relay, and each one is
+        // a session and an address out of the relay's 253-address pool. Not worth it for a number
+        // whose honest reading at this point is "the relay is effectively at the datacentre".
+        var offset = endToEnd - legOne;
+        if (offset < 0)
+        {
+            // Worth a line rather than silence: it means the first leg is jittery enough that the
+            // in-game estimate is soft, which is the sort of thing to know before trusting it.
+            _log($"The relay leg measured {legOne:F0} ms and the whole path {endToEnd:F0} ms, which " +
+                 $"cannot be - the echo travels the relay leg too. Treating the second leg as zero. " +
+                 "A single handshake sample against the best of three echoes does this on a jittery " +
+                 "connection.");
+            offset = 0;
+        }
+        _path = new PathMeasurement(target.RegionName, offset);
 
         var saved = target.RttMs - endToEnd;
         if (saved >= 1)
