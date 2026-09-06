@@ -109,11 +109,16 @@ function Invoke-RemoteInstall {
 
     $sshArgv = $Relay.SshArgs
 
+    # The cap travels as an ARGUMENT, not an environment variable: sudo resets the environment,
+    # so a variable would arrive empty and the relay would come up with no cap while the deploy
+    # reported success. See install.sh.
+    $maxArg = "--max-clients $($Relay.MaxClients)"
+
     if (-not $Relay.SudoPassword) {
         Write-Host "==> sudo needs a password on $($Relay.Name). Type it when it asks." -ForegroundColor Cyan
         # -t so sudo has a terminal to prompt on. Safe here and not on the first connection: a
         # pty translates newlines, which would have corrupted the gzip stream.
-        & ssh -t @sshArgv 'cd ~/.gpb-deploy/deploy && sudo ./install.sh'
+        & ssh -t @sshArgv "cd ~/.gpb-deploy/deploy && sudo ./install.sh $maxArg"
         if ($LASTEXITCODE -ne 0) { throw "the install step failed - see the output above" }
         return
     }
@@ -124,7 +129,7 @@ function Invoke-RemoteInstall {
     # of the password, and it replaces every non-ASCII byte with '?'. Both were measured.
     # The password never touches disk either way.
     $code = Invoke-GpbSshWithStdin -SshArgs $sshArgv `
-        -RemoteCommand "cd ~/.gpb-deploy/deploy && sudo -S -p '' ./install.sh" `
+        -RemoteCommand "cd ~/.gpb-deploy/deploy && sudo -S -p '' ./install.sh $maxArg" `
         -StdinLine $Relay.SudoPassword
 
     if ($code -ne 0) {
@@ -181,9 +186,17 @@ try {
     # `if ! command -v sudo`. A '!' is one delayed-expansion setting away from being eaten
     # somewhere on the trip through cmd, and losing it would invert the test: every host that HAS
     # sudo would be told it has none. The long form cannot fail that way.
-    $remote = 'set -e; mkdir -p ~/.gpb-deploy; tar -xzf - -C ~/.gpb-deploy; cd ~/.gpb-deploy/deploy; sed -i ''s/\r$//'' *.sh; chmod +x *.sh; if [ $(id -u) -eq 0 ]; then ./install.sh; exit; fi; if command -v sudo >/dev/null 2>&1; then :; else exit 91; fi; if sudo -n true 2>/dev/null; then sudo -n ./install.sh; exit; fi; exit 90'
+    # $m is concatenated rather than interpolated: the literal above is single-quoted so that
+    # it can hold no double quotes of its own, and that property is what keeps it intact on the
+    # trip through cmd. Interpolating would mean a double-quoted string and a quoting problem.
+    $m = " --max-clients $($relay.MaxClients)"
+    $remote = 'set -e; mkdir -p ~/.gpb-deploy; tar -xzf - -C ~/.gpb-deploy; cd ~/.gpb-deploy/deploy; sed -i ''s/\r$//'' *.sh; chmod +x *.sh; if [ $(id -u) -eq 0 ]; then ./install.sh' + $m + '; exit; fi; if command -v sudo >/dev/null 2>&1; then :; else exit 91; fi; if sudo -n true 2>/dev/null; then sudo -n ./install.sh' + $m + '; exit; fi; exit 90'
 
-    Write-Host "==> Deploying to $($relay.Name) at $($relay.Target) (one connection)" -ForegroundColor Cyan
+    if ([int]$relay.MaxClients -gt 0) {
+        Write-Host "==> Deploying to $($relay.Name) at $($relay.Target) (one connection), max $($relay.MaxClients) clients" -ForegroundColor Cyan
+    } else {
+        Write-Host "==> Deploying to $($relay.Name) at $($relay.Target) (one connection), no client limit" -ForegroundColor Cyan
+    }
     cmd /c "ssh $sshArgs `"$remote`" < `"$payload`""
     $staged = $LASTEXITCODE
 

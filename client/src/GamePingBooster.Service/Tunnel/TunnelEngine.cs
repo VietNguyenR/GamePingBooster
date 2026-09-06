@@ -1,4 +1,6 @@
-﻿using System.Net;
+﻿using System.Buffers.Binary;
+using System.Net;
+using System.Net.Sockets;
 using System.Text.Json;
 using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Profiles;
@@ -350,13 +352,14 @@ internal sealed class TunnelEngine : IAsyncDisposable
             // Choose the relay before creating anything. Probing is pure UDP - no adapter, no
             // routes - so a relay that turns out to be unreachable costs nothing but a timeout.
             SetState(TunnelState.Connecting, "Measuring relays...");
+            ResetThroughputBaseline();
             (_relay, _tunnel) = await SelectRelayAsync(relayId ?? _config.DefaultRelayId, psk, token)
                 .ConfigureAwait(false);
             var endpoint = ParseEndpoint(_relay.Endpoint);
             var session = _tunnel.Session;
 
             SetState(TunnelState.Connecting, "Creating the virtual adapter...");
-            _adapter = WintunAdapter.Create(_config.AdapterName);
+            _adapter = WintunAdapter.Create(_config.AdapterName, log: _log);
             _adapter.StartSession();
             _log($"Virtual adapter '{_config.AdapterName}' is ready, interface index {_adapter.InterfaceIndex}");
 
@@ -519,8 +522,27 @@ internal sealed class TunnelEngine : IAsyncDisposable
     // ------------------------------------------------------- relay selection
 
     /// <summary>
-    /// Picks a relay by measuring it. The handshake is a single round trip over the physical
-    /// path, so it doubles as a latency probe - no adapter, no routes, nothing to undo.
+    /// Picks a relay by measuring it, over the whole path the player's packets will take.
+    ///
+    /// The player's ping is two legs - player to relay, relay to game server - and until
+    /// 2026-09-05 this method could only see the first. It chose on that alone, which is right
+    /// only when every relay is the same distance from the game, and a tester proved it is not:
+    /// 23 ms to Hong Kong beat 45 ms to Singapore, the game put him on a Singapore datacentre
+    /// anyway, and he played at 70-80 ms on the relay that measured better. The second leg was
+    /// the whole difference and nothing here could see it.
+    ///
+    /// So there are now two measurements:
+    ///
+    ///   1. <see cref="LandmarkProbe.RankRegionsAsync"/> over the physical path, to find which
+    ///      region the game will put this player in. The game decides that by probing the same
+    ///      endpoints over the same path, so measuring it the same way is not a guess.
+    ///   2. an ICMP echo through each candidate tunnel to that region's landmark, which is the
+    ///      end-to-end number - both legs, plus the relay's own forwarding cost.
+    ///
+    /// The handshake round trip is still taken and still reported, because it is the only way to
+    /// show the two legs separately and it is what a player recognises. It is no longer what the
+    /// choice is made on, unless the end-to-end number is unavailable - see
+    /// <see cref="ChooseByEndToEnd"/> for when that happens and why it falls back wholesale.
     ///
     /// Probing is sequential on purpose. Running the probes in parallel would have them compete
     /// for the same uplink and inflate each other's numbers, which defeats the point.
@@ -538,6 +560,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             {
                 var client = new TunnelClient(ParseEndpoint(pinned.Endpoint), AuthFor(pinned, psk), _clientId, _log);
                 await client.HandshakeAsync(attempts: 4, ct).ConfigureAwait(false);
+                await ReportBothLegsAsync(pinned, client, ct).ConfigureAwait(false);
                 return (pinned, client);
             }
             _log($"The profile has no relay '{preferredId}' - measuring all of them instead.");
@@ -548,10 +571,13 @@ internal sealed class TunnelEngine : IAsyncDisposable
             var only = candidates[0];
             var client = new TunnelClient(ParseEndpoint(only.Endpoint), AuthFor(only, psk), _clientId, _log);
             await client.HandshakeAsync(attempts: 4, ct).ConfigureAwait(false);
+            await ReportBothLegsAsync(only, client, ct).ConfigureAwait(false);
             return (only, client);
         }
 
-        var probes = new List<(RelayEntry Relay, TunnelClient Client, double Rtt)>();
+        var target = await ChooseTargetRegionAsync(ct).ConfigureAwait(false);
+
+        var probes = new List<RelayProbe>();
         foreach (var relay in candidates)
         {
             ct.ThrowIfCancellationRequested();
@@ -560,8 +586,16 @@ internal sealed class TunnelEngine : IAsyncDisposable
             {
                 client = new TunnelClient(ParseEndpoint(relay.Endpoint), AuthFor(relay, psk), _clientId, _log);
                 await client.HandshakeAsync(attempts: 2, ct).ConfigureAwait(false);
-                probes.Add((relay, client, client.HandshakeRttMs));
-                _log($"  {relay.Name} ({relay.Location}): {client.HandshakeRttMs:F0} ms");
+
+                double? endToEnd = null;
+                if (target is not null)
+                {
+                    endToEnd = await client.MeasureThroughTunnelAsync(target.Landmark, attempts: 3, ct)
+                        .ConfigureAwait(false);
+                }
+
+                probes.Add(new RelayProbe(relay, client, client.HandshakeRttMs, endToEnd));
+                _log($"  {relay.Name} [{relay.Id}] ({relay.Location}): {Describe(client.HandshakeRttMs, endToEnd, target)}");
             }
             catch (OperationCanceledException)
             {
@@ -570,7 +604,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             }
             catch (Exception ex)
             {
-                _log($"  {relay.Name} ({relay.Location}): unreachable - {ex.Message}");
+                _log($"  {relay.Name} [{relay.Id}] ({relay.Location}): unreachable - {ex.Message}");
                 client?.Dispose();
             }
         }
@@ -582,13 +616,178 @@ internal sealed class TunnelEngine : IAsyncDisposable
                 "the endpoints in the profile, and that the PSK matches.");
         }
 
-        var best = probes.OrderBy(p => p.Rtt).First();
+        var best = ChooseByEndToEnd(probes, target);
         foreach (var probe in probes)
         {
             if (!ReferenceEquals(probe.Client, best.Client)) probe.Client.Dispose();
         }
-        _log($"Chose {best.Relay.Name} at {best.Rtt:F0} ms.");
         return (best.Relay, best.Client);
+    }
+
+    private sealed record RelayProbe(RelayEntry Relay, TunnelClient Client, double LegOneMs, double? EndToEndMs);
+
+    /// <summary>
+    /// What the chosen relay measured on the way to the game's datacentre, kept for the status.
+    ///
+    /// <c>Offset</c> is the relay-to-datacentre leg, derived by subtracting the first leg from the
+    /// end-to-end measurement rather than measured on its own - so the relay's forwarding cost is
+    /// inside it. Adding it to the LIVE first leg gives a live estimate of the player's in-game
+    /// ping, and it is a fair one because the part that moves is the player's own connection: the
+    /// leg between two datacentres jittered 0.07 ms over five echoes.
+    ///
+    /// The direct path - the same destination over the player's own connection - is measured too,
+    /// but it is not kept here: it only ever fed a UI row that has since been removed. It still
+    /// does the two jobs that matter, both at connect time: it picks the target region, and it is
+    /// what RecordPath compares against to say in the log when the tunnel is not helping.
+    /// </summary>
+    private sealed record PathMeasurement(string RegionName, double Offset);
+
+    private volatile PathMeasurement? _path;
+
+    /// <summary>
+    /// Measures and logs both legs for a relay that was not chosen by comparison - the only one
+    /// in the profile, or the one the user pinned.
+    ///
+    /// There is no decision to make here, so this changes nothing about what happens next. It
+    /// exists because "the app says 23 ms and the game says 75" is the question this whole
+    /// mechanism was built to answer, and a player who has pinned a relay is the most likely
+    /// person to be asking it. Failures are swallowed: a diagnostic must never be the reason a
+    /// connection does not happen.
+    /// </summary>
+    private async Task ReportBothLegsAsync(RelayEntry relay, TunnelClient client, CancellationToken ct)
+    {
+        try
+        {
+            _path = null;
+            var target = await ChooseTargetRegionAsync(ct).ConfigureAwait(false);
+            if (target is null) return;
+
+            var endToEnd = await client.MeasureThroughTunnelAsync(target.Landmark, attempts: 3, ct)
+                .ConfigureAwait(false);
+            if (endToEnd is null)
+            {
+                _log($"{relay.Name} could not reach {target.RegionName} with an echo, so the second " +
+                     "leg is unknown. In-game ping will be higher than the relay figure by however " +
+                     "far the relay is from the game server.");
+                return;
+            }
+
+            _log($"{relay.Name}: {client.HandshakeRttMs:F0} ms to the relay, {endToEnd.Value:F0} ms " +
+                 $"end to end to {target.RegionName} - that second number is roughly what the game " +
+                 "will show.");
+            RecordPath(target, client.HandshakeRttMs, endToEnd.Value);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _log($"Could not measure the path to the game region: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Picks the winner, and says in the log which number decided it.
+    ///
+    /// The fallback is all or nothing on purpose. Scoring one relay on its end-to-end time and
+    /// another on its handshake compares a two-leg number against a one-leg number, and the
+    /// one-leg number is always smaller - so a relay that failed to answer a landmark echo would
+    /// win every comparison by failing. Sorting that out relay by relay is not possible, so the
+    /// moment any relay is missing an end-to-end number the whole comparison drops back to the
+    /// first leg, and the log says so.
+    /// </summary>
+    private RelayProbe ChooseByEndToEnd(List<RelayProbe> probes, LandmarkProbe.Result? target)
+    {
+        if (target is not null && probes.All(p => p.EndToEndMs is not null))
+        {
+            var best = probes.OrderBy(p => p.EndToEndMs!.Value).First();
+            _log($"Chose {best.Relay.Name} [{best.Relay.Id}] at {best.EndToEndMs!.Value:F0} ms " +
+                 $"end to end to {target.RegionName} ({best.LegOneMs:F0} ms of that is the relay leg).");
+            RecordPath(target, best.LegOneMs, best.EndToEndMs.Value);
+            return best;
+        }
+
+        if (target is null)
+        {
+            _log("No region could be measured, so the relays are compared on the first leg only. " +
+                 "The profile declares no landmark for any region, or none of them answered - " +
+                 "see the design notes.");
+        }
+        else
+        {
+            var silent = probes.Where(p => p.EndToEndMs is null).Select(p => p.Relay.Id);
+            _log($"No end-to-end time through {string.Join(", ", silent)}, so every relay is " +
+                 "compared on the first leg only. Whichever relay is nearest the game server " +
+                 "cannot be told apart this way - if this persists, the relay is not forwarding " +
+                 "ICMP and the landmark cannot be reached through it.");
+        }
+
+        _path = null;
+        var fallback = probes.OrderBy(p => p.LegOneMs).First();
+        _log($"Chose {fallback.Relay.Name} [{fallback.Relay.Id}] at {fallback.LegOneMs:F0} ms " +
+             "(leg 1 only - see GameServerTally).");
+        return fallback;
+    }
+
+    /// <summary>
+    /// Keeps the chosen relay's path measurement for the status, and says plainly when the tunnel
+    /// is not worth using.
+    ///
+    /// That last part is the point. Everything else here makes the app choose the BEST relay; it
+    /// says nothing about whether the best relay is any good. A player whose ISP already has a
+    /// clean path to the datacentre can be slower through every relay we own, and until now the
+    /// app would have shown "Connected" and a healthy-looking relay ping while quietly costing
+    /// him 19 ms. Now there is a number to compare against and the log says so.
+    /// </summary>
+    private void RecordPath(LandmarkProbe.Result target, double legOne, double endToEnd)
+    {
+        _path = new PathMeasurement(target.RegionName, endToEnd - legOne);
+
+        var saved = target.RttMs - endToEnd;
+        if (saved >= 1)
+        {
+            _log($"Through the tunnel: {endToEnd:F0} ms to {target.RegionName}, against " +
+                 $"{target.RttMs:F0} ms on your own connection - {saved:F0} ms faster.");
+        }
+        else
+        {
+            _log($"WARNING: the tunnel is NOT helping for {target.RegionName}. Through the relay " +
+                 $"is {endToEnd:F0} ms; your own connection reaches the same datacentre in " +
+                 $"{target.RttMs:F0} ms. Your ISP already has the better route today, and the game " +
+                 "will play better with the booster off. This is worth knowing rather than hiding: " +
+                 "a relay nearer the game server, or a different one, is the only thing that fixes it.");
+        }
+    }
+
+    private static string Describe(double legOne, double? endToEnd, LandmarkProbe.Result? target)
+    {
+        if (target is null) return $"{legOne:F0} ms to the relay";
+        return endToEnd is null
+            ? $"{legOne:F0} ms to the relay, no answer from {target.RegionName} through it"
+            : $"{legOne:F0} ms to the relay, {endToEnd.Value:F0} ms on to {target.RegionName}";
+    }
+
+    /// <summary>
+    /// Which of the game's regions this player will be put in, measured over the physical path.
+    ///
+    /// Not read from configuration, because the player does not choose it - the game does, from
+    /// its own probes over its own path, and the only way to agree with it is to measure the
+    /// same thing the same way. Null when no region can be measured at all, which sends relay
+    /// selection back to the first leg.
+    /// </summary>
+    private async Task<LandmarkProbe.Result?> ChooseTargetRegionAsync(CancellationToken ct)
+    {
+        var regions = _game?.Regions ?? [];
+        if (regions.Count == 0 || regions.All(r => r.Landmarks.Count == 0)) return null;
+
+        var ranked = await LandmarkProbe.RankRegionsAsync(regions, _log, ct).ConfigureAwait(false);
+        if (ranked.Count == 0) return null;
+
+        var target = ranked[0];
+        _log("Game region, measured over your own connection (this is what the game measures too): " +
+             string.Join(", ", ranked.Select(r => $"{r.RegionName} {r.RttMs:F0} ms")) +
+             $" - so the game will use {target.RegionName}. Relays are compared on the way there.");
+        return target;
     }
 
     // ---------------------------------------------------------- reconnection
@@ -660,6 +859,17 @@ internal sealed class TunnelEngine : IAsyncDisposable
     private long _lastLoggedSent;
 
     /// <summary>
+    /// Forgets the throughput baseline, so the next line measures from zero.
+    ///
+    /// Called whenever the tunnel object is replaced. The counters live on the TunnelClient, so a
+    /// new one starts at zero while this baseline still holds the old one's total - which is how
+    /// the log ended up reporting "-3/s up over the last 30s" after a relay change. A negative
+    /// rate is not a small cosmetic issue: it is the kind of thing that makes somebody distrust
+    /// every other number in the file.
+    /// </summary>
+    private void ResetThroughputBaseline() => _lastLoggedSent = 0;
+
+    /// <summary>
     /// Writes one throughput line every 30 seconds while traffic is moving, on the same cadence
     /// as the relay's own stats line so the two logs can be read side by side.
     ///
@@ -678,12 +888,32 @@ internal sealed class TunnelEngine : IAsyncDisposable
         if (sent == _lastLoggedSent) return;   // nothing moved; stay quiet
 
         var rate = 0L;
-        if (_lastLoggedSent > 0) rate = (sent - _lastLoggedSent) / 30;
+        if (_lastLoggedSent > 0 && sent > _lastLoggedSent) rate = (sent - _lastLoggedSent) / 30;
         _lastLoggedSent = sent;
 
         _log($"Tunnel carried {sent} packets up, {tunnel.PacketsReceived} down " +
              $"({rate}/s up over the last 30s), {_routes?.ActiveGameRouteCount ?? 0} game routes installed, " +
              $"rtt {tunnel.LastRttMs:F0} ms");
+
+        LogGameDestinations(tunnel);
+    }
+
+    /// <summary>
+    /// Writes the addresses the game is actually talking to, named with the relay carrying them.
+    ///
+    /// Paired with the throughput line so one log covers both halves of the question. See
+    /// <see cref="GameServerTally"/>: the reason this is here is to find out whether the game
+    /// server on the far end changes when the relay does.
+    /// </summary>
+    private void LogGameDestinations(TunnelClient tunnel)
+    {
+        if (!tunnel.Destinations.HasTraffic) return;
+
+        var relay = _relay is null
+            ? "an unnamed relay"
+            : $"{_relay.Name} ({_relay.Location ?? "location unknown"})";
+
+        _log(tunnel.Destinations.Format(relay));
     }
 
     private async Task ReconnectAsync(CancellationToken ct)
@@ -696,8 +926,13 @@ internal sealed class TunnelEngine : IAsyncDisposable
         var previousIp = _tunnel?.Session.ClientIp;
         var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
 
+        // Flush before the relay changes underneath it: a destinations line naming the wrong
+        // relay is worse than no line, because the whole point is comparing one against another.
+        if (_tunnel is not null) LogGameDestinations(_tunnel);
+
         Abandon(_tunnel);
         _tunnel = null;
+        ResetThroughputBaseline();
 
         // Fall back to the direct path before the first handshake, not after a few failures.
         // There is no such thing as a fast recovery here - the supervisor already waited 15
@@ -744,9 +979,18 @@ internal sealed class TunnelEngine : IAsyncDisposable
                         routes.PinRelayRoute(ParseEndpoint(relay.Endpoint).Address);
                         pinned = relay;
                         _relay = relay;
+
+                        // The second-leg offset belonged to the relay we just left, and this one
+                        // may be a continent further from the game server. There is no chance to
+                        // re-measure - the pump threads own the socket by the time we get here -
+                        // so the in-game estimate goes blank rather than wrong. Reconnecting to
+                        // the SAME relay keeps it, which is the common case: a relay that
+                        // hiccuped is still exactly where it was.
+                        _path = null;
                     }
 
                     _tunnel = client;
+                    ResetThroughputBaseline();
 
                     if (previousIp is not null && session.ClientIp.Equals(previousIp))
                     {
@@ -880,8 +1124,70 @@ internal sealed class TunnelEngine : IAsyncDisposable
             _log("WARNING: the profile contains no CIDRs - the tunnel is up but nothing is being routed.");
             return;
         }
+        WarnAboutRoutedLandmarks(cidrs);
         _routes.InstallGameRoutes(_adapter.InterfaceIndex, cidrs);
         _log($"Installed {cidrs.Count} routes into the virtual adapter.");
+    }
+
+    /// <summary>
+    /// Complains when a routed range swallows a landmark.
+    ///
+    /// A landmark inside the tunnel is the exact fault this whole mechanism exists to undo: the
+    /// game would measure that region through the relay and every other region over the player's
+    /// own connection, compare the two, and put the player wherever the arithmetic came out -
+    /// which is how a tester ended up in Korea on a profile that only covered Singapore.
+    ///
+    /// Only a warning, because refusing to install a /20 that carries real matches would trade a
+    /// bad server choice for no acceleration at all. The remedy when this does fire is the one
+    /// PinRelayRoute already uses: a /32 for the landmark pointed at the physical gateway beats
+    /// the /20 on longest-prefix-match. Nothing collides today, and Test-Profile.ps1 checks that
+    /// stays true, so this is the backstop rather than the guard.
+    /// </summary>
+    private void WarnAboutRoutedLandmarks(List<string> cidrs)
+    {
+        var ranges = new List<(uint Network, uint Mask, string Cidr)>();
+        foreach (var cidr in cidrs)
+        {
+            var parts = cidr.Split('/');
+            if (parts.Length != 2 ||
+                !IPAddress.TryParse(parts[0], out var baseIp) ||
+                baseIp.AddressFamily != AddressFamily.InterNetwork ||
+                !int.TryParse(parts[1], out var bits) || bits is < 0 or > 32)
+            {
+                continue;
+            }
+            var mask = bits == 0 ? 0u : uint.MaxValue << (32 - bits);
+            ranges.Add((ToUInt32(baseIp) & mask, mask, cidr));
+        }
+
+        foreach (var region in _game!.Regions)
+        {
+            foreach (var text in region.Landmarks)
+            {
+                if (!IPAddress.TryParse(text, out var landmark) ||
+                    landmark.AddressFamily != AddressFamily.InterNetwork)
+                {
+                    continue;
+                }
+                var value = ToUInt32(landmark);
+                foreach (var range in ranges)
+                {
+                    if ((value & range.Mask) != range.Network) continue;
+                    _log($"WARNING: the landmark {landmark} for region '{region.Id}' falls inside the " +
+                         $"routed range {range.Cidr}. The game will measure that region through the " +
+                         "relay and every other region over your own connection, and then compare " +
+                         "the two. Rebuild the profile without that range, or pin the landmark to " +
+                         "the physical gateway.");
+                }
+            }
+        }
+    }
+
+    private static uint ToUInt32(IPAddress address)
+    {
+        Span<byte> bytes = stackalloc byte[4];
+        address.TryWriteBytes(bytes, out _);
+        return BinaryPrimitives.ReadUInt32BigEndian(bytes);
     }
 
     // ----------------------------------------------------------- disconnect
@@ -897,6 +1203,11 @@ internal sealed class TunnelEngine : IAsyncDisposable
     /// <summary>Tears everything down in reverse order. Must never throw.</summary>
     private async Task TeardownAsync()
     {
+        // Measured for one relay on one connect. Keeping it would have the UI reporting an
+        // in-game ping for a tunnel that no longer exists, and after a failover to a relay at a
+        // different distance it would be reporting the wrong one.
+        _path = null;
+
         if (_watcher is not null)
         {
             _watcher.GameStateChanged -= OnGameStateChanged;
@@ -914,6 +1225,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
         }
         _routes = null;
 
+        if (_tunnel is not null) LogGameDestinations(_tunnel);
         _tunnel?.Dispose();
         _tunnel = null;
 
@@ -962,6 +1274,12 @@ internal sealed class TunnelEngine : IAsyncDisposable
         // supposed to have one.
         Configured = (_config.HasKey || _token is not null) && Relays.Count > 0,
         TunnelPingMs = _tunnel?.LastRttMs,
+        // Live first leg plus the fixed second-leg offset, so the headline tracks the part that
+        // actually moves - the player's own connection - without re-probing the datacentre. Null
+        // until the first keepalive answers, which is right: an estimate built on no measurement
+        // is not better than showing nothing.
+        GamePingMs = _path is { } p && _tunnel?.LastRttMs is { } live ? live + p.Offset : null,
+        GameRegionName = _path?.RegionName,
         LossRatio = _tunnel?.LossRatio,
         GameRunning = _watcher?.IsGameRunning ?? false,
         GameName = _game?.Name,
@@ -985,6 +1303,12 @@ internal sealed class TunnelEngine : IAsyncDisposable
         // enabled for a connection that cannot happen, or disabled for one that could.
         LicenceRefusal = LicenceRefusal(),
         ProfileSource = _profileSource,
+        // Read from the file rather than remembered in a field, so it is right after a restart
+        // and right after somebody has copied a profile in by hand. A missing file is null,
+        // which the UI reads as "never" - correct on a machine that has never signed in.
+        ProfileUpdatedAt = File.Exists(SealedProfilePath)
+            ? new DateTimeOffset(File.GetLastWriteTimeUtc(SealedProfilePath)).ToUnixTimeSeconds()
+            : null,
     };
 
     /// <summary>Relay list for the UI to offer to the user.</summary>

@@ -60,8 +60,11 @@
 [CmdletBinding()]
 param(
     [string]$ObservedIpPath,
+    [string]$LandmarkObservedPath,
     [string]$ProfilePath,
     [string]$GameId = 'pubg',
+    [int]$MinLandmarkSightings = 2,
+    [int]$MaxLandmarksPerRegion = 3,
     [int]$MaxPrefixWidth = 20,
     [int]$MaxTotalAddresses = 131072,
     [switch]$DryRun,
@@ -72,6 +75,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 if (-not $ObservedIpPath) { $ObservedIpPath = Join-Path $PSScriptRoot 'observed.txt' }
+if (-not $LandmarkObservedPath) { $LandmarkObservedPath = Join-Path $PSScriptRoot 'landmarks-observed.txt' }
 if (-not $ProfilePath) { $ProfilePath = Join-Path $PSScriptRoot '..\..\profiles\pubg-vn.json' }
 $cacheDir = Join-Path $PSScriptRoot '.cache'
 $unverifiedPath = Join-Path $PSScriptRoot 'observed-unverified.txt'
@@ -264,8 +268,11 @@ if (-not (Test-Path $ObservedIpPath)) {
 New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
 
 Write-Host "==> Reading $ObservedIpPath"
+# Only the first column. observed.txt now carries the evidence that put each address there -
+# packets, duration, how many sessions - so the line is no longer just an address. Splitting and
+# taking field zero reads both layouts, and a comment line fails the IPv4 test on its own.
 $observed = Get-Content $ObservedIpPath |
-    ForEach-Object { $_.Trim() } |
+    ForEach-Object { ($_.Trim() -split '\s+')[0] } |
     Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } |
     Sort-Object -Unique
 
@@ -365,6 +372,222 @@ if ($unverified.Count -gt 0) {
     Set-Content -Path $unverifiedPath -Value ($unverified | Sort-Object -Unique) -Encoding ascii
 }
 
+# Are the declared landmarks still where the profile says they are?
+#
+# A landmark is a bet that one address stands for one datacentre, and the bet is only as good as
+# the day it was made. Three things can happen to it, and they are NOT equally visible:
+#
+#   - it stops answering ICMP        -> the client measures nothing for that region and falls back
+#                                       to comparing relays on the first leg. Logged, safe.
+#   - it is reassigned inside the
+#     same Azure region              -> still correct; a different machine in the same building.
+#   - it is reassigned to ANOTHER
+#     region                         -> the client cheerfully measures the wrong continent and
+#                                       picks a relay optimised for it. SILENT, and the only one
+#                                       of the three that is actually dangerous.
+#
+# That third case is checkable, and this is the one place with the data to check it: Microsoft
+# publishes which region owns every address, and this script has already downloaded that file to
+# do its real job. So it costs one pass over 11,000 prefixes to turn a silent wrong answer into a
+# warning. See the design notes.
+# Which Azure region owns each of these addresses, as a hashtable address -> {Region, Cidr, Bits}.
+#
+# One pass over the whole file rather than one per address, because it is 11,000 prefixes and
+# there are two callers. Longest prefix wins: Azure publishes overlapping blocks and the narrowest
+# is the one that names the real owner.
+function Resolve-AzureRegions {
+    param($Azure, [string[]]$Addresses)
+
+    $values = @{}
+    foreach ($a in $Addresses) { $values[$a] = (ConvertTo-UInt32Address $a) }
+
+    $found = @{}
+    foreach ($value in $Azure.values) {
+        # "AzureCloud.southeastasia" only. "AzureCloud" itself is every region at once, and
+        # "AzureCloud.southeastasia.Storage" is a service inside one - neither answers "who owns
+        # this address".
+        if ($value.name -notlike 'AzureCloud.*') { continue }
+        if (($value.name.ToCharArray() | Where-Object { $_ -eq '.' }).Count -ne 1) { continue }
+        $cloudRegion = $value.name.Substring('AzureCloud.'.Length)
+
+        foreach ($cidr in $value.properties.addressPrefixes) {
+            if ($cidr.Contains(':')) { continue }
+            $bits = [int]$cidr.Split('/')[1]
+            foreach ($address in $Addresses) {
+                if (-not (Test-IpInCidr -Ip $values[$address] -Cidr $cidr)) { continue }
+                $prev = $found[$address]
+                if ($null -eq $prev -or $bits -gt $prev.Bits) {
+                    $found[$address] = [pscustomobject]@{ Region = $cloudRegion; Cidr = $cidr; Bits = $bits }
+                }
+            }
+        }
+    }
+    return $found
+}
+
+# Fold landmarks-observed.txt into the profile, for the regions this profile actually covers.
+#
+# Capture finds probe endpoints; this is what promotes one into the profile, and it is the step
+# that used to be done by hand with the Service Tags file open in another window.
+#
+# It is deliberately more cautious than the equivalent for gameplay prefixes, because the two
+# failure modes are not comparable. A wrong CIDR routes some traffic it should not have; a wrong
+# landmark decides which datacentre EVERYTHING is measured against, and then picks a relay for it.
+# So four rules, and anything failing one is reported rather than added:
+#
+#   1. Azure must still publish the address, in a region $regionMap knows. A VN capture sees
+#      brazilsouth and centralus probes every match - they are real, and they belong to regions
+#      this profile does not carry.
+#   2. It must have been seen in at least -MinLandmarkSightings separate sessions. Counts in one
+#      session ranged 90 packets down to 12, so a single sighting is thin evidence.
+#   3. It must not fall inside a range this profile already routes. Adding it would make the
+#      prefix check drop that range on the next line - possibly a range carrying real matches -
+#      and the person running this would never see why.
+#   4. At most -MaxLandmarksPerRegion per region. The client takes the best answer; a fourth
+#      address is another ping at connect for nothing.
+function Add-ObservedLandmarks {
+    param($Game, $Azure, [string]$Path)
+
+    Write-Host ""
+    Write-Host "==> Landmarks from $(Split-Path $Path -Leaf)" -ForegroundColor Cyan
+
+    if (-not (Test-Path $Path)) {
+        Write-Host "    No such file yet - Capture-GameTraffic.ps1 writes it. Nothing to add."
+        return
+    }
+
+    # address, packets, secs, sightings, ports. Comment lines fail the IPv4 test on their own.
+    $candidates = @()
+    foreach ($line in (Get-Content $Path)) {
+        $fields = $line.Trim() -split '\s+'
+        if ($fields.Count -lt 1 -or $fields[0] -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { continue }
+        $sightings = 1
+        if ($fields.Count -ge 4 -and $fields[3] -match '^\d+$') { $sightings = [int]$fields[3] }
+        $candidates += [pscustomobject]@{ Address = $fields[0]; Sightings = $sightings }
+    }
+
+    if ($candidates.Count -eq 0) {
+        Write-Host "    Nothing in it yet. Capture a few matches - the probes are on UDP 8081."
+        return
+    }
+
+    # ForEach-Object, NOT $candidates.Address. Object[] has a real member called Address, so
+    # member enumeration over an array of these silently resolves to that PSMethod instead of the
+    # property - one element, of the wrong type, and the failure surfaces three frames away as
+    # "An invalid IP address was specified". See the trap note in HANDOFF section 12.
+    $found = Resolve-AzureRegions -Azure $Azure -Addresses @($candidates | ForEach-Object { $_.Address })
+
+    # Every region already declared, so "already there" is answered without re-reading per row.
+    $declared = @{}
+    foreach ($r in $Game.regions) {
+        if ($null -eq $r.PSObject.Properties['landmarks']) {
+            $r | Add-Member -NotePropertyName landmarks -NotePropertyValue @()
+        }
+        foreach ($lm in @($r.landmarks)) { if ($lm) { $declared[$lm] = $r.id } }
+    }
+
+    $added = 0
+    foreach ($candidate in ($candidates | Sort-Object -Property @{E='Sightings';D=$true}, Address)) {
+        $address = $candidate.Address
+        $label = "    {0,-16}" -f $address
+
+        if ($declared.ContainsKey($address)) {
+            Write-Host "$label already declared under '$($declared[$address])'"
+            continue
+        }
+
+        $hit = $found[$address]
+        if ($null -eq $hit) {
+            Write-Host "$label skipped - in no Azure region; look it up by hand" -ForegroundColor DarkYellow
+            continue
+        }
+
+        $regionId = $regionMap[$hit.Region]
+        if (-not $regionId) {
+            Write-Host "$label skipped - $($hit.Region) is not a region this profile covers"
+            continue
+        }
+
+        $region = $Game.regions | Where-Object { $_.id -eq $regionId }
+        if (-not $region) {
+            Write-Host "$label skipped - $($hit.Region) maps to '$regionId', which this profile has no entry for"
+            continue
+        }
+
+        if ($candidate.Sightings -lt $MinLandmarkSightings) {
+            Write-Host ("$label held back - $($hit.Region), seen {0}x, needs {1}. Capture again." -f
+                        $candidate.Sightings, $MinLandmarkSightings)
+            continue
+        }
+
+        $clash = $null
+        foreach ($cidr in @($region.cidrs)) {
+            if (Test-IpInCidr -Ip (ConvertTo-UInt32Address $address) -Cidr $cidr) { $clash = $cidr; break }
+        }
+        if ($clash) {
+            Write-Warning ("$address is inside $clash, which this profile routes. NOT added - doing " +
+                           "so would drop that range from the profile on the next step, and it may be " +
+                           "carrying matches. Decide by hand which of the two is wrong.")
+            continue
+        }
+
+        if (@($region.landmarks).Count -ge $MaxLandmarksPerRegion) {
+            Write-Host ("$label skipped - '$regionId' already has $MaxLandmarksPerRegion landmark(s)")
+            continue
+        }
+
+        $region.landmarks = @(@($region.landmarks) + $address | Where-Object { $_ })
+        $declared[$address] = $regionId
+        $added++
+        Write-Host "$label $($hit.Region) -> $regionId  ADDED (seen $($candidate.Sightings)x)" -ForegroundColor Green
+    }
+
+    if ($added -eq 0) {
+        Write-Host "    Nothing new to add."
+    } else {
+        Write-Host "    $added landmark(s) added. They are checked below like any other."
+    }
+}
+
+function Test-LandmarkRegions {
+    param($Landmarks, $Azure)
+
+    Write-Host ""
+    Write-Host "==> Checking landmarks against the Azure region they claim" -ForegroundColor Cyan
+
+    # ForEach-Object rather than $Landmarks.Address - see the note in Add-ObservedLandmarks.
+    $found = Resolve-AzureRegions -Azure $Azure -Addresses @($Landmarks | ForEach-Object { $_.Address })
+
+    $bad = 0
+    foreach ($lm in $Landmarks) {
+        $hit = $found[$lm.Address]
+        if ($null -eq $hit) {
+            $bad++
+            Write-Warning ("$($lm.Address) (declared as '$($lm.Region)') is in no Azure region at " +
+                           "all. Either it is not an Azure address any more, or the Service Tags " +
+                           "file is stale. Re-capture a match and look at what the game probes on " +
+                           "UDP 8081 now.")
+            continue
+        }
+
+        $expected = $regionMap[$hit.Region]
+        if ($expected -eq $lm.Region) {
+            Write-Host "    $($lm.Address.PadRight(16)) $($hit.Region)  ok"
+        } else {
+            $bad++
+            $whose = if ($expected) { "which this profile calls '$expected'" } else { "which this profile does not cover" }
+            Write-Warning ("$($lm.Address) is declared under '$($lm.Region)' but Azure publishes it " +
+                           "in $($hit.Region) ($($hit.Cidr)), $whose. The client would measure the " +
+                           "wrong datacentre and choose a relay for it. Fix the profile before " +
+                           "shipping - see the design notes.")
+        }
+    }
+
+    if ($bad -eq 0) {
+        Write-Host "    all $($Landmarks.Count) landmark(s) still sit in the region they claim"
+    }
+}
+
 # -------------------------------------------------------------- write profile
 
 Write-Host ""
@@ -374,14 +597,38 @@ $profileData = Get-Content $ProfilePath -Raw | ConvertFrom-Json
 $game = $profileData.games | Where-Object { $_.id -eq $GameId }
 if (-not $game) { throw "The profile has no game with id '$GameId'." }
 
+# Every landmark the game's regions declare, as raw addresses. A prefix that covers one of
+# these must never enter the profile: the landmarks are how the GAME chooses its datacentre, and
+# routing some of them while leaving the rest on the player's own connection makes it compare two
+# different paths and pick a region that is worse both ways. That is not a hypothetical - it is
+# how 20.43.176.0/20 got in, why a tester was sent to Korea, and the reason this check exists.
+# See HANDOFF section 6a and the design notes.
+Add-ObservedLandmarks -Game $game -Azure $azure -Path $LandmarkObservedPath
+
+$landmarks = @()
+foreach ($r in $game.regions) {
+    foreach ($lm in @($r.landmarks)) {
+        if ($lm) { $landmarks += [pscustomobject]@{ Address = $lm; Value = (ConvertTo-UInt32Address $lm); Region = $r.id } }
+    }
+}
+if ($landmarks.Count -eq 0) {
+    Write-Warning ("The profile declares no landmarks, so nothing stops a prefix from swallowing " +
+                   "the game's own datacentre probes. See the design notes.")
+} else {
+    Test-LandmarkRegions -Landmarks $landmarks -Azure $azure
+}
+
 $totalNew = 0
 foreach ($regionId in ($byRegion.Keys | Sort-Object)) {
     $region = $game.regions | Where-Object { $_.id -eq $regionId }
     if (-not $region) {
         $region = [pscustomobject]@{
-            id = $regionId; name = $regionNames[$regionId]; source = ''; note = ''; cidrs = @()
+            id = $regionId; name = $regionNames[$regionId]; source = ''; note = ''; cidrs = @(); landmarks = @()
         }
         $game.regions += $region
+    }
+    if ($null -eq $region.PSObject.Properties['landmarks']) {
+        $region | Add-Member -NotePropertyName landmarks -NotePropertyValue @()
     }
 
     $before = @($region.cidrs)
@@ -389,6 +636,28 @@ foreach ($regionId in ($byRegion.Keys | Sort-Object)) {
     # added today may be the missing half of one recorded weeks ago.
     $union = Merge-AdjacentPrefixes -Cidrs (@($before) + @($byRegion[$regionId])) -MinPrefixWidth $MaxPrefixWidth
     $union = @($union | Sort-Object)
+
+    # Drop anything that covers a landmark, before it can be counted as "new" and reported as
+    # progress. Loud, and it does not stop the run: the rest of the capture is still good, and a
+    # collision means the address behind that prefix needs looking at, not that the tool failed.
+    $swallowed = @()
+    foreach ($cidr in $union) {
+        foreach ($lm in $landmarks) {
+            if (Test-IpInCidr -Ip $lm.Value -Cidr $cidr) {
+                $swallowed += [pscustomobject]@{ Cidr = $cidr; Landmark = $lm.Address; Region = $lm.Region }
+            }
+        }
+    }
+    if ($swallowed.Count -gt 0) {
+        foreach ($hit in $swallowed) {
+            Write-Warning ("$($hit.Cidr) covers $($hit.Landmark), the datacentre probe for " +
+                           "'$($hit.Region)'. LEFT OUT. Routing it would make the game measure that " +
+                           "region through the relay and every other region over the player's own " +
+                           "connection - see the design notes.")
+        }
+        $excluded = @($swallowed.Cidr | Sort-Object -Unique)
+        $union = @($union | Where-Object { $excluded -notcontains $_ })
+    }
 
     $added = @($union | Where-Object { $before -notcontains $_ })
     $totalNew += $added.Count

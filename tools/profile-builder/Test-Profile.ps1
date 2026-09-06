@@ -56,6 +56,27 @@ $totalAddresses = 0
 $allCidrs = @()
 
 foreach ($game in $profileData.games) {
+    # The game's own datacentre probe endpoints. None of them may be inside a routed range: the
+    # game measures these to choose a server, and routing some while leaving the rest on the
+    # player's connection makes it compare two different paths. That is not theoretical - it put
+    # a tester in Korea on a profile that only covered Singapore. See the design notes.
+    $landmarks = @()
+    foreach ($region in $game.regions) {
+        foreach ($lm in @($region.landmarks)) {
+            if (-not $lm) { continue }
+            if ($lm -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+                $errors += "$($game.id)/$($region.id): landmark '$lm' is not an IPv4 address"
+                continue
+            }
+            $landmarks += [pscustomobject]@{ Address = $lm; Value = (ConvertTo-UInt32Address $lm); Region = $region.id }
+        }
+    }
+    if ($landmarks.Count -eq 0) {
+        $warnings += ("Game '$($game.id)' declares no landmarks, so relays can only be compared on " +
+                      "the leg to the relay - the leg from the relay to the game server is invisible. " +
+                      "See the design notes.")
+    }
+
     foreach ($region in $game.regions) {
         foreach ($cidr in $region.cidrs) {
             $allCidrs += $cidr
@@ -82,6 +103,15 @@ foreach ($game in $profileData.games) {
             foreach ($private in $privateRanges) {
                 if (Test-IpInCidr (ConvertTo-UInt32Address $parts[0]) $private) {
                     $errors += "$label - falls inside private range $private, this would break the user's LAN"
+                }
+            }
+
+            foreach ($lm in $landmarks) {
+                if (Test-IpInCidr $lm.Value $cidr) {
+                    $errors += ("$label - CONTAINS LANDMARK $($lm.Address) for region '$($lm.Region)'. " +
+                                "The game would measure that region through the relay and every other " +
+                                "region over the player's own connection, then compare the two and pick " +
+                                "a server that is worse both ways.")
                 }
             }
         }

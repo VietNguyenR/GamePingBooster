@@ -28,8 +28,12 @@ installer/output/
 *.pcapng
 *.pcap
 tools/profile-builder/.cache/
-tools/profile-builder/observed.txt
-tools/profile-builder/observed-unverified.txt
+# Capture output: the addresses one machine talked to, which is that machine's browsing as much
+# as it is the game's. Globs rather than two exact names, so a dated archive of one of these
+# cannot slip into a repository meant to go public - which is exactly what observed.txt.bak
+# nearly did on 2026-09-05.
+tools/profile-builder/observed*
+tools/profile-builder/landmarks-observed*
 profiles/*.bak
 CLAUDE.md
 

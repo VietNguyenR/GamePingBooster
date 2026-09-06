@@ -103,6 +103,7 @@ function Get-GpbRelay {
             SudoPassword = $sudoPassword
             Listen       = ''
             Endpoint     = ''
+            MaxClients   = '0'
             SshArgs      = @($Name)
         }
     }
@@ -113,6 +114,15 @@ function Get-GpbRelay {
     if (-not $port) { $port = '22' }
     $listen = $conf["RELAY_${slug}_LISTEN"]
     if (-not $listen) { $listen = '51820' }
+
+    # How many clients this relay accepts at once. Empty means 0, which relayd reads as "no cap
+    # beyond the address pool" - the behaviour every relay had before the setting existed, so an
+    # existing gpb.conf keeps working untouched.
+    $max = $conf["RELAY_${slug}_MAX"]
+    if (-not $max) { $max = '0' }
+    if ($max -notmatch '^\d+$') {
+        throw "RELAY_${slug}_MAX is '$max'. It must be a whole number - the count of clients this relay accepts at once, or 0 for no limit."
+    }
 
     $key = $conf["RELAY_${slug}_KEY"]
     if ($key -and ($key.StartsWith('~/') -or $key.StartsWith('~\'))) {
@@ -142,6 +152,7 @@ function Get-GpbRelay {
         SudoPassword = $sudoPassword
         Listen       = $listen
         Endpoint     = "${hostName}:${listen}"
+        MaxClients   = $max
         SshArgs      = $sshArgs
     }
 }

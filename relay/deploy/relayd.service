@@ -12,6 +12,8 @@ ExecStart=/usr/local/bin/relayd \
   -subnet 10.77.0.0/24 \
   -mtu 1400 \
   -psk-file /etc/gpb/psk \
+  -rate-limit 64 \
+  -max-clients __MAX_CLIENTS__ \
   -log-level info
 
 # relayd needs CAP_NET_ADMIN to open the TUN device and to run `ip addr/link`.

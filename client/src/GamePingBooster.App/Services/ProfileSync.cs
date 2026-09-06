@@ -20,16 +20,34 @@ namespace GamePingBooster.App.Services;
 public sealed class ProfileSync
 {
     /// <summary>
-    /// Do not re-fetch more often than this.
+    /// Do not re-fetch a profile younger than this.
     ///
-    /// The server caps a account at twelve an hour and answers 429 after that. Refusing here
+    /// The server caps an account at twelve an hour and answers 429 after that. Refusing here
     /// first means a client that is restarted repeatedly does not spend its allowance on
     /// identical answers, and never sees the 429 at all.
+    ///
+    /// That was the intent from the start and it did not work, because the "when did we last
+    /// fetch" was a field on this object: it reset to MinValue on every launch, so the one case
+    /// the throttle names - a client restarted repeatedly - was the one case it could not
+    /// prevent. Twelve launches in an hour is an ordinary afternoon here, and the twelfth got
+    /// "Too many requests. Try again later" for doing nothing but opening the app.
+    ///
+    /// The age now comes from the SERVICE, which reports when the pushed profile was last
+    /// written. That answer outlives this process, which is the entire requirement.
     /// </summary>
     private static readonly TimeSpan MinInterval = TimeSpan.FromHours(6);
 
     private readonly PipeClient _pipe;
     private readonly Action<string> _report;
+
+    /// <summary>
+    /// Within-process guard, kept as well as the age check rather than instead of it.
+    ///
+    /// The service's timestamp only moves once set-profile has been received and written, so two
+    /// syncs raised in quick succession - a sign-in and the start-up sync, say - would both see
+    /// the old one. This closes that window; the age check closes the restart one. Neither
+    /// subsumes the other.
+    /// </summary>
     private DateTimeOffset _lastFetch = DateTimeOffset.MinValue;
 
     public ProfileSync(PipeClient pipe, Action<string> report)
@@ -41,11 +59,12 @@ public sealed class ProfileSync
     /// <summary>
     /// Fetches and pushes, unless it is too soon or there is nothing to fetch with.
     ///
-    /// <paramref name="force"/> skips the interval check. Used right after a sign-in, where the
-    /// person is watching and expects something to happen.
+    /// <paramref name="profileUpdatedAt"/> is when the service last wrote a pushed profile, or
+    /// null if it never has. <paramref name="force"/> skips both age checks: used right after a
+    /// sign-in, where the person is watching and expects something to happen.
     /// </summary>
     public async Task SyncAsync(string? licenceUrl, string? devicePublicKey, string gameId,
-        bool force, CancellationToken ct = default)
+        bool force, DateTimeOffset? profileUpdatedAt = null, CancellationToken ct = default)
     {
         // Both are needed: the licence server seals the profile to this machine's device key, so
         // without the key there is nothing to seal it to and the request would be refused.
@@ -54,7 +73,14 @@ public sealed class ProfileSync
         var refreshToken = RefreshTokenStore.Load();
         if (refreshToken is null) return;
 
-        if (!force && DateTimeOffset.UtcNow - _lastFetch < MinInterval) return;
+        if (!force)
+        {
+            if (DateTimeOffset.UtcNow - _lastFetch < MinInterval) return;
+
+            // The profile the service already holds is recent enough. Asking again would get the
+            // same bytes back and spend one of twelve requests an hour to do it.
+            if (profileUpdatedAt is { } written && DateTimeOffset.UtcNow - written < MinInterval) return;
+        }
 
         try
         {
@@ -79,9 +105,17 @@ public sealed class ProfileSync
         }
         catch (LicenceException ex)
         {
-            // The server answered and said no. Worth showing: "no active subscription" is
-            // something the person can act on, and the tunnel will keep working on the old
-            // ranges meanwhile, which is exactly the sort of thing that goes unnoticed.
+            // 429 is the one refusal not worth putting in front of anybody. It says the account
+            // has asked a lot recently, it fixes itself within the hour, the tunnel is working on
+            // the profile already stored, and there is nothing the person could do about it if
+            // they wanted to. Treating it like "no active subscription" - which is what happened
+            // - turns a throttle into an alarm.
+            //
+            // Everything else IS worth showing. "No active subscription" is actionable, and the
+            // tunnel quietly running on months-old ranges is exactly the sort of thing that goes
+            // unnoticed.
+            if (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests) return;
+
             _report($"Could not update the game list: {ex.Message}");
         }
         catch (Exception ex)

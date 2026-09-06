@@ -223,6 +223,26 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    private double? _gamePingMs;
+    public double? GamePingMs
+    {
+        get => _gamePingMs;
+        private set
+        {
+            if (Set(ref _gamePingMs, value)) Raise(nameof(GamePingText));
+        }
+    }
+
+    private string? _gameRegionName;
+    public string? GameRegionName
+    {
+        get => _gameRegionName;
+        private set
+        {
+            if (Set(ref _gameRegionName, value)) Raise(nameof(GamePingText));
+        }
+    }
+
     private double? _lossRatio;
     public double? LossRatio
     {
@@ -333,6 +353,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool CanPressAction => !IsBusy && Configured
         && (State is TunnelState.Connected or TunnelState.Connecting || !LicenceBlocked);
 
+    /// <summary>
+    /// The headline: what the game is expected to show, and where.
+    ///
+    /// A dash until a region has been measured. That happens when the profile declares no
+    /// landmark for the game, or when no relay could echo one - both are real states and both are
+    /// better shown as "unknown" than as the relay ping wearing a label that says game ping.
+    /// </summary>
+    public string GamePingText => GamePingMs is { } g
+        ? GameRegionName is { } region ? $"{g:F0} ms to {region}" : $"{g:F0} ms"
+        : "-";
+
     public string PingText => PingMs is { } p ? $"{p:F0} ms" : "-";
     public string LossText => LossRatio is { } l ? $"{l * 100:F1}%" : "-";
     public string RelayText => RelayName ?? "-";
@@ -433,6 +464,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Detail = status.Detail;
         Error = status.Error;
         PingMs = status.TunnelPingMs;
+        GamePingMs = status.GamePingMs;
+        GameRegionName = status.GameRegionName;
         LossRatio = status.LossRatio;
         GameRunning = status.GameRunning;
         GameName = status.GameName;
@@ -461,6 +494,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         State = TunnelState.Disconnected;
         Detail = reason;
         PingMs = null;
+        GamePingMs = null;
+        GameRegionName = null;
         LossRatio = null;
         ActiveRoutes = 0;
         PacketsSent = 0;

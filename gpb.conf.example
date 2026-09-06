@@ -27,6 +27,7 @@
 #   RELAY_<NAME>_PASSWORD   password, if the host refuses key auth          [ssh asks you]
 #   RELAY_<NAME>_SUDO_PASSWORD   password for sudo, when it differs         [the one above]
 #   RELAY_<NAME>_LISTEN     UDP port relayd listens on, for players         [51820]
+#   RELAY_<NAME>_MAX        clients this relay accepts AT ONCE, 0 = no limit  [0]
 #
 # Give either KEY or PASSWORD, not both - if both are set the key is tried first and the
 # password is the fallback, which is what ssh does anyway.

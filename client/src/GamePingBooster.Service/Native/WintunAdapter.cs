@@ -30,18 +30,51 @@ internal sealed class WintunAdapter : IDisposable
     }
 
     /// <summary>
+    /// How many times to ask for the adapter before giving up, and how long to wait between.
+    ///
+    /// Closing a Wintun adapter only *starts* the removal - Windows finishes tearing the device
+    /// down in its own time, and a create for the same name that lands in that window fails with
+    /// ERROR_FILE_NOT_FOUND (2). It looks exactly like a missing DLL or missing privileges, which
+    /// is what the message used to blame, and it is neither: it is a disconnect followed
+    /// immediately by a connect. WireGuard's own client retries here for the same reason.
+    ///
+    /// The delays add up to about 3.5 seconds, which is far longer than the removal takes in
+    /// practice and still short enough that a genuine failure is reported while the user is
+    /// still looking at the button they pressed.
+    /// </summary>
+    private static readonly int[] CreateRetryDelaysMs = [250, 500, 750, 1000, 1000];
+
+    /// <summary>
     /// Creates a new adapter (or reuses one of the same name left over from a previous run).
     /// Throws <see cref="Win32Exception"/> if the process is not running as LocalSystem.
     /// </summary>
-    public static WintunAdapter Create(string name, string tunnelType = "GamePingBooster")
+    public static WintunAdapter Create(string name, string tunnelType = "GamePingBooster",
+        Action<string>? log = null)
     {
-        var handle = WintunInterop.WintunCreateAdapter(name, tunnelType, nint.Zero);
+        var handle = nint.Zero;
+        var err = 0;
+
+        for (var attempt = 0; attempt <= CreateRetryDelaysMs.Length; attempt++)
+        {
+            handle = WintunInterop.WintunCreateAdapter(name, tunnelType, nint.Zero);
+            if (handle != nint.Zero) break;
+
+            err = Marshal.GetLastPInvokeError();
+            if (attempt == CreateRetryDelaysMs.Length) break;
+
+            var delay = CreateRetryDelaysMs[attempt];
+            log?.Invoke($"Wintun would not create '{name}' yet (error {err}) - the previous adapter " +
+                        $"is probably still being removed. Retrying in {delay} ms.");
+            Thread.Sleep(delay);
+        }
+
         if (handle == nint.Zero)
         {
-            var err = Marshal.GetLastPInvokeError();
             throw new Win32Exception(err,
-                $"Could not create the Wintun virtual adapter '{name}' (error {err}). " +
-                "Check that the process runs as LocalSystem and that wintun.dll sits next to the executable.");
+                $"Could not create the Wintun virtual adapter '{name}' (error {err}) after " +
+                $"{CreateRetryDelaysMs.Length + 1} attempts. Error 2 here usually means a previous " +
+                "adapter is still being removed; error 5 means the process is not LocalSystem. " +
+                "Also check that wintun.dll sits next to the executable.");
         }
 
         var adapter = new WintunAdapter(name, handle);

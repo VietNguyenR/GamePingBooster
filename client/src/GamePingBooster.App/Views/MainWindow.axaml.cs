@@ -82,6 +82,18 @@ public partial class MainWindow : SurfaceWindow
         await dialog.ShowDialog(this);
     }
 
+    /// <summary>
+    /// Who wrote this, under what licence, and which version is installed.
+    ///
+    /// The licence text is in the window rather than a link to LICENSE, because MIT requires the
+    /// notice to travel with the software and somebody who installed a .exe has no LICENSE file
+    /// in front of them.
+    /// </summary>
+    private async void OnAboutClick(object? sender, RoutedEventArgs e)
+    {
+        await new AboutWindow().ShowDialog(this);
+    }
+
     /// <summary>Opens the folder the service writes its log to. The first thing support asks for.</summary>
     private void OnLogsClick(object? sender, RoutedEventArgs e)
     {

@@ -28,6 +28,10 @@ internal sealed class TunnelClient : IDisposable
     private CancellationTokenSource? _cts;
 
     private ulong _sessionId;
+
+    /// <summary>Cached from the session so the uplink filter does not recompute it per packet.</summary>
+    private uint _subnetBroadcast;
+
     private readonly Stopwatch _clock = Stopwatch.StartNew();
 
     // Counters read from other threads, hence Interlocked.
@@ -44,11 +48,18 @@ internal sealed class TunnelClient : IDisposable
     private long _dropUplinkOversize;   // Wintun handed us a packet bigger than our buffer
     private long _dropUplinkPathMtu;    // the socket refused it: too big for the path, DF set
     private long _dropUplinkSendFailed; // ICMP port-unreachable or a transient socket error
+    private long _dropUplinkLocalNoise; // multicast, broadcast and IPv6 that cannot cross a tunnel
     private long _dropDownlinkForeign;  // not ours: wrong version, wrong session, unparseable
     private long _dropDownlinkRingFull; // Windows drains the adapter slower than we fill it
 
     private long _lastReportedDrops;
     private int _keepaliveTicks;
+
+    /// <summary>
+    /// Which game addresses this tunnel is carrying traffic to. Diagnostic only - see
+    /// <see cref="GameServerTally"/> for the question it exists to answer.
+    /// </summary>
+    public GameServerTally Destinations { get; } = new();
 
     /// <summary>Round-trip time of the handshake itself, measured before any traffic flows.</summary>
     public double HandshakeRttMs { get; private set; } = -1;
@@ -83,6 +94,7 @@ internal sealed class TunnelClient : IDisposable
 
     /// <summary>Packets lost inside this client, by any cause. Nothing to do with the network.</summary>
     public long PacketsDropped =>
+        Interlocked.Read(ref _dropUplinkLocalNoise) +
         Interlocked.Read(ref _dropUplinkOversize) +
         Interlocked.Read(ref _dropUplinkPathMtu) +
         Interlocked.Read(ref _dropUplinkSendFailed) +
@@ -180,6 +192,7 @@ internal sealed class TunnelClient : IDisposable
 
                 _sessionId = result.SessionId;
                 Session = result;
+                _subnetBroadcast = UplinkFilter.SubnetBroadcastFor(result.ClientIp);
                 Interlocked.Exchange(ref _lastPongTicks, _clock.ElapsedTicks);
                 _log($"Handshake succeeded in {HandshakeRttMs:F0} ms. Tunnel IP: {result.ClientIp}, MTU {result.Mtu}");
                 return result;
@@ -204,6 +217,96 @@ internal sealed class TunnelClient : IDisposable
                   "relay is running in licensed mode and never answers a PSK handshake, the " +
                   "relay is not running, or the UDP port is not reachable."));
     }
+
+    /// <summary>
+    /// Round trip from here to <paramref name="landmark"/> and back, through this relay, in
+    /// milliseconds - or null if nothing came back.
+    ///
+    /// This is the second leg the relay comparison used to be blind to. The handshake measures
+    /// the player to the relay; a game server is measured from the relay onwards, and nothing on
+    /// this machine can see that distance. So we send something the relay's kernel will forward
+    /// like any other tunnelled packet - an ICMP echo to a landmark inside the game's datacentre
+    /// - and time the whole path. What comes back is not leg one plus leg two estimated
+    /// separately; it is the real number, including whatever the relay's own forwarding costs.
+    ///
+    /// Must be called after <see cref="HandshakeAsync"/> and before <see cref="StartPumping"/>:
+    /// it reads the socket directly, and once the pump threads own it there is nobody to hand a
+    /// reply back to.
+    /// </summary>
+    public async Task<double?> MeasureThroughTunnelAsync(
+        IPAddress landmark, int attempts, CancellationToken ct)
+    {
+        if (_socket is null || _sessionId == 0) return null;
+
+        var source = Session.ClientIp;
+        var inner = new byte[GpbProtocol.MaxPacketLen];
+        var wire = new byte[GpbProtocol.MaxPacketLen];
+        var buffer = new byte[GpbProtocol.MaxPacketLen];
+        double? best = null;
+
+        for (var attempt = 0; attempt < attempts; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            // A fresh id per attempt, so a late reply to attempt 1 cannot be timed against
+            // attempt 2's clock and report a path that is faster than it is.
+            var id = (ushort)Random.Shared.Next(1, ushort.MaxValue);
+            var sequence = (ushort)(attempt + 1);
+            var innerLen = IcmpEcho.Build(inner, source, landmark, id, sequence);
+            var wireLen = GpbProtocol.WriteData(wire, _sessionId, inner.AsSpan(0, innerLen));
+
+            var sentAt = _clock.ElapsedTicks;
+            try
+            {
+                await _socket.SendAsync(wire.AsMemory(0, wireLen), SocketFlags.None, ct).ConfigureAwait(false);
+            }
+            catch (SocketException)
+            {
+                return best;
+            }
+
+            // One deadline for the attempt as a whole, not per receive: the tunnel carries no
+            // other traffic yet, but the relay may still answer a keepalive or a stray packet
+            // from a previous session, and each of those would otherwise buy another full wait.
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromMilliseconds(LandmarkTimeoutMs));
+            try
+            {
+                while (true)
+                {
+                    var n = await _socket.ReceiveAsync(buffer, SocketFlags.None, timeout.Token).ConfigureAwait(false);
+                    if (!GpbProtocol.TryReadData(buffer.AsSpan(0, n), out var sid, out var ip)) continue;
+                    if (sid != _sessionId) continue;
+                    if (!IcmpEcho.IsReplyTo(ip, landmark, id, sequence)) continue;
+
+                    var rtt = (_clock.ElapsedTicks - sentAt) * 1000.0 / Stopwatch.Frequency;
+                    if (best is null || rtt < best) best = rtt;
+                    break;
+                }
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                // Silence. A landmark that never answers through any relay is a landmark
+                // problem; one that answers through some and not others is a relay problem.
+                // Neither is decided here - the caller sees which relays produced a number.
+            }
+            catch (SocketException)
+            {
+                return best;
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// How long a landmark echo may take before the attempt is abandoned. Generous on purpose:
+    /// this runs once per relay at connect time, and the whole point is to catch the relay whose
+    /// second leg is long. Cutting it short would score exactly that relay as "no answer" and
+    /// hand it the fallback, which is the first leg alone - the number we are trying to stop
+    /// deciding things.
+    /// </summary>
+    private const int LandmarkTimeoutMs = 2000;
 
     /// <summary>Starts both pump threads plus the keepalive loop.</summary>
     public void StartPumping(WintunAdapter adapter, CancellationToken ct)
@@ -254,6 +357,18 @@ internal sealed class TunnelClient : IDisposable
                     Interlocked.Increment(ref _dropUplinkOversize);
                     continue;
                 }
+
+                if (UplinkFilter.IsLocalNoise(packet.AsSpan(0, len), _subnetBroadcast))
+                {
+                    Interlocked.Increment(ref _dropUplinkLocalNoise);
+                    continue;
+                }
+
+                // Before wrapping, while the inner IP header is still in front of us. Reading it
+                // here costs one header parse and saves ever having to reproduce this from a
+                // packet capture on a tester's machine. Sits after the filter so the summary is
+                // game traffic rather than the discovery chatter that was burying it.
+                Destinations.Note(packet.AsSpan(0, len));
 
                 var wireLen = GpbProtocol.WriteData(wire, _sessionId, packet.AsSpan(0, len));
                 _socket!.Send(wire.AsSpan(0, wireLen), SocketFlags.None);
@@ -400,6 +515,7 @@ internal sealed class TunnelClient : IDisposable
         Interlocked.Exchange(ref _lastReportedDrops, total);
 
         _log($"Packets dropped inside the client: {total} total - " +
+             $"local noise {Interlocked.Read(ref _dropUplinkLocalNoise)}, " +
              $"uplink oversize {Interlocked.Read(ref _dropUplinkOversize)}, " +
              $"over path MTU {Interlocked.Read(ref _dropUplinkPathMtu)}, " +
              $"send failed {Interlocked.Read(ref _dropUplinkSendFailed)}, " +

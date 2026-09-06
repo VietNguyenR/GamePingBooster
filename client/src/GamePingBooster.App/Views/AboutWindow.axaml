@@ -1,0 +1,88 @@
+<views:SurfaceWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:GamePingBooster.App.ViewModels"
+        xmlns:views="using:GamePingBooster.App.Views"
+        x:Class="GamePingBooster.App.Views.AboutWindow"
+        x:DataType="vm:AboutViewModel"
+        Title="About"
+        Width="400" SizeToContent="Height"
+        MinWidth="400"
+        WindowStartupLocation="CenterOwner"
+        CanResize="False">
+
+  <views:SurfaceWindow.Styles>
+    <Style Selector="TextBlock.label">
+      <Setter Property="Foreground" Value="#94A3B8" />
+      <Setter Property="FontSize" Value="11" />
+    </Style>
+    <Style Selector="TextBlock.value">
+      <Setter Property="Foreground" Value="#E2E8F0" />
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="Margin" Value="0,2,0,0" />
+    </Style>
+    <Style Selector="Button">
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="16,8" />
+    </Style>
+    <!-- A link, not a button that looks like one. Nothing here navigates in place, so the only
+         honest affordance is text you can click. -->
+    <Style Selector="Button.link">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Foreground" Value="#60A5FA" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="HorizontalAlignment" Value="Left" />
+    </Style>
+    <Style Selector="Button.link:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="TextBlock.Foreground" Value="#93C5FD" />
+    </Style>
+  </views:SurfaceWindow.Styles>
+
+  <Grid RowDefinitions="Auto,Auto">
+
+    <!--
+      A spacer, not a title bar - see SurfaceWindow for why there is no title bar to draw.
+      It keeps the content clear of the caption buttons and gives somewhere to drag.
+    -->
+    <Border Grid.Row="0" Height="34" Background="Transparent"
+            PointerPressed="OnTitleBarPressed" />
+
+  <StackPanel Grid.Row="1" Margin="24,4,24,24" Spacing="16">
+
+    <StackPanel Spacing="2">
+      <TextBlock Text="Game Ping Booster" Foreground="#F8FAFC" FontSize="18" FontWeight="Bold" />
+      <TextBlock Classes="label" Text="{Binding VersionText}" />
+    </StackPanel>
+
+    <TextBlock Classes="label" TextWrapping="Wrap"
+               Text="Sends a game's traffic through a relay abroad whose route to the game servers beats the one your ISP picks." />
+
+    <StackPanel>
+      <TextBlock Classes="label" Text="Author" />
+      <TextBlock Classes="value" Text="{Binding Author}" />
+      <Button Classes="link" Content="{Binding Email}" Click="OnEmailClick" Margin="0,2,0,0" />
+    </StackPanel>
+
+    <StackPanel>
+      <TextBlock Classes="label" Text="Source code" />
+      <Button Classes="link" Content="{Binding RepositoryUrl}" Click="OnRepositoryClick" Margin="0,2,0,0" />
+    </StackPanel>
+
+    <Border Background="#1E293B" CornerRadius="8" Padding="12">
+      <StackPanel Spacing="6">
+        <TextBlock Classes="label" Text="{Binding LicenceTitle}" />
+        <TextBlock Classes="label" TextWrapping="Wrap" FontSize="10"
+                   Text="{Binding LicenceText}" />
+      </StackPanel>
+    </Border>
+
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+      <Button Content="Close" Click="OnCloseClick"
+              Background="#334155" Foreground="#E2E8F0" />
+    </StackPanel>
+
+  </StackPanel>
+  </Grid>
+</views:SurfaceWindow>

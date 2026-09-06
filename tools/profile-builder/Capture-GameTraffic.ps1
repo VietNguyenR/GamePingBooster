@@ -47,6 +47,18 @@
     to is shown in the table either way, so lower this if you want to see short-lived endpoints
     recorded as well.
 
+    Raised from 100 to 500 on 2026-09-05, from measurement rather than caution. A 54-second match
+    put 2,323 packets on one address while everything else in the same capture managed 65 and 6 -
+    the gap is close to three orders of magnitude, so a threshold anywhere in the middle costs
+    nothing and 100 sat needlessly close to the noise.
+
+    Why the threshold matters more than it looks: every address that lands in observed.txt is
+    widened to a whole /20 by Build-PubgProfile.ps1, and a /20 of a game's *candidate* servers is
+    actively harmful, not merely wasteful. Games pick a datacentre by measuring latency to
+    several of them; routing some candidates through a relay and leaving the rest on the ISP path
+    makes the game compare two different things and choose wrongly. A short-lived endpoint is
+    usually one of those probes. Keep them out.
+
 .EXAMPLE
     .\Capture-GameTraffic.ps1
     Leave it running, play, Ctrl+C when finished.
@@ -62,14 +74,37 @@ param(
     [string]$WatchProcess = 'TslGame',
     [switch]$Interactive,
     [string]$FromFile,
-    [int]$MinPackets = 100,
+    [int]$MinPackets = 500,
     [int]$DurationMinutes = 180,
     [string]$Interface,
+    [int]$ProbePort = 8081,
+    [string]$LandmarkPath,
     [switch]$KeepCapture
 )
 
 $ErrorActionPreference = 'Stop'
 if (-not $OutputPath) { $OutputPath = Join-Path $PSScriptRoot 'observed.txt' }
+if (-not $LandmarkPath) { $LandmarkPath = Join-Path $PSScriptRoot 'landmarks-observed.txt' }
+
+# A datacentre probe, not a game server.
+#
+# PUBG pings one endpoint per Azure region on UDP 8081 before a match and puts the player in
+# whichever answers fastest. Those endpoints must never reach observed.txt, because everything in
+# observed.txt ends up routed, and a routed probe makes the game measure one region through the
+# relay and the rest over the player's own connection - it then compares the two and can pick a
+# region that is worse both ways. See the design notes.
+#
+# -MinPackets used to be the only thing keeping them out, and it is not enough on its own: the
+# probes hit 90 packets in a 186-second session, so a long enough evening pushes them over any
+# threshold that still lets a short match through. The port is what actually identifies them, and
+# it is unambiguous - probes are only ever seen on 8081, and no gameplay session has ever used it.
+function Test-ProbeEndpoint {
+    param($Row)
+    $ports = @($Row.Ports.Keys)
+    if ($ports.Count -eq 0) { return $false }
+    foreach ($port in $ports) { if ([int]$port -ne $ProbePort) { return $false } }
+    return $true
+}
 
 # What the running capture owns, so the cleanup at the bottom can deal with it.
 $script:LiveCapture = $null
@@ -267,11 +302,20 @@ function Measure-CaptureFile {
             if (-not $stats.ContainsKey($ip)) {
                 $stats[$ip] = [pscustomobject]@{
                     Address = $ip; Packets = 0; Ports = @{}; Owners = @{}
+                    First = 0.0; Last = 0.0
                 }
             }
             $entry = $stats[$ip]
             $entry.Packets++
             if ($dstPort) { $entry.Ports[$dstPort] = $true }
+
+            # First and last sighting, so the report can say how long a flow lasted. A packet
+            # count on its own cannot tell a match apart from a burst: 600 packets over four
+            # minutes is a heartbeat, 600 packets over eight seconds is not.
+            if ($when -gt 0) {
+                if ($entry.First -eq 0.0 -or $when -lt $entry.First) { $entry.First = $when }
+                if ($when -gt $entry.Last) { $entry.Last = $when }
+            }
 
             if ($srcPort -and $PortOwners.ContainsKey([int]$srcPort)) {
                 foreach ($owner in $PortOwners[[int]$srcPort].Keys) {
@@ -357,6 +401,120 @@ function Invoke-CaptureSession {
 
 # -------------------------------------------------------------------- report
 
+<#
+.SYNOPSIS
+    Reads observed.txt into records, tolerating both the old and the new layout.
+
+.DESCRIPTION
+    The file used to hold one bare address per line. It now holds the evidence beside it, because
+    an address on its own cannot be re-judged later: when the -MinPackets threshold was raised
+    from 100 to 500, there was no way to tell which of the 126 addresses already in the file would
+    still qualify, and the only remedy was to throw the file away and replay every match.
+
+    Anything after the address is optional, so a file written by the old script still parses and
+    simply reports zero for the counts it never recorded.
+#>
+function Read-ObservedFile {
+    param([string]$Path)
+
+    if (-not (Test-Path $Path)) { return @() }
+
+    $records = @()
+    foreach ($line in Get-Content $Path) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
+
+        $fields = $trimmed -split '\s+'
+        if ($fields[0] -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { continue }
+
+        $packets = 0; $seconds = 0; $sightings = 1
+        if ($fields.Count -gt 1) { [void][int]::TryParse($fields[1], [ref]$packets) }
+        if ($fields.Count -gt 2) { [void][int]::TryParse($fields[2], [ref]$seconds) }
+        if ($fields.Count -gt 3) { [void][int]::TryParse($fields[3], [ref]$sightings) }
+        $ports = ''
+        if ($fields.Count -gt 4) { $ports = $fields[4] }
+
+        $records += [pscustomobject]@{
+            Address = $fields[0]; Packets = $packets; Seconds = $seconds
+            Sightings = $sightings; Ports = $ports
+        }
+    }
+    return $records
+}
+
+<#
+.SYNOPSIS
+    Folds this session's accepted rows into observed.txt and returns the addresses that are new.
+
+.DESCRIPTION
+    One line per address, rewritten rather than appended, so an address seen in five matches is
+    one row with the strongest evidence rather than five rows to reconcile by eye.
+
+    Packets and seconds keep the HIGHEST single-session figures, not a running total. A total
+    would let a heartbeat that trickles for hours out-score a real match, which is the opposite of
+    what the number is for: it answers "was this ever carrying a game?", and one match is enough
+    to say yes. Sightings counts the sessions separately, because an address that turns up in
+    every match is better evidence than one that appeared once.
+#>
+function Merge-ObservedFile {
+    param([string]$Path, [object[]]$Rows, [string[]]$Header)
+
+    $existing = @{}
+    $order = @()
+    foreach ($record in Read-ObservedFile -Path $Path) {
+        if (-not $existing.ContainsKey($record.Address)) { $order += $record.Address }
+        $existing[$record.Address] = $record
+    }
+
+    $new = @()
+    foreach ($row in $Rows) {
+        $seconds = 0
+        if ($row.Last -gt $row.First) { $seconds = [int][math]::Round($row.Last - $row.First) }
+        $ports = ($row.Ports.Keys | Sort-Object { [int]$_ } | Select-Object -First 4) -join ','
+
+        if ($existing.ContainsKey($row.Address)) {
+            $record = $existing[$row.Address]
+            $record.Sightings = $record.Sightings + 1
+            if ($row.Packets -gt $record.Packets) { $record.Packets = $row.Packets }
+            if ($seconds -gt $record.Seconds) { $record.Seconds = $seconds }
+            if ($ports) { $record.Ports = $ports }
+        }
+        else {
+            $order += $row.Address
+            $existing[$row.Address] = [pscustomobject]@{
+                Address = $row.Address; Packets = $row.Packets; Seconds = $seconds
+                Sightings = 1; Ports = $ports
+            }
+            $new += $row.Address
+        }
+    }
+
+    # A List[string], not @() with +=. If anything in here throws mid-array, += on the resulting
+    # $null silently degrades to STRING concatenation and the whole file is written as one line -
+    # which is exactly what a format-string typo did the first time this ran.
+    $lines = New-Object System.Collections.Generic.List[string]
+    if (-not $Header) {
+        $Header = @(
+            '# Destinations that passed -MinPackets, written by Capture-GameTraffic.ps1.',
+            '# Only the first column is read by Build-PubgProfile.ps1; the rest is the evidence',
+            '# that put the address here, so the threshold can be revisited later without',
+            '# replaying every match.')
+    }
+    foreach ($line in $Header) { $lines.Add($line) }
+    $lines.Add('# address           packets   secs  seen  udp ports')
+    foreach ($address in $order) {
+        $record = $existing[$address]
+        # The arguments go in via an array. Writing them after -f across a line break inside
+        # .Add() binds only the first one, and the format then fails on {1} with an error that
+        # names neither the operator nor the line that fed it.
+        $fields = @($record.Address, $record.Packets, $record.Seconds, $record.Sightings, $record.Ports)
+        $lines.Add('{0,-18} {1,8} {2,6} {3,5}  {4}' -f $fields)
+    }
+    Set-Content -Path $Path -Value $lines.ToArray() -Encoding ascii
+
+    return $new
+}
+
 function Write-SessionResult {
     param([hashtable]$Stats, [string]$OnlyProcess)
 
@@ -381,14 +539,62 @@ function Write-SessionResult {
     Write-Host ("    {0,-18} {1,9}  {2,-22} {3}" -f 'Address', 'Packets', 'UDP ports', 'Process')
     Write-Host ("    {0,-18} {1,9}  {2,-22} {3}" -f '-------', '-------', '---------', '-------')
 
-    $accepted = @()
+    # Probes are found across EVERY row, not just the 25 printed below. The table is sorted by
+    # packet count and probes sit at the bottom of it - 12 packets against a match's 4,000 - so
+    # a busy session would push the quietest regions off the end of the list and they would never
+    # be seen. That is the opposite of what this is for: the quiet ones are precisely the regions
+    # a single capture is most likely to miss.
+    $probes = @($rows | Where-Object { Test-ProbeEndpoint $_ })
+    $probeAddresses = @($probes | ForEach-Object { $_.Address })
+
+    # Decided over every row; only the first 25 are PRINTED. These used to be the same loop, so
+    # an address above the threshold but ranked 26th or lower was silently dropped from
+    # observed.txt - invisible, because it was also missing from the table you would check it
+    # against. A real session has few destinations so it never bit, but the same mistake did bite
+    # for probes, which live at the bottom of this list by definition.
+    $accepted = @($rows | Where-Object {
+        $probeAddresses -notcontains $_.Address -and $_.Packets -ge $MinPackets
+    })
+    $acceptedAddresses = @($accepted | ForEach-Object { $_.Address })
+
     foreach ($row in ($rows | Select-Object -First 25)) {
         $ports = ($row.Ports.Keys | Sort-Object { [int]$_ } | Select-Object -First 4) -join ','
         $owners = ($row.Owners.Keys | Sort-Object) -join ','
         if (-not $owners) { $owners = '?' }
         $flag = ''
-        if ($row.Packets -ge $MinPackets) { $accepted += $row.Address; $flag = '  <- kept' }
+        if ($probeAddresses -contains $row.Address) { $flag = '  <- datacentre probe, NOT routed' }
+        elseif ($acceptedAddresses -contains $row.Address) { $flag = '  <- kept' }
         Write-Host ("    {0,-18} {1,9}  {2,-22} {3}{4}" -f $row.Address, $row.Packets, $ports, $owners, $flag)
+    }
+    if ($rows.Count -gt 25) {
+        Write-Host ("    ... and {0} more, all counted" -f ($rows.Count - 25))
+    }
+
+    if ($probes.Count -gt 0) {
+        $newProbes = @(Merge-ObservedFile -Path $LandmarkPath -Rows $probes -Header @(
+            '# Datacentre probe endpoints seen on UDP 8081, written by Capture-GameTraffic.ps1.',
+            '#',
+            '# These are LANDMARKS, not game servers, and nothing here may ever be routed - the game',
+            '# pings one per region to decide where to put the player, so a routed one makes it',
+            '# compare a tunnelled path against direct ones. See the design notes.',
+            '#',
+            '# Nothing reads this file automatically. It accumulates across sessions because one',
+            '# capture rarely sees every region - packet counts range from 90 down to 12, and the',
+            '# quiet ones come and go. When a region has been seen a few times, look its address up',
+            '# in the Azure Service Tags file and add it to that region''s "landmarks" in the',
+            '# profile by hand. Build-PubgProfile.ps1 then checks it stays in that region.'))
+        $total = @(Read-ObservedFile -Path $LandmarkPath).Count
+
+        Write-Host ""
+        Write-Host "==> $($probes.Count) datacentre probe endpoint(s) this session - these are LANDMARKS, not servers." -ForegroundColor Cyan
+        foreach ($row in $probes) {
+            $mark = ''
+            if ($newProbes -contains $row.Address) { $mark = '  <- new' }
+            Write-Host ("      {0,-18} {1,6} pkt{2}" -f $row.Address, $row.Packets, $mark)
+        }
+        Write-Host "    They are NOT written to observed.txt and never routed. Accumulated in"
+        Write-Host "    $(Split-Path $LandmarkPath -Leaf), which now holds $total address(es)."
+        Write-Host "    One capture rarely sees every region - run a few before trusting the list."
     }
 
     if ($accepted.Count -eq 0) {
@@ -396,12 +602,9 @@ function Write-SessionResult {
         return @()
     }
 
-    $existing = @()
-    if (Test-Path $OutputPath) { $existing = Get-Content $OutputPath | ForEach-Object { $_.Trim() } }
-    $new = @($accepted | Where-Object { $existing -notcontains $_ })
-    if ($new.Count -gt 0) { Add-Content -Path $OutputPath -Value $new -Encoding ascii }
+    $new = @(Merge-ObservedFile -Path $OutputPath -Rows $accepted)
 
-    $total = @(Get-Content $OutputPath | Where-Object { $_.Trim() }).Count
+    $total = @(Read-ObservedFile -Path $OutputPath).Count
     Write-Host ""
     if ($new.Count -gt 0) {
         Write-Host "==> $($new.Count) new: $($new -join ', ')" -ForegroundColor Green

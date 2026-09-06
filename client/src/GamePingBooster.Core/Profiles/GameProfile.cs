@@ -47,6 +47,24 @@ public sealed class RegionEntry
     /// </summary>
     [JsonPropertyName("cidrs")] public List<string> Cidrs { get; set; } = [];
 
+    /// <summary>
+    /// Stable addresses that stand in for this region when its latency has to be measured.
+    ///
+    /// For PUBG these are the endpoints the game itself probes on UDP 8081 to choose a
+    /// datacentre - see the design notes. They are the right stand-in for three reasons:
+    /// they are inside the region, they recur across sessions (gameplay servers do not), and
+    /// they answer ICMP, so measuring them needs no cooperation from anyone.
+    ///
+    /// Deliberately NOT covered by <see cref="Cidrs"/>. A landmark that went through the tunnel
+    /// would make the game measure some regions through the relay and the rest over the player's
+    /// own connection, which is comparing two different things - the mistake that put a tester on
+    /// a relay 30 ms further from his game server than the alternative.
+    ///
+    /// Empty means this region cannot be measured, and relay comparison falls back to the first
+    /// leg alone. Nothing breaks; the choice is just less informed.
+    /// </summary>
+    [JsonPropertyName("landmarks")] public List<string> Landmarks { get; set; } = [];
+
     /// <summary>Where the ranges came from (aws:ap-southeast-1 / azure:southeastasia / capture), for auditing.</summary>
     [JsonPropertyName("source")] public string? Source { get; set; }
 

@@ -137,16 +137,39 @@ public sealed class StatusMessage
     [JsonPropertyName("configured")] public bool Configured { get; set; }
 
     /// <summary>
-    /// Round-trip time to the relay in milliseconds; null until measured.
+    /// Round-trip time to the relay in milliseconds; null until measured. **Half the path.**
     ///
     /// This is the RTT to the relay over the physical path, not through the tunnel: the pinned
-    /// /32 route keeps relay traffic off the virtual adapter, so keepalives never enter it. The
-    /// before/after number a player actually cares about - latency to the game server with and
-    /// without the tunnel - cannot be produced here, because the relay-to-server leg is only
-    /// measurable from the relay and those servers do not answer probes. Use the game's own
-    /// in-game ping for that, and mtr from the VPS for choosing where to put a relay.
+    /// /32 route keeps relay traffic off the virtual adapter, so keepalives never enter it.
+    ///
+    /// It is live - a keepalive every three seconds - and it is the wrong number to put in front
+    /// of a player on its own. A tester saw 23 ms here while his game showed 70-80, because the
+    /// leg from the relay on to the game server is not in it. Show <see cref="GamePingMs"/> as
+    /// the headline and keep this as the detail that explains it.
     /// </summary>
     [JsonPropertyName("tunnelPingMs")] public double? TunnelPingMs { get; set; }
+
+    /// <summary>
+    /// Estimated latency to the game's datacentre through the tunnel - what the game will show.
+    /// Null when no region could be measured, or before connecting.
+    ///
+    /// Live, and an estimate, in a specific way worth understanding. It is the live
+    /// <see cref="TunnelPingMs"/> plus a fixed offset for the relay-to-datacentre leg, where the
+    /// offset was taken by subtracting the first leg from a real end-to-end measurement at
+    /// connect time - so the relay's own forwarding cost is inside it. That split is deliberate:
+    /// the variable part of a player's ping is their own connection, which is measured every
+    /// three seconds, while the leg between two datacentres barely moves (0.07 ms of jitter over
+    /// five echoes, measured 2026-09-05).
+    ///
+    /// Note this is NOT the "two numbers added together" that the design notes rejects
+    /// for *choosing* a relay. That rejection is about building a total from two independent
+    /// measurements, which silently omits the relay's forwarding cost. Here the total was
+    /// measured first and the offset derived from it.
+    /// </summary>
+    [JsonPropertyName("gamePingMs")] public double? GamePingMs { get; set; }
+
+    /// <summary>Display name of the region the game will use, e.g. "Southeast Asia (Singapore)".</summary>
+    [JsonPropertyName("gameRegionName")] public string? GameRegionName { get; set; }
 
     /// <summary>Packet loss estimated from pings, 0..1.</summary>
     [JsonPropertyName("lossRatio")] public double? LossRatio { get; set; }
@@ -234,6 +257,25 @@ public sealed class StatusMessage
     /// licence server nobody can reach is that the ranges are older than they should be.
     /// </summary>
     [JsonPropertyName("profileSource")] public string? ProfileSource { get; set; }
+
+    /// <summary>
+    /// When the profile pushed by the licence server was last written, unix seconds, or null
+    /// when nothing has ever been pushed.
+    ///
+    /// The UI needs it to decide whether fetching again is worth it, and the answer has to
+    /// outlive the UI process - which is the whole point. ProfileSync used to hold that
+    /// timestamp in a field, so every launch of the app started life believing it had never
+    /// fetched anything and asked again immediately. Twelve launches in an hour is an ordinary
+    /// afternoon on a development machine, and twelve is exactly the licence server's cap, so
+    /// the app started reporting "Too many requests" to somebody who had done nothing but open
+    /// it. The file on disk is the honest answer to "when did we last get one", it survives the
+    /// UI, and it cannot drift from the thing it describes.
+    ///
+    /// Additive, so no contract version bump: an older UI ignores it, and a newer UI reads null
+    /// from an older service - which means "fetch", the same as a machine that has never had a
+    /// profile.
+    /// </summary>
+    [JsonPropertyName("profileUpdatedAt")] public long? ProfileUpdatedAt { get; set; }
 
     /// <summary>Error detail when State is Faulted.</summary>
     [JsonPropertyName("error")] public string? Error { get; set; }

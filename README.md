@@ -125,6 +125,54 @@ Relays are declared in `gpb.conf` (copy `gpb.conf.example`; it is gitignored and
 repository is real). A name that file does not declare is handed to `ssh` unchanged, so an alias
 from your `~/.ssh/config` or a plain `root@203.0.113.10` works too.
 
+#### What a relay block holds
+
+One block per VPS. Only `_HOST` is required; every other field has the default shown.
+
+| Key | Default | What it is |
+|---|---|---|
+| `RELAY_<NAME>_HOST` | - | Address or DNS name of the VPS. **Required.** |
+| `RELAY_<NAME>_USER` | `root` | SSH user. |
+| `RELAY_<NAME>_PORT` | `22` | SSH port. |
+| `RELAY_<NAME>_KEY` | - | Private key file for SSH. `~/` is expanded, so one line works from PowerShell and from Git Bash. |
+| `RELAY_<NAME>_PASSWORD` | `RELAY_PASSWORD` | SSH password, when there is no key. |
+| `RELAY_<NAME>_SUDO_PASSWORD` | the SSH password | Only when they differ - key-based login plus a sudo password, usually. |
+| `RELAY_<NAME>_LISTEN` | `51820` | UDP port relayd listens on. This is the port a **player** connects to, not the SSH one. |
+| `RELAY_<NAME>_MAX` | `0` | How many clients this relay accepts **at once**. 0 means no limit beyond the address pool. |
+
+`gpb.conf` is **parsed, not sourced**, on both sides, so a password may contain a space, `#`, `$`
+or a backslash. `./gpb relay list` prints what actually got parsed, including the client cap -
+worth a look after editing, because a value that failed to parse reads exactly like one that was
+never set.
+
+#### How many clients a relay accepts
+
+`RELAY_<NAME>_MAX` becomes `-max-clients` on the relay, and a client arriving past it is answered
+with "the relay is full" and fails over to another relay rather than being left hanging.
+
+A count, rather than a smaller `-subnet`, on purpose. A prefix gives whatever the arithmetic
+gives - a `/26` is 61 usable addresses, not 50 - and `-subnet` also has to agree with
+`setup-nat.sh` and with the client, which assumes a `/24` when it configures the tunnel adapter.
+Leaving the subnet alone and saying the number out loud avoids all of that.
+
+Without it, the ceiling is the address pool: a `/24` leaves **253** clients at once, after the
+network address, the relay's own `.1` and the broadcast.
+
+#### Sharing one key between relays
+
+Every relay a client might reach must hold the **same** pre-shared key, or failing over from one
+to another is refused by the second. `install.sh` generates a key only when the machine has none,
+so a redeploy never disturbs one; to put an existing key on a new relay, hand it a file:
+
+```
+sudo ./install.sh --psk-file /path/to/key
+```
+
+A file rather than a flag value, because a key on the command line is visible in `ps` to every
+user on the box while the script runs. `GPB_PSK` also works, but **only** when `install.sh` runs
+as root directly - `sudo` resets the environment, so `GPB_PSK=... sudo ./install.sh` loses it and
+quietly generates a new key instead.
+
 An account that is not root is fine: the payload unpacks into `~/.gpb-deploy`, and only the
 install step needs privilege. It runs directly when the account is root, under `sudo` when sudo
 is passwordless, and otherwise over a second connection that can carry a sudo password - the

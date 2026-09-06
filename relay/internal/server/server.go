@@ -36,6 +36,20 @@ type Config struct {
 	// forever, which this closes. No real game session lasts a day.
 	MaxSessionAge time.Duration
 
+	// MaxClients caps how many sessions may be live at once. 0 means no cap beyond the address
+	// pool, which is how every relay behaved before this existed.
+	//
+	// A cap by COUNT rather than by shrinking Subnet, and the difference is not cosmetic. The
+	// pool size of a prefix is whatever the arithmetic gives - a /26 is 61 usable addresses, not
+	// 50 - so a subnet chosen to mean "fifty people" says something slightly different from what
+	// was meant, and says it in a place that also has to match setup-nat.sh and the client's
+	// idea of the tunnel netmask. This says the number out loud and touches nothing else.
+	//
+	// It never refuses a client that already has a session: allocSession returns the existing
+	// one before it gets here, so a handshake retry and a reconnect inside the reservation
+	// window are unaffected by the cap. Only a genuinely new session counts against it.
+	MaxClients int
+
 	// Exactly one authentication mode is configured, and the relay answers only that one.
 	//
 	// PSK is the self-hosted mode: one shared key, as in v1 and v2.
@@ -135,6 +149,9 @@ func New(cfg Config) (*Server, error) {
 	if cfg.MaxSessionAge <= 0 {
 		cfg.MaxSessionAge = protocol.MaxSessionAge
 	}
+	if cfg.MaxClients < 0 {
+		return nil, fmt.Errorf("max-clients %d is negative", cfg.MaxClients)
+	}
 	if cfg.RateBytesPerSec > 0 && cfg.BurstBytes <= 0 {
 		// Four seconds at the sustained rate. The first draft used eight, and a test written
 		// against it let 9.2 MB of a 10 MB flood straight through while still reporting success -
@@ -161,6 +178,13 @@ func New(cfg Config) (*Server, error) {
 	}
 	if len(s.freeIPs) == 0 {
 		return nil, fmt.Errorf("subnet %s is too small, no addresses left to hand out", cfg.Subnet)
+	}
+	if cfg.MaxClients > len(s.freeIPs) {
+		// Not fatal: the pool still binds, so the relay behaves correctly. But the operator asked
+		// for a number they will never reach, and silently doing something other than what the
+		// configuration says is how a limit gets believed for years without ever being tested.
+		cfg.Log.Warn("max-clients is larger than the address pool, so the pool is the real limit",
+			"max_clients", cfg.MaxClients, "pool", len(s.freeIPs), "subnet", cfg.Subnet.String())
 	}
 
 	dev, err := tun.Open(cfg.TunName)
@@ -198,7 +222,9 @@ func New(cfg Config) (*Server, error) {
 		"subnet", cfg.Subnet.String(),
 		"relay_ip", s.relayIP.String(),
 		"mtu", cfg.MTU,
-		"pool", len(s.freeIPs))
+		"pool", len(s.freeIPs),
+		"max_clients", cfg.MaxClients,
+		"rate_kbps", cfg.RateBytesPerSec/1024)
 	return s, nil
 }
 
@@ -629,6 +655,14 @@ func (s *Server) allocSession(from netip.AddrPort, resKey protocol.ClientID) (*s
 			live.touch()
 			return live, true
 		}
+	}
+
+	// Past this point a NEW session is being minted, so this is where the cap belongs. Above it
+	// is the resume path, which must never be refused: a client whose handshake answer was slow,
+	// or which is reconnecting into its reservation, already occupies one of these slots and
+	// turning it away would count it twice.
+	if s.cfg.MaxClients > 0 && len(s.bySession) >= s.cfg.MaxClients {
+		return nil, false
 	}
 
 	var sid protocol.SessionID

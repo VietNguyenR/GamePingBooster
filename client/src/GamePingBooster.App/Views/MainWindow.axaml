@@ -78,6 +78,7 @@
             <MenuItem Header="Settings" Click="OnSettingsClick" />
             <Separator Background="#242424" />
             <MenuItem Header="Open logs folder" Click="OnLogsClick" />
+            <MenuItem Header="About" Click="OnAboutClick" />
           </MenuFlyout>
         </Button.Flyout>
       </Button>
@@ -107,24 +108,30 @@
     <!-- Details -->
     <StackPanel Grid.Row="2" Spacing="12" Margin="0,16,0,0">
       <Border Classes="card">
-        <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" >
-          <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="Ping to relay" />
-          <TextBlock Grid.Row="0" Grid.Column="1" Classes="value" Text="{Binding PingText}" />
+        <!-- Ping in game first, ping to the relay under it. The order is the point: the relay
+             figure is the one a tester read as his game ping, saw 23 ms, and then played at
+             70-80 - it is half the path and it must not sit at the top wearing that meaning. -->
+        <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" >
+          <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="Ping in game" />
+          <TextBlock Grid.Row="0" Grid.Column="1" Classes="value" Text="{Binding GamePingText}" />
 
-          <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="Packet loss" Margin="0,10,0,0" />
-          <TextBlock Grid.Row="1" Grid.Column="1" Classes="value" Text="{Binding LossText}" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="Ping to relay" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="1" Grid.Column="1" Classes="value" Text="{Binding PingText}" Margin="0,10,0,0" />
 
-          <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="Relay server" Margin="0,10,0,0" />
-          <TextBlock Grid.Row="2" Grid.Column="1" Classes="value" Text="{Binding RelayText}" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="Packet loss" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="2" Grid.Column="1" Classes="value" Text="{Binding LossText}" Margin="0,10,0,0" />
 
-          <TextBlock Grid.Row="3" Grid.Column="0" Classes="label" Text="Game" Margin="0,10,0,0" />
-          <TextBlock Grid.Row="3" Grid.Column="1" Classes="value" Text="{Binding GameText}" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="3" Grid.Column="0" Classes="label" Text="Relay server" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="3" Grid.Column="1" Classes="value" Text="{Binding RelayText}" Margin="0,10,0,0" />
 
-          <TextBlock Grid.Row="4" Grid.Column="0" Classes="label" Text="Routing" Margin="0,10,0,0" />
-          <TextBlock Grid.Row="4" Grid.Column="1" Classes="value" Text="{Binding RouteText}" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="4" Grid.Column="0" Classes="label" Text="Game" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="4" Grid.Column="1" Classes="value" Text="{Binding GameText}" Margin="0,10,0,0" />
 
-          <TextBlock Grid.Row="5" Grid.Column="0" Classes="label" Text="Packets" Margin="0,10,0,0" />
-          <TextBlock Grid.Row="5" Grid.Column="1" Classes="value" Text="{Binding PacketsText}" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="5" Grid.Column="0" Classes="label" Text="Routing" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="5" Grid.Column="1" Classes="value" Text="{Binding RouteText}" Margin="0,10,0,0" />
+
+          <TextBlock Grid.Row="6" Grid.Column="0" Classes="label" Text="Packets" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="6" Grid.Column="1" Classes="value" Text="{Binding PacketsText}" Margin="0,10,0,0" />
         </Grid>
       </Border>
 

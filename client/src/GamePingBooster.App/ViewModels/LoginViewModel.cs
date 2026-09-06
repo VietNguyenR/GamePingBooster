@@ -131,7 +131,10 @@ public sealed class LoginViewModel : INotifyPropertyChanged
             // in failed" because a second request did would be a lie.
             if (_profileSync is not null)
             {
-                await _profileSync.SyncAsync(_licenceUrl, _devicePublicKey, "pubg", true, ct)
+                // force: true, so the age of whatever profile is already stored is irrelevant
+                // and there is nothing to pass for it.
+                await _profileSync
+                    .SyncAsync(_licenceUrl, _devicePublicKey, "pubg", force: true, profileUpdatedAt: null, ct: ct)
                     .ConfigureAwait(true);
             }
         }
