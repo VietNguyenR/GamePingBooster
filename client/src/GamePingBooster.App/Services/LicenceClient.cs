@@ -49,6 +49,27 @@ public sealed class LicenceClient : IDisposable
     }
 
     /// <summary>
+    /// Trades a browser sign-in's one-time code for the same credential LoginAsync returns.
+    ///
+    /// The second half of the loopback flow - see LoopbackAuth. The answer is deliberately the
+    /// same <see cref="LoginResult"/>, so everything after sign-in is one code path regardless of
+    /// which way the person signed in.
+    ///
+    /// The verifier is the PKCE secret this process kept while only its hash travelled through
+    /// the browser. The redirect URI is sent again so the server can check the code is being
+    /// spent by whoever asked for it, and not by something that merely saw it go past.
+    /// </summary>
+    public async Task<LoginResult> ExchangeAsync(string code, string verifier, string redirectUri,
+        CancellationToken ct)
+    {
+        var response = await _http.PostAsJsonAsync("auth/exchange",
+            new ExchangeRequest { Code = code, Verifier = verifier, RedirectUri = redirectUri },
+            LicenceJsonContext.Default.ExchangeRequest, ct).ConfigureAwait(false);
+
+        return await ReadAsync(response, LicenceJsonContext.Default.LoginResult, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Exchanges the refresh token for a licence token bound to this machine's device key.
     ///
     /// The device public key has to go up: the token names it, and that is what makes a stolen
@@ -226,6 +247,13 @@ public sealed class LoginRequest
     [JsonPropertyName("password")] public string Password { get; set; } = "";
 }
 
+public sealed class ExchangeRequest
+{
+    [JsonPropertyName("code")] public string Code { get; set; } = "";
+    [JsonPropertyName("verifier")] public string Verifier { get; set; } = "";
+    [JsonPropertyName("redirectUri")] public string RedirectUri { get; set; } = "";
+}
+
 public sealed class LoginResult
 {
     [JsonPropertyName("refreshToken")] public string RefreshToken { get; set; } = "";
@@ -293,6 +321,7 @@ public sealed class ErrorResponse
 /// <summary>Source-generated JSON: the App is published with Native AOT, like the service.</summary>
 [JsonSourceGenerationOptions(DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(LoginRequest))]
+[JsonSerializable(typeof(ExchangeRequest))]
 [JsonSerializable(typeof(LoginResult))]
 [JsonSerializable(typeof(TokenRequest))]
 [JsonSerializable(typeof(TokenResult))]

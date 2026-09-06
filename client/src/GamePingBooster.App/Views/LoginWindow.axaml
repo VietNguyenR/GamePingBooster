@@ -1,4 +1,4 @@
-<views:SurfaceWindow xmlns="https://github.com/avaloniaui"
+﻿<views:SurfaceWindow xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:GamePingBooster.App.ViewModels"
         xmlns:views="using:GamePingBooster.App.Views"
@@ -45,6 +45,23 @@
 
   <StackPanel Grid.Row="1" Margin="24,4,24,24" Spacing="14">
     <TextBlock Classes="hint" Text="{Binding ServerText}" />
+
+    <!-- The browser route first, because it is the one that should become the default: this app
+         never sees the password, and the device-limit refusal happens on a page that can explain
+         it rather than in a dialog after somebody has already typed one.
+
+         The form below stays. It is the fallback for a machine with no usable browser, it is the
+         contract shipped binaries already speak, and it does not come out until the browser flow
+         has been confirmed working on a real machine. -->
+    <Button Content="Sign in with your browser" Click="OnBrowserClick"
+            IsEnabled="{Binding !Busy}" HorizontalAlignment="Stretch"
+            HorizontalContentAlignment="Center"
+            Background="#2563EB" Foreground="White" />
+
+    <TextBlock Classes="hint" Text="{Binding Status}" IsVisible="{Binding HasStatus}"
+               TextWrapping="Wrap" />
+
+    <TextBlock Classes="hint" Text="or sign in here" HorizontalAlignment="Center" />
 
     <StackPanel Spacing="0">
       <TextBlock Classes="label" Text="Email" />

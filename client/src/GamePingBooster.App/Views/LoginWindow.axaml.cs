@@ -1,4 +1,4 @@
-using Avalonia.Controls;
+﻿using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
 using GamePingBooster.App.ViewModels;
@@ -31,6 +31,17 @@ public partial class LoginWindow : SurfaceWindow
 
         // Close only on success. On failure the window stays with the message in it, because
         // closing would leave somebody looking at the main window wondering what happened.
+        if (vm.Succeeded) Close();
+    }
+
+    private async void OnBrowserClick(object? sender, RoutedEventArgs e)
+    {
+        if (DataContext is not LoginViewModel vm) return;
+
+        await vm.SignInWithBrowserAsync(_cts.Token);
+
+        // Same rule as the form: close only on success, so a failure leaves its message on
+        // screen next to the form that can still get past it.
         if (vm.Succeeded) Close();
     }
 
