@@ -38,22 +38,16 @@ public sealed class LicenceClient : IDisposable
 
     public void Dispose() => _http.Dispose();
 
-    /// <summary>Signs in. Throws <see cref="LicenceException"/> with a message fit to show.</summary>
-    public async Task<LoginResult> LoginAsync(string email, string password, CancellationToken ct)
-    {
-        var response = await _http.PostAsJsonAsync("auth/login",
-            new LoginRequest { Email = email, Password = password },
-            LicenceJsonContext.Default.LoginRequest, ct).ConfigureAwait(false);
-
-        return await ReadAsync(response, LicenceJsonContext.Default.LoginResult, ct).ConfigureAwait(false);
-    }
-
     /// <summary>
-    /// Trades a browser sign-in's one-time code for the same credential LoginAsync returns.
+    /// Trades a browser sign-in's one-time code for this account's refresh token.
     ///
-    /// The second half of the loopback flow - see LoopbackAuth. The answer is deliberately the
-    /// same <see cref="LoginResult"/>, so everything after sign-in is one code path regardless of
-    /// which way the person signed in.
+    /// The second half of the loopback flow - see LoopbackAuth. This is the ONLY way the app
+    /// signs in: there is no password call here any more, and the app therefore has no code path
+    /// that could handle a password even if something asked it to.
+    ///
+    /// <c>/auth/login</c> still exists on the SERVER, for binaries already installed. The name
+    /// <see cref="LoginResult"/> is left as it is because it is the shape both endpoints answer
+    /// with, and renaming it would suggest the two had diverged when they have not.
     ///
     /// The verifier is the PKCE secret this process kept while only its hash travelled through
     /// the browser. The redirect URI is sent again so the server can check the code is being
@@ -241,12 +235,6 @@ public sealed class LicenceException(string message, System.Net.HttpStatusCode? 
     public System.Net.HttpStatusCode? StatusCode { get; } = status;
 }
 
-public sealed class LoginRequest
-{
-    [JsonPropertyName("email")] public string Email { get; set; } = "";
-    [JsonPropertyName("password")] public string Password { get; set; } = "";
-}
-
 public sealed class ExchangeRequest
 {
     [JsonPropertyName("code")] public string Code { get; set; } = "";
@@ -320,7 +308,6 @@ public sealed class ErrorResponse
 
 /// <summary>Source-generated JSON: the App is published with Native AOT, like the service.</summary>
 [JsonSourceGenerationOptions(DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
-[JsonSerializable(typeof(LoginRequest))]
 [JsonSerializable(typeof(ExchangeRequest))]
 [JsonSerializable(typeof(LoginResult))]
 [JsonSerializable(typeof(TokenRequest))]

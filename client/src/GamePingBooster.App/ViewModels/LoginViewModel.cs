@@ -5,19 +5,22 @@ using GamePingBooster.App.Services;
 namespace GamePingBooster.App.ViewModels;
 
 /// <summary>
-/// Sign in, and fetch the first licence token for this machine.
+/// Sign in through the browser, and fetch the first licence token for this machine.
 ///
-/// Two calls, in this order, and the order is the whole point (docs/COMMERCIAL.md):
+/// The order is the whole point (docs/COMMERCIAL.md):
 ///
 ///     the keypair already exists      generated on first run, before any account existed
-///     sign in                         proves who the person is
+///     sign in                         in the browser - see LoopbackAuth
 ///     send the device PUBLIC key up   binds this machine to that account, or is refused
 ///
 /// The device is registered at sign-in, not at generation, which is why a fresh install works
 /// perfectly on a machine that has never signed in to anything.
 ///
-/// The password is never stored and never leaves this window. What is kept is the refresh token,
-/// under DPAPI at user scope; what goes down to the service is the licence token, write-only.
+/// <b>This app never sees the password.</b> The email/password form that used to live here was
+/// removed on 2026-09-06 once the browser flow was confirmed working; `/auth/login` still exists
+/// on the server for binaries already installed, so bringing the form back would be a UI change
+/// rather than a protocol one. What is kept here is the refresh token, under DPAPI at user
+/// scope; what goes down to the service is the licence token, write-only.
 /// </summary>
 public sealed class LoginViewModel : INotifyPropertyChanged
 {
@@ -49,32 +52,12 @@ public sealed class LoginViewModel : INotifyPropertyChanged
         ? $"This device: {_devicePublicKey[..8]}... ({Environment.MachineName})"
         : $"This device: {Environment.MachineName}";
 
-    private string _email = string.Empty;
-    public string Email
-    {
-        get => _email;
-        set { if (Set(ref _email, value)) { Raise(nameof(CanSubmit)); Error = null; } }
-    }
-
-    private string _password = string.Empty;
-    public string Password
-    {
-        get => _password;
-        set { if (Set(ref _password, value)) { Raise(nameof(CanSubmit)); Error = null; } }
-    }
-
     private bool _busy;
     public bool Busy
     {
         get => _busy;
-        private set { if (Set(ref _busy, value)) { Raise(nameof(CanSubmit)); Raise(nameof(ButtonText)); } }
+        private set => Set(ref _busy, value);
     }
-
-    public string ButtonText => Busy ? "Signing in..." : "Sign in";
-
-    public bool CanSubmit => !Busy
-        && !string.IsNullOrWhiteSpace(Email)
-        && !string.IsNullOrEmpty(Password);
 
     private string? _status;
 
@@ -102,42 +85,13 @@ public sealed class LoginViewModel : INotifyPropertyChanged
     /// <summary>True once a token has been stored, which is what the window closes on.</summary>
     public bool Succeeded { get; private set; }
 
-    public async Task SubmitAsync(CancellationToken ct)
-    {
-        if (!CanSubmit) return;
-
-        Busy = true;
-        Error = null;
-        try
-        {
-            using var client = new LicenceClient(_licenceUrl);
-
-            var login = await client.LoginAsync(Email.Trim(), Password, ct).ConfigureAwait(true);
-            await FinishAsync(client, login.RefreshToken, ct).ConfigureAwait(true);
-        }
-        catch (LicenceException ex)
-        {
-            Error = ex.Message;
-        }
-        catch (OperationCanceledException)
-        {
-            Error = "Cancelled.";
-        }
-        catch (Exception ex)
-        {
-            Error = $"Could not reach {_licenceUrl}: {ex.Message}";
-        }
-        finally
-        {
-            Busy = false;
-        }
-    }
-
     /// <summary>
-    /// Signs in through the person's own browser instead of the form above. See LoopbackAuth.
+    /// Signs in through the person's own browser. See LoopbackAuth for how, and why loopback.
     ///
-    /// Everything after the refresh token arrives is shared with the password path, on purpose:
-    /// a second way IN must not become a second version of what happens next.
+    /// FinishAsync is kept separate rather than folded in here. It was shared with the password
+    /// form until that came out, and it is the part that would have to be shared again the day a
+    /// second way in exists - a licence key, a recovery flow, anything. Inlining it now would
+    /// only have to be undone.
     /// </summary>
     public async Task SignInWithBrowserAsync(CancellationToken ct)
     {
@@ -191,9 +145,10 @@ public sealed class LoginViewModel : INotifyPropertyChanged
     /// <summary>
     /// Everything that happens once a refresh token exists, whichever way it was obtained.
     ///
-    /// Shared between the password form and the browser flow deliberately. These four steps have
-    /// an order and a reason for it, and having them written twice is how the two paths would
-    /// quietly stop agreeing about what a finished sign-in means.
+    /// These four steps have an order and a reason for it. Written out here rather than inline so
+    /// that a second way of obtaining a refresh token cannot quietly disagree about what a
+    /// finished sign-in means - which is exactly what this method was extracted to prevent while
+    /// the password form and the browser flow both existed.
     /// </summary>
     private async Task FinishAsync(LicenceClient client, string refreshToken, CancellationToken ct)
     {
@@ -215,9 +170,6 @@ public sealed class LoginViewModel : INotifyPropertyChanged
             Token = token.Token,
         }).ConfigureAwait(true);
 
-        // The password has done its job. It was never stored; this drops it from memory too, and
-        // from the box on screen. Harmless on the browser path, where it was never filled in.
-        Password = string.Empty;
         Succeeded = true;
 
         // Fetch the game list now, while the person is watching and expects something to happen.

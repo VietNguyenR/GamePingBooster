@@ -23,25 +23,14 @@ public partial class LoginWindow : SurfaceWindow
 
     private void InitializeComponent() => AvaloniaXamlLoader.Load(this);
 
-    private async void OnSubmitClick(object? sender, RoutedEventArgs e)
-    {
-        if (DataContext is not LoginViewModel vm) return;
-
-        await vm.SubmitAsync(_cts.Token);
-
-        // Close only on success. On failure the window stays with the message in it, because
-        // closing would leave somebody looking at the main window wondering what happened.
-        if (vm.Succeeded) Close();
-    }
-
     private async void OnBrowserClick(object? sender, RoutedEventArgs e)
     {
         if (DataContext is not LoginViewModel vm) return;
 
         await vm.SignInWithBrowserAsync(_cts.Token);
 
-        // Same rule as the form: close only on success, so a failure leaves its message on
-        // screen next to the form that can still get past it.
+        // Close only on success. On failure the window stays with the message in it, because
+        // closing would leave somebody looking at the main window wondering what happened.
         if (vm.Succeeded) Close();
     }
 

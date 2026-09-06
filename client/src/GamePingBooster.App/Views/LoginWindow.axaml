@@ -11,22 +11,10 @@
         CanResize="False">
 
   <views:SurfaceWindow.Styles>
-    <Style Selector="TextBlock.label">
-      <Setter Property="Foreground" Value="#ababab" />
-      <Setter Property="FontSize" Value="12" />
-      <Setter Property="Margin" Value="0,0,0,4" />
-    </Style>
     <Style Selector="TextBlock.hint">
       <Setter Property="Foreground" Value="#787878" />
       <Setter Property="FontSize" Value="11" />
       <Setter Property="TextWrapping" Value="Wrap" />
-    </Style>
-    <Style Selector="TextBox">
-      <Setter Property="Background" Value="#242424" />
-      <Setter Property="Foreground" Value="#ababab" />
-      <Setter Property="BorderThickness" Value="0" />
-      <Setter Property="CornerRadius" Value="8" />
-      <Setter Property="Padding" Value="10,8" />
     </Style>
     <Style Selector="Button">
       <Setter Property="CornerRadius" Value="8" />
@@ -46,13 +34,15 @@
   <StackPanel Grid.Row="1" Margin="24,4,24,24" Spacing="14">
     <TextBlock Classes="hint" Text="{Binding ServerText}" />
 
-    <!-- The browser route first, because it is the one that should become the default: this app
-         never sees the password, and the device-limit refusal happens on a page that can explain
-         it rather than in a dialog after somebody has already typed one.
+    <!-- Sign-in happens in the browser, and there is no password box here on purpose: this app
+         installs a network driver and asks for administrator rights, and it should not also be
+         the thing you hand a password to. The device-limit refusal lands on a page that can
+         explain it rather than in a dialog after somebody has already typed one.
 
-         The form below stays. It is the fallback for a machine with no usable browser, it is the
-         contract shipped binaries already speak, and it does not come out until the browser flow
-         has been confirmed working on a real machine. -->
+         The email/password form that used to sit here came out on 2026-09-06, once the browser
+         flow was confirmed working on a real machine. /auth/login still exists on the server -
+         it is a contract with binaries already installed - so restoring the form is a UI change,
+         not a protocol one. -->
     <Button Content="Sign in with your browser" Click="OnBrowserClick"
             IsEnabled="{Binding !Busy}" HorizontalAlignment="Stretch"
             HorizontalContentAlignment="Center"
@@ -60,18 +50,6 @@
 
     <TextBlock Classes="hint" Text="{Binding Status}" IsVisible="{Binding HasStatus}"
                TextWrapping="Wrap" />
-
-    <TextBlock Classes="hint" Text="or sign in here" HorizontalAlignment="Center" />
-
-    <StackPanel Spacing="0">
-      <TextBlock Classes="label" Text="Email" />
-      <TextBox Text="{Binding Email}" PlaceholderText="you@example.com" />
-    </StackPanel>
-
-    <StackPanel Spacing="0">
-      <TextBlock Classes="label" Text="Password" />
-      <TextBox Text="{Binding Password}" PasswordChar="*" />
-    </StackPanel>
 
     <!-- Which machine this is. "This account already has 2 devices" is unanswerable without it,
          and a public key costs nothing to show. -->
@@ -85,9 +63,6 @@
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
       <Button Content="Cancel" Click="OnCancelClick"
               Background="#111111" Foreground="#ababab" />
-      <Button Content="{Binding ButtonText}" Click="OnSubmitClick"
-              IsEnabled="{Binding CanSubmit}"
-              Background="#2563EB" Foreground="White" />
     </StackPanel>
 
   </StackPanel>
