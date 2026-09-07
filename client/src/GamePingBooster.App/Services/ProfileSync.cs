@@ -16,6 +16,12 @@ namespace GamePingBooster.App.Services;
 /// open.** A machine whose owner never launches the UI keeps whatever it last had. That is
 /// acceptable because a profile changes at most daily and the app is open whenever somebody is
 /// about to play - which is exactly when a stale profile would matter.
+///
+/// There are exactly two callers, and knowing that is what makes MinInterval below safe to
+/// reason about: the start-up pass in App.axaml.cs, which is unforced, and the pass right after
+/// a sign-in, which forces. There is no periodic refresh, so an app left open for a day does not
+/// pick up a server-side change until it is next started. Worth building only if that becomes a
+/// real complaint; opening the app is what people do before they play.
 /// </summary>
 public sealed class ProfileSync
 {
@@ -34,8 +40,20 @@ public sealed class ProfileSync
     ///
     /// The age now comes from the SERVICE, which reports when the pushed profile was last
     /// written. That answer outlives this process, which is the entire requirement.
+    ///
+    /// **Ten minutes, and it used to be six hours.** This is the ONLY thing gating the start-up
+    /// sync - there is no periodic refresh and no other unforced caller - so six hours did not
+    /// mean "refresh every six hours", it meant a profile edited on the server was invisible for
+    /// up to six hours no matter how many times the app was reopened. Signing out and back in
+    /// was the only way to see a change, because that path forces. Reported from a real edit on
+    /// 2026-09-07: relays changed in the database, and reopening the app kept the old ones.
+    ///
+    /// Ten minutes is picked against the server's own cap rather than by feel: the gate is on
+    /// the age of the STORED profile, which only moves on a successful fetch, so the worst case
+    /// is six fetches an hour - half the allowance of twelve, leaving the rest for the forced
+    /// sync after a sign-in. Restarting the app in a loop still cannot reach a 429.
     /// </summary>
-    private static readonly TimeSpan MinInterval = TimeSpan.FromHours(6);
+    private static readonly TimeSpan MinInterval = TimeSpan.FromMinutes(10);
 
     private readonly PipeClient _pipe;
     private readonly Action<string> _report;
