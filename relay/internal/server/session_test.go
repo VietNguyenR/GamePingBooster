@@ -52,11 +52,11 @@ func TestHandshakeRetryDoesNotOrphanTheFirstSession(t *testing.T) {
 	id := clientID(1)
 	from := netip.MustParseAddrPort("203.0.113.7:40000")
 
-	first, ok := s.allocSession(from, id)
+	first, ok := s.allocSession(from, id, sessionIdent{})
 	if !ok {
 		t.Fatal("first handshake was refused")
 	}
-	second, ok := s.allocSession(from, id)
+	second, ok := s.allocSession(from, id, sessionIdent{})
 	if !ok {
 		t.Fatal("second handshake was refused")
 	}
@@ -85,18 +85,18 @@ func TestIdleTimeoutKeepsTheReservation(t *testing.T) {
 	id := clientID(2)
 	from := netip.MustParseAddrPort("203.0.113.7:40000")
 
-	first, _ := s.allocSession(from, id)
+	first, _ := s.allocSession(from, id, sessionIdent{})
 	original := first.innerIP
 
 	s.releaseSession(first, false) // false = idle timeout, not an explicit disconnect
 
 	// Another client takes an address in the meantime; it must not be the reserved one.
-	other, _ := s.allocSession(netip.MustParseAddrPort("203.0.113.8:40000"), clientID(3))
+	other, _ := s.allocSession(netip.MustParseAddrPort("203.0.113.8:40000"), clientID(3), sessionIdent{})
 	if other.innerIP == original {
 		t.Fatalf("another client was handed the reserved address %s", original)
 	}
 
-	back, ok := s.allocSession(from, id)
+	back, ok := s.allocSession(from, id, sessionIdent{})
 	if !ok {
 		t.Fatal("the returning client was refused")
 	}
@@ -114,7 +114,7 @@ func TestExplicitDisconnectDropsTheReservation(t *testing.T) {
 	id := clientID(4)
 	from := netip.MustParseAddrPort("203.0.113.7:40000")
 
-	sess, _ := s.allocSession(from, id)
+	sess, _ := s.allocSession(from, id, sessionIdent{})
 	s.releaseSession(sess, true)
 
 	if _, ok := s.reservedIPs[id]; ok {
@@ -127,8 +127,8 @@ func TestExplicitDisconnectDropsTheReservation(t *testing.T) {
 func TestPoolExhaustionEvictsIdleReservations(t *testing.T) {
 	s := testServer(2)
 
-	a, _ := s.allocSession(netip.MustParseAddrPort("203.0.113.1:1"), clientID(10))
-	b, _ := s.allocSession(netip.MustParseAddrPort("203.0.113.2:1"), clientID(11))
+	a, _ := s.allocSession(netip.MustParseAddrPort("203.0.113.1:1"), clientID(10), sessionIdent{})
+	b, _ := s.allocSession(netip.MustParseAddrPort("203.0.113.2:1"), clientID(11), sessionIdent{})
 	if a == nil || b == nil {
 		t.Fatal("could not fill the pool")
 	}
@@ -139,11 +139,11 @@ func TestPoolExhaustionEvictsIdleReservations(t *testing.T) {
 	// Three new clients arrive. The first two may reuse the free addresses; the third must
 	// still be served by evicting a reservation nobody is using.
 	for i := 0; i < 2; i++ {
-		if _, ok := s.allocSession(netip.MustParseAddrPort("203.0.113.3:1"), clientID(byte(20+i))); !ok {
+		if _, ok := s.allocSession(netip.MustParseAddrPort("203.0.113.3:1"), clientID(byte(20+i)), sessionIdent{}); !ok {
 			t.Fatalf("client %d was refused while addresses were free", i)
 		}
 	}
-	if _, ok := s.allocSession(netip.MustParseAddrPort("203.0.113.9:1"), clientID(99)); ok {
+	if _, ok := s.allocSession(netip.MustParseAddrPort("203.0.113.9:1"), clientID(99), sessionIdent{}); ok {
 		t.Log("pool served a third client, which is only possible if it evicted a reservation")
 	}
 }
@@ -153,7 +153,7 @@ func TestPoolExhaustionEvictsIdleReservations(t *testing.T) {
 // traffic - a bug that only shows up under load, in production, on someone else's machine.
 func TestDoubleReleaseDoesNotDuplicateAddresses(t *testing.T) {
 	s := testServer(4)
-	sess, _ := s.allocSession(netip.MustParseAddrPort("203.0.113.1:1"), clientID(5))
+	sess, _ := s.allocSession(netip.MustParseAddrPort("203.0.113.1:1"), clientID(5), sessionIdent{})
 
 	s.releaseSession(sess, false)
 	s.releaseSession(sess, false)
@@ -221,7 +221,7 @@ func TestAddressPoolSurvivesChurn(t *testing.T) {
 	for i, step := range steps {
 		switch step.action {
 		case "connect":
-			sess, ok := s.allocSession(netip.MustParseAddrPort("203.0.113.1:1"), clientID(step.client))
+			sess, ok := s.allocSession(netip.MustParseAddrPort("203.0.113.1:1"), clientID(step.client), sessionIdent{})
 			if ok {
 				live[step.client] = sess
 			}
@@ -257,7 +257,7 @@ func TestReservationSurvivesOtherClients(t *testing.T) {
 	s := testServer(4)
 	me := clientID(42)
 
-	first, ok := s.allocSession(netip.MustParseAddrPort("203.0.113.1:1"), me)
+	first, ok := s.allocSession(netip.MustParseAddrPort("203.0.113.1:1"), me, sessionIdent{})
 	if !ok {
 		t.Fatal("refused")
 	}
@@ -266,7 +266,7 @@ func TestReservationSurvivesOtherClients(t *testing.T) {
 
 	// Three other clients connect while we are away. None may take our address.
 	for i := 0; i < 3; i++ {
-		other, ok := s.allocSession(netip.MustParseAddrPort("203.0.113.2:1"), clientID(byte(50+i)))
+		other, ok := s.allocSession(netip.MustParseAddrPort("203.0.113.2:1"), clientID(byte(50+i)), sessionIdent{})
 		if !ok {
 			t.Fatalf("client %d refused while the pool had room", i)
 		}
@@ -275,7 +275,7 @@ func TestReservationSurvivesOtherClients(t *testing.T) {
 		}
 	}
 
-	back, ok := s.allocSession(netip.MustParseAddrPort("203.0.113.1:2"), me)
+	back, ok := s.allocSession(netip.MustParseAddrPort("203.0.113.1:2"), me, sessionIdent{})
 	if !ok {
 		t.Fatal("we were refused on return")
 	}

@@ -36,6 +36,7 @@ BIN_SRC="${HERE}/../relayd"
 
 MAX_CLIENTS=0
 PSK_FILE=""
+REPORT_URL=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --max-clients)
@@ -46,13 +47,24 @@ while [[ $# -gt 0 ]]; do
       PSK_FILE="${2:-}"
       shift 2
       ;;
+    --report-url)
+      REPORT_URL="${2:-}"
+      shift 2
+      ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "usage: $0 [--max-clients N] [--psk-file PATH]" >&2
+      echo "usage: $0 [--max-clients N] [--psk-file PATH] [--report-url URL]" >&2
       exit 2
       ;;
   esac
 done
+
+# Rejected here rather than at startup. A typo that turns reporting off does not stop the relay
+# working, so nobody would notice for weeks - the dashboard would simply say the box is dead.
+if [[ -n "$REPORT_URL" && "$REPORT_URL" != https://* && "$REPORT_URL" != http://* ]]; then
+  echo "--report-url must be a URL, got '${REPORT_URL}'" >&2
+  exit 2
+fi
 
 if ! [[ "$MAX_CLIENTS" =~ ^[0-9]+$ ]]; then
   echo "--max-clients must be a whole number, got '${MAX_CLIENTS}'" >&2
@@ -115,6 +127,43 @@ if [[ ! -s /etc/gpb/psk ]]; then
   exit 1
 fi
 
+# ------------------------------------------------------------------ status reporting
+#
+# Written to a file the unit reads, not baked into the unit: the unit ships in the open-source
+# repository and this URL is the one piece of relay configuration that is not public.
+#
+# An existing file is left alone when no URL is passed. Deploying a new binary must not silently
+# turn reporting off - that failure looks exactly like the relay having died.
+if [[ -n "$REPORT_URL" ]]; then
+  echo "==> Enabling status reporting to ${REPORT_URL}"
+  umask 077
+  cat > /etc/gpb/relayd.env <<EOF
+# Read by the relayd systemd unit. Written by install.sh --report-url.
+# Where this relay posts a status snapshot every 20 seconds. Remove the line to stop reporting.
+GPB_REPORT_URL=${REPORT_URL}
+EOF
+  chmod 0600 /etc/gpb/relayd.env
+elif [[ -f /etc/gpb/relayd.env ]]; then
+  echo "==> Keeping the existing status reporting settings in /etc/gpb/relayd.env"
+fi
+
+# The relay's own key, created HERE and not by the service.
+#
+# This is not tidiness, it is the difference between a relay that starts and one that does not.
+# The unit sets ProtectSystem=full, which makes /etc read-only for the service - so relayd cannot
+# create the key on its first start and exits, and systemd restarts it forever. Measured on a
+# real VPS: "could not save the new relay key to /etc/gpb/relay.key: read-only file system".
+#
+# This command runs outside the unit, as root, with /etc writable, so the file always exists
+# before systemd ever looks at it. Unconditional, because the key is needed by licensed mode and
+# by reporting, and creating one on a relay that uses neither costs 32 bytes.
+echo "==> Ensuring this relay has its own key"
+RELAY_PUBKEY="$(/usr/local/bin/relayd -print-relay-key 2>/dev/null || true)"
+if [[ -z "$RELAY_PUBKEY" ]]; then
+  echo "Could not create or read /etc/gpb/relay.key - refusing to install a relay that cannot start." >&2
+  exit 1
+fi
+
 echo "==> Configuring the kernel and NAT"
 bash "${HERE}/setup-nat.sh"
 
@@ -153,6 +202,15 @@ else
   echo "   Clients at once         :  ${MAX_CLIENTS}"
 fi
 echo "   PSK (keep it secret)    :  $(cat /etc/gpb/psk)"
+if [[ -s /etc/gpb/relayd.env ]]; then
+  # The identity the licence server checks a status report against. Printed here because there
+  # is nowhere else to read it from once the log has rotated, and a report signed by a key the
+  # dashboard does not have is refused with no visible symptom except a relay that looks offline.
+  echo
+  echo "   Reporting to            :  $(sed -n 's/^GPB_REPORT_URL=//p' /etc/gpb/relayd.env)"
+  echo "   Relay public key        :  ${RELAY_PUBKEY}"
+  echo "   ^ paste that into this relay's row in the admin dashboard, or its reports are refused."
+fi
 echo
 echo " Follow the log : journalctl -u relayd -f"
 echo " Restart        : systemctl restart relayd"

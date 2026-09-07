@@ -66,7 +66,12 @@ Write-Host "==> Building relayd for linux/$Arch" -ForegroundColor Cyan
 $env:CGO_ENABLED = '0'
 $env:GOOS = 'linux'
 $env:GOARCH = $Arch
-go build -trimpath -ldflags='-s -w' -o relayd ./cmd/relayd
+# The version is stamped in so a relay can report which build it is running; it is only ever
+# displayed, in the startup log and on the admin dashboard.
+$version = 'dev'
+$versionFile = Join-Path $repoRoot 'VERSION'
+if (Test-Path $versionFile) { $version = (Get-Content $versionFile -Raw).Trim() }
+go build -trimpath -ldflags "-s -w -X main.version=$version" -o relayd ./cmd/relayd
 if ($LASTEXITCODE -ne 0) { throw "go build failed" }
 
 $size = [math]::Round((Get-Item relayd).Length / 1MB, 1)
@@ -113,6 +118,7 @@ function Invoke-RemoteInstall {
     # so a variable would arrive empty and the relay would come up with no cap while the deploy
     # reported success. See install.sh.
     $maxArg = "--max-clients $($Relay.MaxClients)"
+    if ($Relay.ReportUrl) { $maxArg += " --report-url $($Relay.ReportUrl)" }
 
     if (-not $Relay.SudoPassword) {
         Write-Host "==> sudo needs a password on $($Relay.Name). Type it when it asks." -ForegroundColor Cyan
@@ -190,6 +196,7 @@ try {
     # it can hold no double quotes of its own, and that property is what keeps it intact on the
     # trip through cmd. Interpolating would mean a double-quoted string and a quoting problem.
     $m = " --max-clients $($relay.MaxClients)"
+    if ($relay.ReportUrl) { $m += " --report-url $($relay.ReportUrl)" }
     $remote = 'set -e; mkdir -p ~/.gpb-deploy; tar -xzf - -C ~/.gpb-deploy; cd ~/.gpb-deploy/deploy; sed -i ''s/\r$//'' *.sh; chmod +x *.sh; if [ $(id -u) -eq 0 ]; then ./install.sh' + $m + '; exit; fi; if command -v sudo >/dev/null 2>&1; then :; else exit 91; fi; if sudo -n true 2>/dev/null; then sudo -n ./install.sh' + $m + '; exit; fi; exit 90'
 
     if ([int]$relay.MaxClients -gt 0) {

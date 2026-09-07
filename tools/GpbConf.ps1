@@ -90,6 +90,18 @@ function Get-GpbRelay {
     $sudoPassword = $conf["RELAY_${slug}_SUDO_PASSWORD"]
     if (-not $sudoPassword) { $sudoPassword = $password }
 
+    # Where this relay posts its status snapshot. Optional: a relay with no URL reports nothing,
+    # which is what a self-hosted one wants. RELAY_REPORT_URL sets it for every relay at once and
+    # RELAY_<NAME>_REPORT_URL overrides it for one - the same shape as RELAY_PASSWORD.
+    #
+    # It lives in gpb.conf, which is gitignored, because it names the licence server's ingest
+    # endpoint and the relay repository is public.
+    $reportUrl = $conf["RELAY_${slug}_REPORT_URL"]
+    if (-not $reportUrl) { $reportUrl = $conf['RELAY_REPORT_URL'] }
+    if ($reportUrl -and $reportUrl -notmatch '^https?://') {
+        throw "RELAY_${slug}_REPORT_URL is '$reportUrl'. It must be a URL starting http:// or https://."
+    }
+
     if (-not $hostName) {
         # Not declared here: an ssh alias, or user@host. Let ssh's own configuration answer for
         # the port, the user and the key.
@@ -104,6 +116,7 @@ function Get-GpbRelay {
             Listen       = ''
             Endpoint     = ''
             MaxClients   = '0'
+            ReportUrl    = $reportUrl
             SshArgs      = @($Name)
         }
     }
@@ -153,6 +166,7 @@ function Get-GpbRelay {
         Listen       = $listen
         Endpoint     = "${hostName}:${listen}"
         MaxClients   = $max
+        ReportUrl    = $reportUrl
         SshArgs      = $sshArgs
     }
 }
@@ -217,6 +231,8 @@ function ConvertTo-GpbCmdArgs {
     return ($quoted -join ' ')
 }
 
+
+
 <#
 .SYNOPSIS
     Run ssh with one line written to its stdin as raw UTF-8 bytes. Returns ssh's exit code.
@@ -264,3 +280,4 @@ function Invoke-GpbSshWithStdin {
     $proc.WaitForExit()
     return $proc.ExitCode
 }
+

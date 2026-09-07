@@ -6,6 +6,17 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+
+# Where this relay posts its status snapshot, as GPB_REPORT_URL. Optional - the leading '-' means
+# a missing file is not an error, and a relay with no file reports nothing.
+#
+# An EnvironmentFile rather than a flag on ExecStart below, for two reasons. The URL is the one
+# piece of relay configuration that is not public: it names the licence server's ingest endpoint,
+# and this unit ships in the open-source repository. And systemd cannot pass an empty variable as
+# "no flag" - `-report-url ${VAR}` with VAR unset hands relayd a flag with no value, which then
+# eats the next argument.
+EnvironmentFile=-/etc/gpb/relayd.env
+
 ExecStart=/usr/local/bin/relayd \
   -listen :51820 \
   -tun gpb0 \

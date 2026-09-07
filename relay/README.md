@@ -127,10 +127,38 @@ logging each one would cost latency on the path whose latency is the entire poin
 | `-log-level` | `info` | `debug` also logs why a handshake was rejected |
 | `-rate-limit` | `512` | Per-session cap in **KB/s each way**. `0` disables it |
 | `-rate-burst` | `0` | Burst allowance in KB; `0` means four seconds at the sustained rate |
+| `-max-clients` | `0` | Refuse new sessions past this many at once; `0` means the address pool is the only limit |
+| `-report-url` | - | POST a status snapshot here every `-report-interval`. Empty - the default - means the relay makes no outbound calls at all (env `GPB_REPORT_URL`) |
+| `-report-interval` | `20s` | How often that snapshot goes out. Minimum 5s |
+| `-report-insecure` | `false` | Allow a plain `http://` report URL. The body is signed, not encrypted, so this is for a development server and nothing else |
 
 `relayd -h` lists two further flags that belong to an authentication mode this repository does
 not document. Running your own relay does not involve them: use `-psk-file`, which is what the
 deploy script sets up for you.
+
+### Status reporting
+
+Off unless you give it a URL, which is the right default for a relay you run yourself: it is in
+nobody's dashboard and has nothing to report to.
+
+With a URL, the relay posts an **absolute snapshot** of itself - session count, and one entry per
+live session - every twenty seconds. Never an event, never a delta: a relay does not say "a
+client connected", it says "these seven sessions exist". That is what lets the far end survive a
+restart, a dropped request or a client that vanished mid-match without anything to reconcile.
+
+Three properties are load-bearing and worth not breaking:
+
+- **The URL is operator configuration.** It comes from this flag or from the environment, never
+  from a client. A client that could name it could point the relay at any host on the internet -
+  a cloud metadata service on `169.254.169.254` included, which the data plane's own destination
+  filter does not cover because it is not a data-plane packet.
+- **Reports are signed with the relay's own P-256 key** (`-relay-key`, created on first use),
+  over a domain-separated message so a report can never be replayed as a handshake answer. The
+  far end verifies before it parses.
+- **Nothing about it can affect a handshake.** It runs on its own goroutine with its own HTTP
+  client and a five-second timeout, takes the session lock once per interval rather than once per
+  packet, and drops a failed send rather than queueing it. If the far end is down, players are
+  unaffected and the log says so once rather than every twenty seconds.
 
 ## Rate limiting
 

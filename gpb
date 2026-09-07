@@ -122,6 +122,28 @@ relay_max_clients() {
     printf '%s' "$n"
 }
 
+# Where this relay posts its status snapshot. Optional: a relay with no URL reports nothing,
+# which is what a self-hosted one wants. RELAY_REPORT_URL sets it for every relay at once, and
+# RELAY_<NAME>_REPORT_URL overrides it for one - the same shape as RELAY_PASSWORD.
+#
+# It lives in gpb.conf, which is gitignored, because it names the licence server's ingest
+# endpoint and this repository is public.
+relay_report_url() {
+    url=$(relay_field "$1" REPORT_URL)
+    [ -n "$url" ] || url=${RELAY_REPORT_URL:-}
+    printf '%s' "$url"
+}
+
+# Everything install.sh is told, as one string. Arguments rather than environment variables
+# throughout: sudo resets the environment, so a variable arrives empty on the far end and the
+# relay comes up misconfigured while the deploy reports success.
+relay_install_args() {
+    args="--max-clients $(relay_max_clients "$1")"
+    url=$(relay_report_url "$1")
+    [ -z "$url" ] || args="$args --report-url $url"
+    printf '%s' "$args"
+}
+
 relay_endpoint() {
     host=$(relay_field "$1" HOST)
     [ -n "$host" ] || return 0
@@ -205,35 +227,35 @@ remote_stage() {
     cd ~/.gpb-deploy/deploy
     sed -i 's/\r\$//' *.sh
     chmod +x *.sh
-    if [ \$(id -u) -eq 0 ]; then ./install.sh --max-clients $1; exit; fi
+    if [ \$(id -u) -eq 0 ]; then ./install.sh $1; exit; fi
     if command -v sudo >/dev/null 2>&1; then :; else exit 91; fi
-    if sudo -n true 2>/dev/null; then sudo -n ./install.sh --max-clients $1; exit; fi
+    if sudo -n true 2>/dev/null; then sudo -n ./install.sh $1; exit; fi
     exit 90"
 }
 
 # -p '' suppresses sudo's own prompt, which would otherwise appear in the output as a stray
 # 'Password:' with nothing typed after it.
 remote_install_stdin() {
-    printf '%s' "cd ~/.gpb-deploy/deploy && sudo -S -p '' ./install.sh --max-clients $1"
+    printf '%s' "cd ~/.gpb-deploy/deploy && sudo -S -p '' ./install.sh $1"
 }
 remote_install_tty() {
-    printf '%s' "cd ~/.gpb-deploy/deploy && sudo ./install.sh --max-clients $1"
+    printf '%s' "cd ~/.gpb-deploy/deploy && sudo ./install.sh $1"
 }
 
 # Reached only when the tarball is already unpacked on the far end and all that is left is to run
 # install.sh as root.
 relay_install_with_sudo() {
     name=$1
-    max=$(relay_max_clients "$name")
+    args=$(relay_install_args "$name")
     pw=$(relay_sudo_password "$name")
     if [ -n "$pw" ]; then
         say "sudo needs a password on $name; using the one from gpb.conf"
-        printf '%s\n' "$pw" | relay_ssh "$name" "$(remote_install_stdin "$max")" || die \
+        printf '%s\n' "$pw" | relay_ssh "$name" "$(remote_install_stdin "$args")" || die \
             "the install step failed. If sudo rejected the password, set RELAY_<NAME>_SUDO_PASSWORD in gpb.conf."
     else
         say "sudo needs a password on $name. Type it when it asks."
         ssh_tty_flag=-t
-        relay_ssh "$name" "$(remote_install_tty "$max")" || {
+        relay_ssh "$name" "$(remote_install_tty "$args")" || {
             ssh_tty_flag=
             die "the install step failed - see the output above"
         }
@@ -310,10 +332,18 @@ delegate() {
     exec powershell -NoProfile -ExecutionPolicy Bypass -File "$root/gpb.ps1" "$verb" "$@"
 }
 
+# The version from the VERSION file is stamped into the binary. It is only ever displayed - in
+# the startup log line and in the status report the dashboard shows - but without it every relay
+# reports itself as "dev" and there is no way to tell which box is still running an old build.
+relay_version() {
+    if [ -f "$root/VERSION" ]; then tr -d ' 	
+' < "$root/VERSION"; else printf 'dev'; fi
+}
+
 relay_build() {
     need go "Install Go 1.22 or newer from https://go.dev/dl/"
     say "Cross-compiling relayd for Linux"
-    ( cd "$relay" && CGO_ENABLED=0 GOOS=linux go build -o relayd ./cmd/relayd )
+    ( cd "$relay" && CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.version=$(relay_version)" -o relayd ./cmd/relayd )
     say "Built $relay/relayd"
 }
 
@@ -343,7 +373,7 @@ relay_list() {
         warn "gpb.conf declares no relays. Copy gpb.conf.example to gpb.conf and fill in one block."
         return 0
     fi
-    printf '%-10s %-24s %-22s %-12s %s\n' NAME 'SSH' 'CLIENT ENDPOINT' 'AUTH' 'MAX CLIENTS'
+    printf '%-10s %-24s %-22s %-12s %-12s %s\n' NAME 'SSH' 'CLIENT ENDPOINT' 'AUTH' 'MAX CLIENTS' 'REPORTS TO'
     for n in $names; do
         user=$(relay_field "$n" USER); [ -n "$user" ] || user=root
         port=$(relay_field "$n" PORT); [ -n "$port" ] || port=22
@@ -362,8 +392,11 @@ relay_list() {
         # silently read as 0 looks exactly like a relay with no cap configured.
         max=$(relay_max_clients "$n")
         if [ "$max" -eq 0 ]; then max='no limit'; fi
-        printf '%-10s %-24s %-22s %-12s %s\n' \
-            "$n$mark" "$user@$(relay_field "$n" HOST):$port" "$(relay_endpoint "$n")" "$auth" "$max"
+        # A relay that reports nowhere is invisible in the dashboard, which looks exactly like
+        # a relay that has died. Worth seeing here, where it is one line to fix.
+        reports=$(relay_report_url "$n"); [ -n "$reports" ] || reports='-'
+        printf '%-10s %-24s %-22s %-12s %-12s %s\n' \
+            "$n$mark" "$user@$(relay_field "$n" HOST):$port" "$(relay_endpoint "$n")" "$auth" "$max" "$reports"
     done
     printf '\n* = RELAY_DEFAULT, used when a command is given no name.\n'
 }
@@ -464,7 +497,7 @@ relay_deploy() {
     # and 90 is not a failure, it is the far end asking for a second connection.
     rc=0
     tar -czf - -C "$relay" relayd deploy/setup-nat.sh deploy/install.sh deploy/relayd.service |
-        relay_ssh "$target" "$(remote_stage "$max")" || rc=$?
+        relay_ssh "$target" "$(remote_stage "$(relay_install_args "$target")")" || rc=$?
 
     case "$rc" in
         0) ;;

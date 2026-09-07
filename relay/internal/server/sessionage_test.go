@@ -28,7 +28,7 @@ func TestSessionIsDroppedWhenItReachesMaximumAge(t *testing.T) {
 	s := testServer(4)
 	s.cfg.MaxSessionAge = 24 * time.Hour
 
-	sess, ok := s.allocSession(addr(t, "203.0.113.9:41000"), clientID(1))
+	sess, ok := s.allocSession(addr(t, "203.0.113.9:41000"), clientID(1), sessionIdent{})
 	if !ok {
 		t.Fatal("could not allocate a session")
 	}
@@ -63,7 +63,7 @@ func TestZeroMaximumAgeDoesNotExpireEverything(t *testing.T) {
 	s := testServer(4)
 	s.cfg.MaxSessionAge = 0
 
-	sess, ok := s.allocSession(addr(t, "203.0.113.9:41000"), clientID(1))
+	sess, ok := s.allocSession(addr(t, "203.0.113.9:41000"), clientID(1), sessionIdent{})
 	if !ok {
 		t.Fatal("could not allocate a session")
 	}
@@ -83,7 +83,7 @@ func TestIdleAndTooOldAreNotBothCounted(t *testing.T) {
 	s.cfg.IdleTimeout = 90 * time.Second
 	s.cfg.MaxSessionAge = 24 * time.Hour
 
-	sess, ok := s.allocSession(addr(t, "203.0.113.9:41000"), clientID(1))
+	sess, ok := s.allocSession(addr(t, "203.0.113.9:41000"), clientID(1), sessionIdent{})
 	if !ok {
 		t.Fatal("could not allocate a session")
 	}

@@ -13,12 +13,12 @@ func TestMaxClientsRefusesPastTheCap(t *testing.T) {
 	s.cfg.MaxClients = 3
 
 	for i := 1; i <= 3; i++ {
-		if _, ok := s.allocSession(addr(t, "203.0.113.9:41000"), clientID(byte(i))); !ok {
+		if _, ok := s.allocSession(addr(t, "203.0.113.9:41000"), clientID(byte(i)), sessionIdent{}); !ok {
 			t.Fatalf("client %d was refused below the cap of 3", i)
 		}
 	}
 
-	if _, ok := s.allocSession(addr(t, "203.0.113.9:41000"), clientID(4)); ok {
+	if _, ok := s.allocSession(addr(t, "203.0.113.9:41000"), clientID(4), sessionIdent{}); ok {
 		t.Fatal("a fourth client was admitted with max-clients 3")
 	}
 	if len(s.freeIPs) == 0 {
@@ -37,16 +37,16 @@ func TestMaxClientsDoesNotRefuseAClientThatAlreadyHasASession(t *testing.T) {
 	s := testServer(50)
 	s.cfg.MaxClients = 2
 
-	first, ok := s.allocSession(addr(t, "203.0.113.9:41000"), clientID(1))
+	first, ok := s.allocSession(addr(t, "203.0.113.9:41000"), clientID(1), sessionIdent{})
 	if !ok {
 		t.Fatal("could not allocate the first session")
 	}
-	if _, ok := s.allocSession(addr(t, "203.0.113.9:41001"), clientID(2)); !ok {
+	if _, ok := s.allocSession(addr(t, "203.0.113.9:41001"), clientID(2), sessionIdent{}); !ok {
 		t.Fatal("could not allocate the second session")
 	}
 
 	// At the cap now. The retry from client 1 must come back with the SAME session.
-	again, ok := s.allocSession(addr(t, "203.0.113.9:41002"), clientID(1))
+	again, ok := s.allocSession(addr(t, "203.0.113.9:41002"), clientID(1), sessionIdent{})
 	if !ok {
 		t.Fatal("a handshake retry from an existing client was refused at the cap")
 	}
@@ -62,12 +62,12 @@ func TestMaxClientsZeroMeansUnlimited(t *testing.T) {
 	s.cfg.MaxClients = 0
 
 	for i := 1; i <= 10; i++ {
-		if _, ok := s.allocSession(addr(t, "203.0.113.9:41000"), clientID(byte(i))); !ok {
+		if _, ok := s.allocSession(addr(t, "203.0.113.9:41000"), clientID(byte(i)), sessionIdent{}); !ok {
 			t.Fatalf("client %d was refused with max-clients 0 and a pool of 10", i)
 		}
 	}
 	// The eleventh is refused by the POOL, not by the cap - which is the old behaviour intact.
-	if _, ok := s.allocSession(addr(t, "203.0.113.9:41000"), clientID(11)); ok {
+	if _, ok := s.allocSession(addr(t, "203.0.113.9:41000"), clientID(11), sessionIdent{}); ok {
 		t.Fatal("an eleventh client was admitted from a pool of ten")
 	}
 }
@@ -78,18 +78,18 @@ func TestMaxClientsFreesASlotWhenASessionEnds(t *testing.T) {
 	s := testServer(50)
 	s.cfg.MaxClients = 2
 
-	one, _ := s.allocSession(addr(t, "203.0.113.9:41000"), clientID(1))
-	if _, ok := s.allocSession(addr(t, "203.0.113.9:41001"), clientID(2)); !ok {
+	one, _ := s.allocSession(addr(t, "203.0.113.9:41000"), clientID(1), sessionIdent{})
+	if _, ok := s.allocSession(addr(t, "203.0.113.9:41001"), clientID(2), sessionIdent{}); !ok {
 		t.Fatal("could not fill the cap")
 	}
-	if _, ok := s.allocSession(addr(t, "203.0.113.9:41002"), clientID(3)); ok {
+	if _, ok := s.allocSession(addr(t, "203.0.113.9:41002"), clientID(3), sessionIdent{}); ok {
 		t.Fatal("admitted past the cap")
 	}
 
 	// releaseSession with keepReservation false: the client said goodbye rather than going quiet.
 	s.releaseSession(one, false)
 
-	if _, ok := s.allocSession(addr(t, "203.0.113.9:41003"), clientID(3)); !ok {
+	if _, ok := s.allocSession(addr(t, "203.0.113.9:41003"), clientID(3), sessionIdent{}); !ok {
 		t.Fatal("a slot did not come back after a session ended")
 	}
 }

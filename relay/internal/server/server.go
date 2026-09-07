@@ -70,6 +70,22 @@ type Config struct {
 	RateBytesPerSec int64
 	BurstBytes      int64
 
+	// ReportURL is where this relay posts a periodic snapshot of what it is doing. Empty - the
+	// default - means it posts nothing, which is what a self-hosted relay wants.
+	//
+	// It is OPERATOR configuration and arrives from a flag or the environment. It must never be
+	// learnt from a client: a client that could name this address could point the relay at any
+	// host on the internet, including the cloud metadata service on 169.254.169.254, and the
+	// data plane's isForbiddenDst does not cover an outbound HTTP call.
+	ReportURL string
+
+	// ReportInterval is how often that snapshot goes out. 0 uses defaultReportInterval.
+	ReportInterval time.Duration
+
+	// Version is reported alongside the snapshot so an operator can see which relay is still
+	// running last month's binary. Cosmetic.
+	Version string
+
 	Log *slog.Logger
 }
 
@@ -88,6 +104,28 @@ type session struct {
 
 	up   *bucket // client -> internet, touched only by loopUDP
 	down *bucket // internet -> client, touched only by loopTUN
+
+	// ident is who this session belongs to, in token mode. Empty in PSK mode, where there is
+	// nobody to name: one shared key, no accounts.
+	//
+	// It is held for the life of the session so a telemetry report can say WHICH device is on
+	// the wire rather than only how many are. That is not a user database - the relay still
+	// looks nothing up, still answers no query about it, and the value dies with the session.
+	// It is the identity the handshake already proved, kept for as long as it is true.
+	ident sessionIdent
+}
+
+// sessionIdent is the part of a verified licence token worth remembering.
+type sessionIdent struct {
+	// userID is the eight-byte id the licence server derives from its own primary key. It is a
+	// one-way hash there, so it identifies a customer in a log line and cannot be turned back
+	// into an account - which is why deviceKey, not this, is what the report is resolved by.
+	userID uint64
+
+	// deviceKey is the 65-byte uncompressed P-256 device key, or nil in PSK mode. The licence
+	// server stores exactly these bytes against a Device row, so it is the one field that maps a
+	// live session back to a real machine and account.
+	deviceKey []byte
 }
 
 func (s *session) touch() { s.lastSeen.Store(time.Now().UnixNano()) }
@@ -112,6 +150,7 @@ type Server struct {
 	reservedIPs map[protocol.ClientID]netip.Addr
 
 	relayIP netip.Addr
+	started time.Time
 
 	stats struct {
 		rxPackets, txPackets atomic.Uint64
@@ -162,6 +201,7 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{
 		cfg:         cfg,
 		log:         cfg.Log,
+		started:     time.Now(),
 		bySession:   make(map[protocol.SessionID]*session),
 		byIP:        make(map[netip.Addr]*session),
 		reservedIPs: make(map[protocol.ClientID]netip.Addr),
@@ -247,6 +287,9 @@ func (s *Server) Run(done <-chan struct{}) error {
 	go func() { errc <- s.loopUDP() }()
 	go func() { errc <- s.loopTUN() }()
 	go s.loopJanitor(done)
+	// Its own goroutine, and deliberately not part of errc: telemetry that can stop the relay is
+	// worse than no telemetry. Whatever happens in there, the two loops above keep running.
+	go s.loopReport(done)
 
 	select {
 	case <-done:
@@ -352,7 +395,8 @@ func (s *Server) handleHandshakePSK(pkt []byte, from netip.AddrPort) {
 		return
 	}
 
-	sess, ok := s.allocSession(from, clientID)
+	// No identity: in PSK mode everybody shares one key and there is nobody to name.
+	sess, ok := s.allocSession(from, clientID, sessionIdent{})
 	if !ok {
 		resp := protocol.BuildHandshakeResp(s.cfg.PSK, protocol.StatusPoolFull,
 			protocol.SessionID{}, netip.Addr{}, netip.Addr{}, 0, nonce)
@@ -400,7 +444,10 @@ func (s *Server) handleHandshakeToken(pkt []byte, from netip.AddrPort) {
 	sum := sha256.Sum256(tok.DeviceKeyRaw())
 	copy(resKey[:], sum[:8])
 
-	sess, ok := s.allocSession(from, resKey)
+	sess, ok := s.allocSession(from, resKey, sessionIdent{
+		userID:    tok.UserID,
+		deviceKey: tok.DeviceKeyRaw(),
+	})
 	if !ok {
 		s.respondToken(protocol.StatusPoolFull, protocol.SessionID{}, netip.Addr{}, 0, nonce, from)
 		s.log.Warn("address pool exhausted", "from", from.String())
@@ -636,7 +683,7 @@ func (s *Server) sweep(now time.Time) {
 
 // ------------------------------------------------------------ session table
 
-func (s *Server) allocSession(from netip.AddrPort, resKey protocol.ClientID) (*session, bool) {
+func (s *Server) allocSession(from netip.AddrPort, resKey protocol.ClientID, ident sessionIdent) (*session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -677,9 +724,10 @@ func (s *Server) allocSession(from netip.AddrPort, resKey protocol.ClientID) (*s
 
 	sess := &session{
 		id: sid, resKey: resKey, innerIP: ip, resumed: resumed,
-		born: time.Now().UnixNano(),
-		up:   newBucket(s.cfg.BurstBytes),
-		down: newBucket(s.cfg.BurstBytes),
+		born:  time.Now().UnixNano(),
+		ident: ident,
+		up:    newBucket(s.cfg.BurstBytes),
+		down:  newBucket(s.cfg.BurstBytes),
 	}
 	f := from
 	sess.addr.Store(&f)

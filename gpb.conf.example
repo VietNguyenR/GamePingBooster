@@ -28,6 +28,17 @@
 #   RELAY_<NAME>_SUDO_PASSWORD   password for sudo, when it differs         [the one above]
 #   RELAY_<NAME>_LISTEN     UDP port relayd listens on, for players         [51820]
 #   RELAY_<NAME>_MAX        clients this relay accepts AT ONCE, 0 = no limit  [0]
+#   RELAY_<NAME>_REPORT_URL where it posts its status snapshot               [RELAY_REPORT_URL]
+#
+# RELAY_REPORT_URL, with no name in it, sets the reporting endpoint for every relay at once,
+# which is normally what you want - one licence server, several relays. The per-relay form is
+# there for pointing one box at a staging server.
+#
+# A relay with no URL reports nothing and is invisible in the admin dashboard, which is the
+# right default for a self-hosted relay. Leave it empty unless you run the licence server.
+# The URL belongs HERE and not in the repository: it names the licence server's ingest endpoint,
+# gpb.conf is gitignored, and the relay code is public. See RELAY-TELEMETRY.md in the
+# web-service repository for what the endpoint is and how the relay is authenticated to it.
 #
 # Give either KEY or PASSWORD, not both - if both are set the key is tried first and the
 # password is the fallback, which is what ssh does anyway.
@@ -63,6 +74,15 @@ RELAY_SG_LISTEN=51820
 
 # Relay used when a command needs one and you did not name it, as in `./gpb relay deploy`.
 RELAY_DEFAULT=sg
+
+
+# ============================================================ status reporting (optional)
+#
+# Every relay posts a snapshot of what it is doing - how many sessions, which devices - to the
+# licence server every twenty seconds, and the dashboard shows it. Uncomment and point it at
+# your own service to turn it on. https only; the relay refuses anything else.
+#
+# RELAY_REPORT_URL=https://example.com/relay/heartbeat
 
 
 # =============================================================================== notes

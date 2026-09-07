@@ -260,7 +260,13 @@ function Invoke-RelayBuild {
     try {
         $env:CGO_ENABLED = '0'
         $env:GOOS = 'linux'
-        & go build -o relayd ./cmd/relayd
+        # Stamped in so a relay can say which build it is. Only ever displayed - in the startup
+        # log and in the status report the dashboard shows - but without it every relay reports
+        # itself as "dev" and there is no telling which box is still running an old binary.
+        $v = 'dev'
+        $versionFile = Join-Path $root 'VERSION'
+        if (Test-Path $versionFile) { $v = (Get-Content $versionFile -Raw).Trim() }
+        & go build -ldflags "-X main.version=$v" -o relayd ./cmd/relayd
         if ($LASTEXITCODE -ne 0) { throw "go build failed" }
     } finally {
         Remove-Item Env:GOOS -ErrorAction SilentlyContinue
@@ -340,6 +346,9 @@ function Show-RelayList {
             # Shown because this table is how you check what actually got parsed, and a cap that
             # silently read as 0 looks exactly like a relay with no cap configured.
             'MAX CLIENTS'     = $(if ([int]$r.MaxClients -gt 0) { $r.MaxClients } else { 'no limit' })
+            # A relay that reports nowhere is invisible in the dashboard, which looks exactly
+            # like a relay that has died. Worth seeing here, where it is one line to fix.
+            'REPORTS TO'      = $(if ($r.ReportUrl) { $r.ReportUrl } else { '-' })
         }
     }
     $rows | Format-Table -AutoSize | Out-String | Write-Host
