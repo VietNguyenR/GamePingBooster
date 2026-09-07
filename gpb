@@ -134,11 +134,47 @@ relay_report_url() {
     printf '%s' "$url"
 }
 
+# PSK remains the default so existing gpb.conf files keep working. Token relays carry the
+# licence server's PUBLIC key in the deploy payload; a relay never receives the signing key.
+relay_mode() {
+    mode=$(relay_field "$1" MODE)
+    [ -n "$mode" ] || mode=psk
+    mode=$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')
+    case "$mode" in
+        psk|token) ;;
+        *) die "RELAY_$(printf '%s' "$1" | tr 'a-z' 'A-Z')_MODE is '$mode'. Use psk or token." ;;
+    esac
+    if [ "$mode" = psk ] && [ -n "$(relay_field "$1" LICENCE_KEY)" ]; then
+        die "RELAY_$(printf '%s' "$1" | tr 'a-z' 'A-Z')_LICENCE_KEY is set, but MODE is psk. Remove it or set MODE=token."
+    fi
+    printf '%s' "$mode"
+}
+
+relay_licence_key() {
+    key=$(relay_field "$1" LICENCE_KEY)
+    [ -n "$key" ] || die "RELAY_$(printf '%s' "$1" | tr 'a-z' 'A-Z')_MODE is token, but RELAY_$(printf '%s' "$1" | tr 'a-z' 'A-Z')_LICENCE_KEY is empty. It must name the licence PUBLIC key file."
+    case "$key" in
+        '~/'*) key="$HOME/${key#'~/'}" ;;
+        /*) ;;
+        *) key="$root/$key" ;;
+    esac
+    [ -f "$key" ] && [ -r "$key" ] || die "RELAY_$(printf '%s' "$1" | tr 'a-z' 'A-Z')_LICENCE_KEY is '$key', but that file cannot be read. It must be the licence PUBLIC key, not the private key."
+    printf '%s' "$key"
+}
+
 # Everything install.sh is told, as one string. Arguments rather than environment variables
 # throughout: sudo resets the environment, so a variable arrives empty on the far end and the
 # relay comes up misconfigured while the deploy reports success.
 relay_install_args() {
     args="--max-clients $(relay_max_clients "$1")"
+    case "$(relay_mode "$1")" in
+        token)
+            # The payload always names this licence.pub, independent of its source path on this
+            # machine. That keeps a Windows path or spaces out of the remote shell command.
+            relay_licence_key "$1" >/dev/null
+            args="$args --licence-key ../licence.pub"
+            ;;
+    esac
     url=$(relay_report_url "$1")
     [ -z "$url" ] || args="$args --report-url $url"
     printf '%s' "$args"
@@ -373,7 +409,7 @@ relay_list() {
         warn "gpb.conf declares no relays. Copy gpb.conf.example to gpb.conf and fill in one block."
         return 0
     fi
-    printf '%-10s %-24s %-22s %-12s %-12s %s\n' NAME 'SSH' 'CLIENT ENDPOINT' 'AUTH' 'MAX CLIENTS' 'REPORTS TO'
+    printf '%-10s %-24s %-22s %-12s %-8s %-12s %s\n' NAME 'SSH' 'CLIENT ENDPOINT' 'AUTH' MODE 'MAX CLIENTS' 'REPORTS TO'
     for n in $names; do
         user=$(relay_field "$n" USER); [ -n "$user" ] || user=root
         port=$(relay_field "$n" PORT); [ -n "$port" ] || port=22
@@ -395,8 +431,9 @@ relay_list() {
         # A relay that reports nowhere is invisible in the dashboard, which looks exactly like
         # a relay that has died. Worth seeing here, where it is one line to fix.
         reports=$(relay_report_url "$n"); [ -n "$reports" ] || reports='-'
-        printf '%-10s %-24s %-22s %-12s %-12s %s\n' \
-            "$n$mark" "$user@$(relay_field "$n" HOST):$port" "$(relay_endpoint "$n")" "$auth" "$max" "$reports"
+        mode=$(relay_mode "$n")
+        printf '%-10s %-24s %-22s %-12s %-8s %-12s %s\n' \
+            "$n$mark" "$user@$(relay_field "$n" HOST):$port" "$(relay_endpoint "$n")" "$auth" "$mode" "$max" "$reports"
     done
     printf '\n* = RELAY_DEFAULT, used when a command is given no name.\n'
 }
@@ -482,6 +519,7 @@ relay_deploy() {
     # .gitattributes should keep them LF now, so it is a second line of defence rather than the
     # thing making it work.
     max=$(relay_max_clients "$target")
+    mode=$(relay_mode "$target")
     if [ "$max" -gt 0 ]; then
         cap="max $max clients"
     else
@@ -496,8 +534,17 @@ relay_deploy() {
     # || rc=$? rather than a bare call: under set -e a non-zero exit would end the script here,
     # and 90 is not a failure, it is the far end asking for a second connection.
     rc=0
-    tar -czf - -C "$relay" relayd deploy/setup-nat.sh deploy/install.sh deploy/relayd.service |
+    licence_stage=
+    if [ "$mode" = token ]; then
+        licence_stage=$(mktemp -d)
+        cp "$(relay_licence_key "$target")" "$licence_stage/licence.pub"
+        tar -czf - -C "$relay" relayd deploy/setup-nat.sh deploy/install.sh deploy/relayd.service -C "$licence_stage" licence.pub |
+            relay_ssh "$target" "$(remote_stage "$(relay_install_args "$target")")" || rc=$?
+        rm -rf "$licence_stage"
+    else
+        tar -czf - -C "$relay" relayd deploy/setup-nat.sh deploy/install.sh deploy/relayd.service |
         relay_ssh "$target" "$(remote_stage "$(relay_install_args "$target")")" || rc=$?
+    fi
 
     case "$rc" in
         0) ;;
@@ -512,7 +559,11 @@ relay_deploy() {
         printf '\n    The endpoint above goes into a profile, not into gpb.conf:\n\n'
         printf '      "relays": [ { "id": "%s", "name": "%s", "endpoint": "%s" } ]\n\n' \
             "$target" "$target" "$endpoint"
-        printf '    The PSK goes into client/config.json, with "defaultRelayId": "%s".\n\n' "$target"
+        if [ "$mode" = token ]; then
+            printf '    This relay uses licence tokens; the profile entry also needs its relay public key.\n\n'
+        else
+            printf '    The PSK goes into client/config.json, with "defaultRelayId": "%s".\n\n' "$target"
+        fi
     fi
 }
 

@@ -62,8 +62,8 @@ function Get-GpbRelayNames {
     Everything needed to reach one relay, or $null when no name was given and there is no default.
 
 .OUTPUTS
-    Hashtable with Name, Declared, Target, Port, Key, Password, SudoPassword, Listen,
-    Endpoint and SshArgs.
+    Hashtable with Name, Declared, Target, Port, Key, Password, SudoPassword, Listen, Mode,
+    LicenceKey, Endpoint and SshArgs.
     SshArgs is ready to splat at ssh; Endpoint is the address a PLAYER connects to, which is a
     different port from the SSH one and belongs in a profile, not in gpb.conf.
 #>
@@ -102,6 +102,33 @@ function Get-GpbRelay {
         throw "RELAY_${slug}_REPORT_URL is '$reportUrl'. It must be a URL starting http:// or https://."
     }
 
+    # Authentication is explicit for new relay declarations, but omitted means PSK for every
+    # existing gpb.conf.  A licensed relay needs the public half of the licence key locally so
+    # deploy.ps1 can put it in its one-shot payload; the private half never travels to a VPS.
+    $mode = $conf["RELAY_${slug}_MODE"]
+    if (-not $mode) { $mode = 'psk' }
+    $mode = $mode.ToLowerInvariant()
+    if ($mode -notin @('psk', 'token')) {
+        throw "RELAY_${slug}_MODE is '$mode'. Use psk or token."
+    }
+    $licenceKey = $conf["RELAY_${slug}_LICENCE_KEY"]
+    if ($mode -eq 'psk' -and $licenceKey) {
+        throw "RELAY_${slug}_LICENCE_KEY is set, but RELAY_${slug}_MODE is psk. Remove it or set MODE=token."
+    }
+    if ($mode -eq 'token') {
+        if (-not $licenceKey) {
+            throw "RELAY_${slug}_MODE is token, but RELAY_${slug}_LICENCE_KEY is empty. It must name the licence PUBLIC key file."
+        }
+        if ($licenceKey.StartsWith('~/') -or $licenceKey.StartsWith('~\\')) {
+            $licenceKey = Join-Path $env:USERPROFILE $licenceKey.Substring(2)
+        } elseif (-not [System.IO.Path]::IsPathRooted($licenceKey)) {
+            $licenceKey = Join-Path $RepoRoot $licenceKey
+        }
+        if (-not (Test-Path -LiteralPath $licenceKey -PathType Leaf)) {
+            throw "RELAY_${slug}_LICENCE_KEY is '$licenceKey', but that file does not exist. It must be the licence PUBLIC key, not the private key."
+        }
+    }
+
     if (-not $hostName) {
         # Not declared here: an ssh alias, or user@host. Let ssh's own configuration answer for
         # the port, the user and the key.
@@ -117,6 +144,8 @@ function Get-GpbRelay {
             Endpoint     = ''
             MaxClients   = '0'
             ReportUrl    = $reportUrl
+            Mode         = $mode
+            LicenceKey   = $licenceKey
             SshArgs      = @($Name)
         }
     }
@@ -167,6 +196,8 @@ function Get-GpbRelay {
         Endpoint     = "${hostName}:${listen}"
         MaxClients   = $max
         ReportUrl    = $reportUrl
+        Mode         = $mode
+        LicenceKey   = $licenceKey
         SshArgs      = $sshArgs
     }
 }

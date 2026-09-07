@@ -343,6 +343,7 @@ function Show-RelayList {
             SSH               = "$($r.Target):$($r.Port)"
             'CLIENT ENDPOINT' = $r.Endpoint
             AUTH              = $auth
+            MODE              = $r.Mode
             # Shown because this table is how you check what actually got parsed, and a cap that
             # silently read as 0 looks exactly like a relay with no cap configured.
             'MAX CLIENTS'     = $(if ([int]$r.MaxClients -gt 0) { $r.MaxClients } else { 'no limit' })

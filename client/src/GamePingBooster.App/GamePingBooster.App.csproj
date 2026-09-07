@@ -22,10 +22,18 @@
     <EnableAotAnalyzer>true</EnableAotAnalyzer>
     <TrimMode>full</TrimMode>
     <ApplicationIcon>favicon.ico</ApplicationIcon>
+    <PackageIcon>512x512.png</PackageIcon>
   </PropertyGroup>
 
   <ItemGroup>
     <Content Include="favicon.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\512x512.png">
+      <Pack>True</Pack>
+      <PackagePath>\</PackagePath>
+    </None>
   </ItemGroup>
 
   <ItemGroup>

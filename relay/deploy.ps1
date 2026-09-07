@@ -23,7 +23,7 @@
     .\deploy.ps1 -RemoteHost sg
 
 .EXAMPLE
-    .\deploy.ps1 -PackageOnly
+    .\deploy.ps1 -RemoteHost sg -PackageOnly
 #>
 
 [CmdletBinding()]
@@ -45,7 +45,9 @@ $repoRoot = Split-Path $PSScriptRoot -Parent
 # cross-compile.
 
 $relay = $null
-if (-not $PackageOnly) {
+# PackageOnly without a name remains a generic PSK package for console installs. Supplying a
+# name makes it a faithful dry run of that relay's deploy, including a token relay's public key.
+if (-not $PackageOnly -or $RemoteHost) {
     $relay = Get-GpbRelay -Name $RemoteHost -RepoRoot $repoRoot
     if (-not $relay) {
         $known = Get-GpbRelayNames -RepoRoot $repoRoot
@@ -85,13 +87,20 @@ if ($PackageOnly) {
     New-Item -ItemType Directory -Path dist\deploy -Force | Out-Null
     Copy-Item relayd dist\
     Copy-Item deploy\setup-nat.sh, deploy\install.sh, deploy\relayd.service dist\deploy\
+    if ($relay -and $relay.Mode -eq 'token') {
+        Copy-Item -LiteralPath $relay.LicenceKey -Destination dist\licence.pub
+    }
     tar -czf gpb-relay.tar.gz -C dist .
     Remove-Item dist -Recurse -Force
 
     Write-Host ""
     Write-Host "Created gpb-relay.tar.gz. On the VPS run:" -ForegroundColor Green
     Write-Host "    mkdir -p /opt/gpb && tar -xzf gpb-relay.tar.gz -C /opt/gpb"
-    Write-Host "    cd /opt/gpb/deploy && chmod +x *.sh && ./install.sh"
+    if ($relay -and $relay.Mode -eq 'token') {
+        Write-Host "    cd /opt/gpb/deploy && chmod +x *.sh && ./install.sh --licence-key ../licence.pub"
+    } else {
+        Write-Host "    cd /opt/gpb/deploy && chmod +x *.sh && ./install.sh"
+    }
     return
 }
 
@@ -114,11 +123,7 @@ function Invoke-RemoteInstall {
 
     $sshArgv = $Relay.SshArgs
 
-    # The cap travels as an ARGUMENT, not an environment variable: sudo resets the environment,
-    # so a variable would arrive empty and the relay would come up with no cap while the deploy
-    # reported success. See install.sh.
-    $maxArg = "--max-clients $($Relay.MaxClients)"
-    if ($Relay.ReportUrl) { $maxArg += " --report-url $($Relay.ReportUrl)" }
+    $maxArg = Get-RelayInstallArgs $Relay
 
     if (-not $Relay.SudoPassword) {
         Write-Host "==> sudo needs a password on $($Relay.Name). Type it when it asks." -ForegroundColor Cyan
@@ -143,6 +148,18 @@ function Invoke-RemoteInstall {
     }
 }
 
+function Get-RelayInstallArgs {
+    param($Relay)
+
+    # These are arguments rather than environment variables because sudo resets the environment.
+    # The public key is always called licence.pub in the payload, so neither its local path nor a
+    # Windows path can leak into the remote command line. The private licence key is never read.
+    $args = "--max-clients $($Relay.MaxClients)"
+    if ($Relay.Mode -eq 'token') { $args += ' --licence-key ../licence.pub' }
+    if ($Relay.ReportUrl) { $args += " --report-url $($Relay.ReportUrl)" }
+    return $args
+}
+
 foreach ($tool in 'ssh', 'tar') {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
         throw "$tool not found. OpenSSH and tar both ship with Windows 10 and later - see Settings > System > Optional features. Or use -PackageOnly."
@@ -164,12 +181,22 @@ $askpass = $null
 $sshArgs = ConvertTo-GpbCmdArgs $relay.SshArgs
 
 $payload = [System.IO.Path]::GetTempFileName()
+$packageDir = $null
 try {
     $askpass = Enable-GpbAskpass -Password $relay.Password
     if ($askpass) { Write-Host "==> Using the password from gpb.conf" -ForegroundColor DarkGray }
 
     Write-Host "==> Packing" -ForegroundColor Cyan
-    & tar -czf $payload -C . relayd deploy/setup-nat.sh deploy/install.sh deploy/relayd.service
+    # A short-lived staging directory gives the remote side one stable public-key path, without
+    # leaving a key beside the build artefacts or exposing a Windows path to the remote shell.
+    $packageDir = Join-Path ([System.IO.Path]::GetTempPath()) ("gpb-relay-" + [guid]::NewGuid())
+    New-Item -ItemType Directory -Path (Join-Path $packageDir 'deploy') -Force | Out-Null
+    Copy-Item relayd $packageDir
+    Copy-Item deploy\setup-nat.sh, deploy\install.sh, deploy\relayd.service (Join-Path $packageDir 'deploy')
+    if ($relay.Mode -eq 'token') {
+        Copy-Item -LiteralPath $relay.LicenceKey -Destination (Join-Path $packageDir 'licence.pub')
+    }
+    & tar -czf $payload -C $packageDir .
     if ($LASTEXITCODE -ne 0) { throw "tar failed" }
 
     # What runs on the far end. Duplicated from ./gpb - keep the two in step.
@@ -195,14 +222,14 @@ try {
     # $m is concatenated rather than interpolated: the literal above is single-quoted so that
     # it can hold no double quotes of its own, and that property is what keeps it intact on the
     # trip through cmd. Interpolating would mean a double-quoted string and a quoting problem.
-    $m = " --max-clients $($relay.MaxClients)"
-    if ($relay.ReportUrl) { $m += " --report-url $($relay.ReportUrl)" }
+    $m = ' ' + (Get-RelayInstallArgs $relay)
     $remote = 'set -e; mkdir -p ~/.gpb-deploy; tar -xzf - -C ~/.gpb-deploy; cd ~/.gpb-deploy/deploy; sed -i ''s/\r$//'' *.sh; chmod +x *.sh; if [ $(id -u) -eq 0 ]; then ./install.sh' + $m + '; exit; fi; if command -v sudo >/dev/null 2>&1; then :; else exit 91; fi; if sudo -n true 2>/dev/null; then sudo -n ./install.sh' + $m + '; exit; fi; exit 90'
 
+    $modeLabel = if ($relay.Mode -eq 'token') { 'token mode' } else { 'PSK mode' }
     if ([int]$relay.MaxClients -gt 0) {
-        Write-Host "==> Deploying to $($relay.Name) at $($relay.Target) (one connection), max $($relay.MaxClients) clients" -ForegroundColor Cyan
+        Write-Host "==> Deploying to $($relay.Name) at $($relay.Target) ($modeLabel, one connection), max $($relay.MaxClients) clients" -ForegroundColor Cyan
     } else {
-        Write-Host "==> Deploying to $($relay.Name) at $($relay.Target) (one connection), no client limit" -ForegroundColor Cyan
+        Write-Host "==> Deploying to $($relay.Name) at $($relay.Target) ($modeLabel, one connection), no client limit" -ForegroundColor Cyan
     }
     cmd /c "ssh $sshArgs `"$remote`" < `"$payload`""
     $staged = $LASTEXITCODE
@@ -217,6 +244,7 @@ try {
     }
 } finally {
     Remove-Item $payload -Force -ErrorAction SilentlyContinue
+    if ($packageDir) { Remove-Item $packageDir -Recurse -Force -ErrorAction SilentlyContinue }
     Disable-GpbAskpass -Helper $askpass
 }
 
@@ -227,8 +255,16 @@ Write-Host "Done." -ForegroundColor Green
 if ($relay.Endpoint) {
     Write-Host "  The endpoint goes into a profile, not into gpb.conf:"
     Write-Host "    `"relays`": [ { `"id`": `"$($relay.Name)`", `"name`": `"$($relay.Name)`", `"endpoint`": `"$($relay.Endpoint)`" } ]"
-    Write-Host "  The PSK goes into client\config.json, with `"defaultRelayId`": `"$($relay.Name)`"."
+    if ($relay.Mode -eq 'token') {
+        Write-Host "  This relay uses licence tokens; the profile entry also needs its relay public key."
+    } else {
+        Write-Host "  The PSK goes into client\config.json, with `"defaultRelayId`": `"$($relay.Name)`"."
+    }
 } else {
-    Write-Host "  Copy the endpoint into a profile's `"relays`" list, and the PSK into client\config.json."
+    if ($relay.Mode -eq 'token') {
+        Write-Host "  Copy the endpoint and relay public key into a profile's `"relays`" list."
+    } else {
+        Write-Host "  Copy the endpoint into a profile's `"relays`" list, and the PSK into client\config.json."
+    }
 }
 Write-Host "Follow the relay log:  .\gpb.ps1 relay logs $($relay.Name)"

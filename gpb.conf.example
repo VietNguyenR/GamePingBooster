@@ -29,6 +29,8 @@
 #   RELAY_<NAME>_LISTEN     UDP port relayd listens on, for players         [51820]
 #   RELAY_<NAME>_MAX        clients this relay accepts AT ONCE, 0 = no limit  [0]
 #   RELAY_<NAME>_REPORT_URL where it posts its status snapshot               [RELAY_REPORT_URL]
+#   RELAY_<NAME>_MODE       psk (self-hosted) or token (licensed)           [psk]
+#   RELAY_<NAME>_LICENCE_KEY path to the licence PUBLIC key, required token mode
 #
 # RELAY_REPORT_URL, with no name in it, sets the reporting endpoint for every relay at once,
 # which is normally what you want - one licence server, several relays. The per-relay form is
@@ -65,6 +67,8 @@ RELAY_SG_KEY=~/.ssh/id_ed25519
 RELAY_SG_PASSWORD=
 RELAY_SG_SUDO_PASSWORD=
 RELAY_SG_LISTEN=51820
+# RELAY_SG_MODE=token
+# RELAY_SG_LICENCE_KEY=../web-service/licence.pub
 
 # A second relay needs nothing but a name and a host. Uncomment and edit:
 #

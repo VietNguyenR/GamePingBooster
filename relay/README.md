@@ -60,7 +60,7 @@ If ssh/scp is not an option - some providers only offer a web console - build a 
 upload it yourself:
 
 ```powershell
-.\deploy.ps1 -PackageOnly     # produces gpb-relay.tar.gz
+.\deploy.ps1 -RemoteHost sg -PackageOnly # dry-run package for sg, including licence.pub in token mode
 ```
 
 ```bash
