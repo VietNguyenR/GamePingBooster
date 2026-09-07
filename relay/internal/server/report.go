@@ -30,8 +30,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gamepingbooster/relay/internal/protocol"
@@ -272,10 +274,26 @@ func (s *Server) postReport(client *http.Client, priv *ecdsa.PrivateKey, pub str
 		return err
 	}
 	defer resp.Body.Close()
-	// The body is discarded. There is nothing the licence server can say that this relay acts on,
-	// by design: a control channel is a far bigger thing than a counter, and this is not one.
+
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("%s said %s", s.cfg.ReportURL, resp.Status)
+		// The REASON is read back and logged, and only the reason.
+		//
+		// Nothing here is acted on - a control channel into a box carrying live game traffic is
+		// a far bigger thing than a counter, and this is deliberately not one. But a refusal is
+		// almost always a configuration mistake that will never fix itself, and "401
+		// Unauthorized" on its own does not say which: a relay whose key was never pasted into
+		// the dashboard and a relay whose signature is wrong fail identically from here. The
+		// licence server already distinguishes them in one short sentence. Reading it turns an
+		// afternoon of guessing into one line of the log.
+		//
+		// Capped, because the far end is not always the licence server: a proxy or a captive
+		// portal can answer instead, with a whole HTML page.
+		reason, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
+		detail := strings.TrimSpace(string(reason))
+		if detail == "" {
+			return fmt.Errorf("%s said %s", s.cfg.ReportURL, resp.Status)
+		}
+		return fmt.Errorf("%s said %s: %s", s.cfg.ReportURL, resp.Status, detail)
 	}
 	return nil
 }

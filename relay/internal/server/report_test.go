@@ -260,3 +260,62 @@ func TestReportCrossCheck(t *testing.T) {
 		t.Fatalf("the licence server refused the report: %v", err)
 	}
 }
+
+// A refusal is almost always a configuration mistake that will never fix itself, and the two
+// common ones - a key that was never pasted into the dashboard, and a signature that does not
+// verify - are indistinguishable from a bare "401 Unauthorized". The licence server says which
+// in one sentence, so the relay's log has to carry it.
+//
+// Cost a round of guessing on a live relay: 840 consecutive failures, and the log said only the
+// status line.
+func TestPostReportCarriesTheRefusalReason(t *testing.T) {
+	priv, err := protocol.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"Unknown relay."}`))
+	}))
+	defer srv.Close()
+
+	s := testServer(4)
+	s.cfg.RelayPriv = priv
+	s.cfg.ReportURL = srv.URL
+
+	err = s.postReport(srv.Client(), priv, "04ab")
+	if err == nil {
+		t.Fatal("a 401 was reported as success")
+	}
+	if !strings.Contains(err.Error(), "Unknown relay") {
+		t.Errorf("the error does not say why it was refused: %v", err)
+	}
+}
+
+// A proxy or a captive portal can answer instead of the licence server, with a whole HTML page.
+// The reason is worth reading; a megabyte of it is not.
+func TestPostReportCapsTheRefusalReason(t *testing.T) {
+	priv, err := protocol.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(strings.Repeat("x", 100_000)))
+	}))
+	defer srv.Close()
+
+	s := testServer(4)
+	s.cfg.RelayPriv = priv
+	s.cfg.ReportURL = srv.URL
+
+	err = s.postReport(srv.Client(), priv, "04ab")
+	if err == nil {
+		t.Fatal("a 502 was reported as success")
+	}
+	if len(err.Error()) > 400 {
+		t.Errorf("the error is %d characters - the response body is not being capped", len(err.Error()))
+	}
+}
