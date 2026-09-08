@@ -1,7 +1,9 @@
 ﻿using System.Diagnostics;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
+using Avalonia.Threading;
 using GamePingBooster.App.Services;
 using GamePingBooster.App.ViewModels;
 using GamePingBooster.Core.Ipc;
@@ -117,6 +119,72 @@ public partial class MainWindow : SurfaceWindow
         {
             await vm.ToggleAsync();
         }
+    }
+
+    // ------------------------------------------------------------ minimise to tray
+
+    /// <summary>
+    /// Off until <see cref="SystemTray"/> turns it on. The window must never hide itself while
+    /// there is no icon to bring it back - see the comment on that class.
+    /// </summary>
+    private bool _minimizeToTray;
+
+    /// <summary>
+    /// What to restore to. Not always Normal: a maximised window that is minimised and then
+    /// brought back from the tray should come back maximised, the way every other Windows app
+    /// behaves.
+    /// </summary>
+    private WindowState _restoreTo = WindowState.Normal;
+
+    public void EnableMinimizeToTray() => _minimizeToTray = true;
+
+    /// <summary>
+    /// Minimising hides the window instead of parking it in the taskbar.
+    ///
+    /// This is where a booster differs from an ordinary app: it is meant to be left running for
+    /// a whole session, so the taskbar button is the thing to get rid of, not the window. Closing
+    /// is untouched and still means quit - with the tunnel brought down first, below.
+    ///
+    /// The hide is posted rather than done inline: this runs while the platform is still applying
+    /// the state change it is reporting, and hiding a window from inside its own WindowState
+    /// notification leaves Win32 minimising a window that is no longer on screen.
+    /// </summary>
+    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
+    {
+        base.OnPropertyChanged(change);
+
+        if (change.Property != WindowStateProperty) return;
+
+        if (change.GetNewValue<WindowState>() is not WindowState.Minimized)
+        {
+            _restoreTo = change.GetNewValue<WindowState>();
+            return;
+        }
+
+        if (!_minimizeToTray) return;
+        Dispatcher.UIThread.Post(HideToTray);
+    }
+
+    private void HideToTray()
+    {
+        // Restored again in the gap between the post and here - by a taskbar click, or by the
+        // tray icon itself. Hiding now would take away a window the user has just asked for.
+        if (WindowState is not WindowState.Minimized) return;
+        Hide();
+    }
+
+    /// <summary>
+    /// Brings the window back from the notification area, whichever way it was asked for.
+    ///
+    /// Show() first, then the state: setting WindowState on a window the platform has hidden is
+    /// the order that leaves Avalonia's IsVisible and the real window disagreeing, which shows up
+    /// as a window that is on screen but will not take focus.
+    /// </summary>
+    public void RestoreFromTray()
+    {
+        Show();
+        WindowState = _restoreTo;
+        Activate();
     }
 
     // ------------------------------------------------------------ closing

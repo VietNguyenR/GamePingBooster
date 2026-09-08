@@ -66,7 +66,7 @@
 
     <StackPanel>
       <TextBlock Classes="label" Text="Licence server (optional)" />
-      <TextBox Text="{Binding LicenceUrl}" PlaceholderText="https://licence.example.com" />
+      <TextBox Text="{Binding LicenceUrl}" PlaceholderText="https://gamepingbooster.com" />
       <TextBlock Classes="hint"
                  Text="Only if you have an account. Leave blank to run entirely on your own relays with the key above - that is the normal setup. Filling this in adds an Account button, and the game list comes from there too." />
     </StackPanel>

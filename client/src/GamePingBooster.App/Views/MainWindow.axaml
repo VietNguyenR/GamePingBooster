@@ -5,7 +5,8 @@
         x:Class="GamePingBooster.App.Views.MainWindow"
         x:DataType="vm:MainViewModel"
         Title="Game Ping Booster"
-        Width="420" Height="560"
+        Icon="/favicon.ico"
+        Width="420" Height="540"
         MinWidth="380" MinHeight="500"
         WindowStartupLocation="CenterScreen">
 

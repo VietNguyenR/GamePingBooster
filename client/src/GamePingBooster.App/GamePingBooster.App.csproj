@@ -11,7 +11,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
 
     <!-- Native AOT: no .NET Runtime needed on the user machine, and the app starts almost instantly. -->
-    <PublishAot>true</PublishAot>
+    <PublishAot>false</PublishAot>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <InvariantGlobalization>true</InvariantGlobalization>
     <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
@@ -24,9 +24,16 @@
     <ApplicationIcon>favicon.ico</ApplicationIcon>
     <PackageIcon>512x512.png</PackageIcon>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
 
   <ItemGroup>
-    <Content Include="favicon.ico" />
+    <!-- AvaloniaResource, not Content: the tray icon and the window icon are loaded through
+         avares:// at runtime, so the file has to be compiled into the binary rather than sitting
+         next to it. ApplicationIcon above is separate - that one is the icon Explorer draws on
+         the .exe and is baked in by the linker. -->
+    <AvaloniaResource Include="favicon.ico" />
   </ItemGroup>
 
   <ItemGroup>

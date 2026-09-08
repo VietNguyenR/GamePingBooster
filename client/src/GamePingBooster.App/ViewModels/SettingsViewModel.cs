@@ -20,7 +20,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private readonly bool _alreadyConfigured;
 
     public SettingsViewModel(IEnumerable<string>? currentEndpoints, bool alreadyConfigured,
-        string? currentLicenceUrl = null)
+        string? currentLicenceUrl = "https://gamepingbooster.com")
     {
         _endpoints = string.Join(Environment.NewLine, currentEndpoints ?? []);
         _alreadyConfigured = alreadyConfigured;
