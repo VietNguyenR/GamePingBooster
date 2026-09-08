@@ -155,7 +155,7 @@ internal sealed class TunnelClient : IDisposable
             var req = _auth.BuildRequest(_clientId, DateTimeOffset.UtcNow, out var nonce);
             var sentAt = _clock.ElapsedTicks;
             await _socket.SendAsync(req, SocketFlags.None, ct).ConfigureAwait(false);
-            _log($"Sent handshake to {_relayEndpoint} using a {_auth.Describe} (attempt {attempt}/{attempts})");
+            _log($"Sent handshake to {_auth.Describe} (attempt {attempt}/{attempts})");
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(TimeSpan.FromSeconds(2));

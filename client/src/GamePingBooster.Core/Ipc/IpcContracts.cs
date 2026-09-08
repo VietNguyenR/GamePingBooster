@@ -278,7 +278,40 @@ public sealed class StatusMessage
     [JsonPropertyName("profileUpdatedAt")] public long? ProfileUpdatedAt { get; set; }
 
     /// <summary>Error detail when State is Faulted.</summary>
+    ///
+    /// A property of the TUNNEL, not a reply to whatever the UI last sent. It is sticky by
+    /// design - it survives until the next connect attempt, so a window opened after a failed
+    /// one can still say why - which is exactly why a command must not be judged by it. See
+    /// <see cref="AckVerb"/>.
     [JsonPropertyName("error")] public string? Error { get; set; }
+
+    /// <summary>
+    /// The verb this status is the direct reply to, or null on a status that was pushed for
+    /// some other reason - a state change, or the once-a-second heartbeat.
+    ///
+    /// It exists because a screen that sends a command has no other way to recognise its own
+    /// answer. Statuses arrive continuously, so "the next one" is usually a heartbeat, and
+    /// <see cref="Error"/> on it is whatever the tunnel last failed with. The settings screen
+    /// read both that way and reported a save as failed because a CONNECT had failed earlier -
+    /// the settings were on disk the whole time.
+    ///
+    /// Additive, so no contract version bump: an older UI ignores it, and a newer UI reads null
+    /// from an older service, which means "not a reply" and leaves it waiting rather than
+    /// believing something wrong.
+    /// </summary>
+    [JsonPropertyName("ackVerb")] public string? AckVerb { get; set; }
+
+    /// <summary>
+    /// Why the command named by <see cref="AckVerb"/> was refused, or null when it was carried
+    /// out. Meaningless on a status that is not a reply.
+    ///
+    /// Separate from <see cref="Error"/> because they answer different questions: this one is
+    /// about the message just sent, that one is about the tunnel. Saving settings is a local
+    /// act - validate the format, write the file - and it succeeds on a machine whose relay is
+    /// unreachable, in a different auth mode, or refusing the key it has. Connecting is what
+    /// asks the network anything.
+    /// </summary>
+    [JsonPropertyName("commandError")] public string? CommandError { get; set; }
 }
 
 /// <summary>

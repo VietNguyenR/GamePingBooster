@@ -167,17 +167,17 @@ internal sealed class PipeServer
                 var error = await _engine
                     .SetRelayAsync(cmd.RelayEndpoints, cmd.Psk, cmd.LicenceUrl, ct)
                     .ConfigureAwait(false);
-                if (error is not null)
-                {
-                    _log($"set-relay rejected: {error}");
-                    var bad = _engine.Snapshot();
-                    bad.Error = error;
-                    await PushAsync(bad).ConfigureAwait(false);
-                }
-                else
-                {
-                    await PushAsync(_engine.Snapshot()).ConfigureAwait(false);
-                }
+                if (error is not null) _log($"set-relay rejected: {error}");
+
+                // Answered on the reply channel, not by overwriting the tunnel's Error. Saving
+                // settings validates a format and writes a file; it does not touch the relay, so
+                // the tunnel's last failure is neither this command's fault nor its verdict.
+                // Reported the same way whether it worked or not, so the sender can tell the
+                // reply from the heartbeat that lands a moment later.
+                var reply = _engine.Snapshot();
+                reply.AckVerb = "set-relay";
+                reply.CommandError = error;
+                await PushAsync(reply).ConfigureAwait(false);
                 break;
             }
 
