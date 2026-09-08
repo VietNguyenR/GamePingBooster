@@ -96,8 +96,14 @@ if ($PackageOnly) {
     Write-Host ""
     Write-Host "Created gpb-relay.tar.gz. On the VPS run:" -ForegroundColor Green
     Write-Host "    mkdir -p /opt/gpb && tar -xzf gpb-relay.tar.gz -C /opt/gpb"
+    # The mode is named here for the same reason the deploy names it: a package built for a
+    # relay declared psk, unpacked on a box that is currently running as token, installs as
+    # token unless the command says otherwise. A package built for no particular relay names no
+    # mode, because there is no declaration to go on and install.sh's own rule is the right one.
     if ($relay -and $relay.Mode -eq 'token') {
         Write-Host "    cd /opt/gpb/deploy && chmod +x *.sh && ./install.sh --licence-key ../licence.pub"
+    } elseif ($relay) {
+        Write-Host "    cd /opt/gpb/deploy && chmod +x *.sh && ./install.sh --psk"
     } else {
         Write-Host "    cd /opt/gpb/deploy && chmod +x *.sh && ./install.sh"
     }
@@ -155,7 +161,19 @@ function Get-RelayInstallArgs {
     # The public key is always called licence.pub in the payload, so neither its local path nor a
     # Windows path can leak into the remote command line. The private licence key is never read.
     $args = "--max-clients $($Relay.MaxClients)"
-    if ($Relay.Mode -eq 'token') { $args += ' --licence-key ../licence.pub' }
+    if ($Relay.Mode -eq 'token') {
+        $args += ' --licence-key ../licence.pub'
+    } else {
+        # Said out loud, not left implicit, and this is the line that decides whether a relay can
+        # be moved back off token mode at all.
+        #
+        # install.sh keeps a relay that already has /etc/gpb/licence.pub in TOKEN mode when no
+        # mode is named - a rule meant for a deploy typed by hand, which does not know licensed
+        # mode exists. This deploy is not that: it read the mode out of gpb.conf, so it has to
+        # state it. Sending nothing let the state of the far end decide instead, and a relay
+        # declared psk that happened to be running as token silently stayed token, unit and all.
+        $args += ' --psk'
+    }
     if ($Relay.ReportUrl) { $args += " --report-url $($Relay.ReportUrl)" }
     return $args
 }

@@ -26,6 +26,7 @@
         .\gpb.ps1 relay build         cross-compile relayd for Linux
         .\gpb.ps1 relay list          show the relays gpb.conf declares
         .\gpb.ps1 relay deploy [name] build, upload and install on a relay
+                                      the mode comes from gpb.conf; --psk or --token asserts it
         .\gpb.ps1 relay logs [name]   follow journalctl on a relay
         .\gpb.ps1 relay test          Go tests only
 
@@ -370,9 +371,35 @@ function Resolve-Relay($name) {
     return $null
 }
 
-function Invoke-RelayDeploy($target) {
+function Invoke-RelayDeploy($target, $extra) {
+    # A mode flag typed here is CHECKED against gpb.conf, never quietly ignored.
+    #
+    # `relay deploy hk --psk` used to be swallowed whole - the flag reached nothing, and the
+    # deploy went out in whatever mode the far end already had. Where the flag agrees with the
+    # declaration it is a no-op, which is what makes it safe to type; where it disagrees the
+    # deploy stops, because the mode belongs to one place. gpb.conf is where the licence key, the
+    # client cap and the report URL for this relay are declared, and a deploy that contradicted
+    # it would be undone by the next one that did not.
+    $wantMode = $null
+    foreach ($a in $extra) {
+        switch ($a) {
+            '--psk' { $wantMode = 'psk' }
+            '--token' { $wantMode = 'token' }
+            default { throw "unknown option '$a'. Usage: .\gpb.ps1 relay deploy [name] [--psk|--token]" }
+        }
+    }
+
     $r = Resolve-Relay $target
     if (-not $r) { return }
+
+    # Before the build, not after: a mode that does not match should cost a second, not a
+    # cross-compile.
+    if ($wantMode -and $wantMode -ne $r.Mode) {
+        $slug = $r.Name.ToUpperInvariant()
+        throw ("--$wantMode was asked for, but RELAY_${slug}_MODE says $($r.Mode)." +
+            "`n    The mode is declared in gpb.conf, so that this deploy and the next one agree." +
+            "`n    Set RELAY_${slug}_MODE=$wantMode there (a token relay also needs RELAY_${slug}_LICENCE_KEY) and run this again.")
+    }
     Push-Location $relayDir
     try {
         # deploy.ps1 resolves the name from gpb.conf itself, so it stays usable on its own.
@@ -443,6 +470,28 @@ switch ($Verb.ToLowerInvariant()) {
             # prevent. The full suite takes about six seconds cold, so always re-running is cheap.
             & go test -count=1 ./...; if ($LASTEXITCODE -ne 0) { throw "go tests failed" }
         } finally { Pop-Location }
+
+        # The deploy tooling has no compiler to catch it: the mode a relay is installed in comes
+        # out of a string built in two places, and getting it wrong takes a fleet offline quietly.
+        # The test itself is a shell script because half of what it drives is one.
+        #
+        # Git's bash, found through git itself rather than through PATH. A bare `bash` on Windows
+        # 11 is WSL's, which has no Y: and answers "No such file or directory" for a path that is
+        # plainly there - measured here, and it reads like a missing file rather than a wrong
+        # shell. Git for Windows is already required by ./gpb, so this is not a new dependency.
+        $gitBash = $null
+        $gitCmd = Get-Command git -ErrorAction SilentlyContinue
+        if ($gitCmd) {
+            $candidate = Join-Path (Split-Path (Split-Path $gitCmd.Source -Parent) -Parent) 'bin\bash.exe'
+            if (Test-Path $candidate) { $gitBash = $candidate }
+        }
+        if ($gitBash) {
+            Say "Relay deploy: the declared mode is the mode installed"
+            & $gitBash ((Join-Path $tools 'test-relay-deploy-mode.sh') -replace '\\', '/')
+            if ($LASTEXITCODE -ne 0) { throw "the relay deploy mode test failed" }
+        } else {
+            Warn "Git's bash not found - skipped tools\test-relay-deploy-mode.sh"
+        }
 
         Say "C#: build and wire-format check"
         & dotnet build (Join-Path $client 'GamePingBooster.sln') --nologo -v quiet
@@ -582,7 +631,7 @@ switch ($Verb.ToLowerInvariant()) {
         if ($Arg1) { $sub = $Arg1.ToLowerInvariant() }
         switch ($sub) {
             'build' { Invoke-RelayBuild }
-            'deploy' { Invoke-RelayDeploy $Arg2 }
+            'deploy' { Invoke-RelayDeploy $Arg2 $Rest }
             'setup' { Show-RelaySetup }
             'list' { Show-RelayList }
             'logs' {
@@ -607,7 +656,8 @@ switch ($Verb.ToLowerInvariant()) {
             default {
                 Write-Host "  relay build            cross-compile relayd for Linux"
                 Write-Host "  relay list             show the relays gpb.conf declares"
-                Write-Host "  relay deploy [name]    build, upload and install"
+                Write-Host "  relay deploy [name]    build, upload and install; the mode comes from"
+                Write-Host "                         gpb.conf, and --psk or --token asserts it"
                 Write-Host "  relay logs [name]      follow journalctl"
                 Write-Host "  relay test             Go tests"
                 Write-Host "  relay setup            first-time setup, explained"

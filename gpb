@@ -17,6 +17,7 @@
 #   ./gpb relay test             Go tests, vet and gofmt                  (any OS)
 #   ./gpb relay list             show the relays gpb.conf declares         (any OS)
 #   ./gpb relay deploy [name]    build, upload and install on a relay     (any OS)
+#                                the mode comes from gpb.conf; --psk or --token asserts it
 #   ./gpb relay logs [name]      follow journalctl on a relay             (any OS)
 #   ./gpb relay setup            first-time setup, explained              (any OS)
 #   ./gpb test                   everything: Go, plus C# if the SDK is here
@@ -173,6 +174,18 @@ relay_install_args() {
             # machine. That keeps a Windows path or spaces out of the remote shell command.
             relay_licence_key "$1" >/dev/null
             args="$args --licence-key ../licence.pub"
+            ;;
+        psk)
+            # Said out loud, not left implicit, and this is the line that decides whether a
+            # relay can be moved back off token mode at all.
+            #
+            # install.sh keeps a relay that already has /etc/gpb/licence.pub in TOKEN mode when
+            # no mode is named. That rule exists for a deploy typed by hand, which does not know
+            # licensed mode exists - see the comment above KEEP_LICENCE there. This deploy is not
+            # that: it read the mode out of gpb.conf, so it has to state it. Sending nothing let
+            # the state of the far end decide instead, and a relay declared psk that happened to
+            # be running as token silently stayed token, unit and all.
+            args="$args --psk"
             ;;
     esac
     url=$(relay_report_url "$1")
@@ -495,8 +508,42 @@ EOF
 # Deploy without PowerShell, so a contributor on Linux is not locked out of the one half of the
 # project they can actually run. Same steps deploy.ps1 takes, in the same order.
 relay_deploy() {
-    pick_relay "${1:-}"
+    # A mode flag typed here is CHECKED against gpb.conf, never quietly ignored.
+    #
+    # `./gpb relay deploy hk --psk` used to be swallowed whole - the flag reached nothing, and
+    # the deploy went out in whatever mode the far end already had. Where the flag agrees with
+    # the declaration it is a no-op, which is what makes it safe to type; where it disagrees the
+    # deploy stops, because the mode belongs to one place. gpb.conf is where the licence key, the
+    # client cap and the report URL for this relay are declared, and a deploy that contradicted
+    # it would be undone by the next one that did not.
+    want_mode=
+    name=
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --psk)   want_mode=psk ;;
+            --token) want_mode=token ;;
+            -*)      die "unknown option '$1'. Usage: ./gpb relay deploy [name] [--psk|--token]" ;;
+            *)
+                [ -z "$name" ] || die "name the relay once: ./gpb relay deploy [name] [--psk|--token]"
+                name=$1
+                ;;
+        esac
+        shift
+    done
+
+    pick_relay "$name"
     target=$picked
+
+    # Before the build, not after: a mode that does not match should cost a second, not a
+    # cross-compile.
+    mode=$(relay_mode "$target")
+    if [ -n "$want_mode" ] && [ "$want_mode" != "$mode" ]; then
+        slug=$(printf '%s' "$target" | tr 'a-z' 'A-Z')
+        die "--$want_mode was asked for, but RELAY_${slug}_MODE says $mode.
+    The mode is declared in gpb.conf, so that this deploy and the next one agree.
+    Set RELAY_${slug}_MODE=$want_mode there (a token relay also needs RELAY_${slug}_LICENCE_KEY) and run this again."
+    fi
+
     need ssh "Install OpenSSH."
     need tar "Install tar. Windows 10 and later ship it in System32."
 
@@ -519,16 +566,20 @@ relay_deploy() {
     # .gitattributes should keep them LF now, so it is a second line of defence rather than the
     # thing making it work.
     max=$(relay_max_clients "$target")
-    mode=$(relay_mode "$target")
     if [ "$max" -gt 0 ]; then
         cap="max $max clients"
     else
         cap="no client limit"
     fi
-    if [ -n "$(relay_password "$target")" ]; then
-        say "Deploying to $target ($cap, one connection, password from gpb.conf)"
+    if [ "$mode" = token ]; then
+        label="token mode"
     else
-        say "Deploying to $target ($cap, one connection - expect at most one password prompt)"
+        label="PSK mode"
+    fi
+    if [ -n "$(relay_password "$target")" ]; then
+        say "Deploying to $target ($label, $cap, one connection, password from gpb.conf)"
+    else
+        say "Deploying to $target ($label, $cap, one connection - expect at most one password prompt)"
     fi
 
     # || rc=$? rather than a bare call: under set -e a non-zero exit would end the script here,
@@ -586,7 +637,7 @@ case "$verb" in
             build)  relay_build ;;
             test)   relay_test ;;
             list)   relay_list ;;
-            deploy) relay_deploy "${1:-}" ;;
+            deploy) relay_deploy "$@" ;;
             logs)
                 pick_relay "${1:-}"
                 host=$picked
@@ -599,7 +650,8 @@ case "$verb" in
                 printf '  relay build            cross-compile relayd for Linux\n'
                 printf '  relay test             gofmt, go vet, go test\n'
                 printf '  relay list             show the relays gpb.conf declares\n'
-                printf '  relay deploy [name]    build, upload and install\n'
+                printf '  relay deploy [name]    build, upload and install; the mode comes from\n'
+                printf '                         gpb.conf, and --psk or --token asserts it\n'
                 printf '  relay logs [name]      follow journalctl\n'
                 printf '  relay setup            first-time setup, explained\n'
                 ;;
@@ -608,6 +660,14 @@ case "$verb" in
 
     test)
         relay_test
+        # The deploy tooling has no compiler to catch it: the mode a relay is installed in comes
+        # out of a string built in two places, and getting it wrong takes a fleet offline quietly.
+        if command -v bash >/dev/null 2>&1; then
+            say "relay deploy: the declared mode is the mode installed"
+            bash "$root/tools/test-relay-deploy-mode.sh"
+        else
+            warn "bash not found - skipped tools/test-relay-deploy-mode.sh"
+        fi
         # The C# half needs the .NET SDK. On a machine without it the Go tests are still worth
         # running on their own rather than failing the whole command.
         if command -v dotnet >/dev/null 2>&1; then

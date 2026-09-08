@@ -239,6 +239,14 @@ else
     echo "The pre-shared key at /etc/gpb/psk is empty - refusing to start a relay nothing can reach." >&2
     exit 1
   fi
+
+  # The mirror of the note in the token branch, and it matters most on the way BACK: a relay
+  # being moved off token mode still has its licence key here, so the move is reversible without
+  # re-sending it. Nothing reads it while this relay is in PSK mode - the unit below is given
+  # -psk-file and nothing else - and saying so is what makes the switch visible in a deploy log.
+  if [[ -s /etc/gpb/licence.pub ]]; then
+    echo "    leaving the existing /etc/gpb/licence.pub in place, unused - relayd is given only one mode"
+  fi
 fi
 
 # ------------------------------------------------------------------ status reporting
