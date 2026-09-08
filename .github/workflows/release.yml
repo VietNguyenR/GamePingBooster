@@ -127,7 +127,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           if (-not (Test-Path profiles\pubg-vn.json)) {
-            Write-Warning "profiles\pubg-vn.json not present (expected - it's gitignored). Using profiles\pubg-vn.example.json instead. This release's installer/client package will NOT have real PUBG server IPs."
+            Write-Warning "profiles\pubg-vn.json not present (expected - it's gitignored). Using profiles\pubg-vn.example.json instead."
             Copy-Item profiles\pubg-vn.example.json profiles\pubg-vn.json
           }
 
@@ -194,11 +194,25 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
-          gh release create "${{ github.ref_name }}" `
+          $tag = "${{ github.ref_name }}"
+          $repo = "${{ github.repository }}"
+
+          # Idempotent: a re-run of this same tag (retry after a transient failure, or a
+          # deliberate re-run) must not die on "a release with the same tag name already
+          # exists". Replace the release, never the tag - the tag was already pushed and
+          # validated before this job started, so only the release side is CI's to redo.
+          gh release view $tag --repo $repo *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag already exists - deleting it so this run can recreate it (the git tag itself is left alone)."
+            gh release delete $tag --repo $repo --yes
+            if ($LASTEXITCODE -ne 0) { throw "Failed to delete the existing release $tag" }
+          }
+
+          gh release create $tag `
             "installer\dist\GamePingBooster-Setup-$env:VERSION.exe" `
             "GamePingBooster-Client-$env:VERSION-win-x64.zip" `
             "GamePingBooster-Server-$env:VERSION-linux-amd64.tar.gz" `
-            --repo "${{ github.repository }}" `
+            --repo $repo `
             --title "Game Ping Booster v$env:VERSION" `
             --verify-tag `
             --generate-notes
