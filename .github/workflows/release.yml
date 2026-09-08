@@ -1,0 +1,205 @@
+name: Release
+
+# Trigger: a version tag pushed anywhere (tags aren't scoped to a branch in GitHub's push
+# filters), but the "must be on main" rule is enforced explicitly in the validate step below.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # only the release step needs this, to create the release and upload assets
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  # Pinned to what client/native/wintun/README.md documents as the current build. Bump both
+  # together when wintun.net ships a new release.
+  WINTUN_VERSION: "0.14.1"
+
+jobs:
+  build-and-release:
+    name: Build client, installer and server, then release
+    # The client and its installer are Windows-only by construction (Wintun, netsh, a Windows
+    # service). The Go relay cross-compiles for linux/amd64 fine from Windows too (CGO disabled),
+    # so one job builds everything - no artifact hand-off between jobs needed.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history: needed for the "tag is on main" ancestry check below
+
+      - name: Validate tag format
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = "${{ github.ref_name }}"
+          # Same shape gpb.ps1's Set-GpbVersion accepts: x.y.z, optional -suffix, "v" prefix required here.
+          if ($tag -notmatch '^v\d+\.\d+\.\d+(-[A-Za-z0-9.]+)?$') {
+            Write-Error "Tag '$tag' is not of the form vX.Y.Z or vX.Y.Z-suffix."
+            exit 1
+          }
+          $tagVersion = $tag.TrimStart('v')
+          "TAG_VERSION=$tagVersion" >> $env:GITHUB_ENV
+
+      - name: Verify the tag is reachable from main
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git fetch origin main
+          git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Tag '${{ github.ref_name }}' (commit $env:GITHUB_SHA) is not on origin/main. Releases are only cut from main."
+            exit 1
+          }
+          Write-Host "OK: $env:GITHUB_SHA is on origin/main"
+
+      - name: Validate application version matches the tag
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # application/VERSION is the single source of truth (see client/Directory.Build.props
+          # and gpb.ps1's Get-GpbVersion) - the tag is only what triggers the release, never an
+          # override for it.
+          $appVersion = (Get-Content VERSION -Raw).Trim()
+          if ($appVersion -ne $env:TAG_VERSION) {
+            $msg = "Tag 'v$env:TAG_VERSION' does not match the application version 'v$appVersion' declared in VERSION.`n" +
+                   "Fix one of the two before releasing:`n" +
+                   "  - wrong VERSION file: .\gpb.ps1 version $env:TAG_VERSION   (commit it, then re-tag)`n" +
+                   "  - wrong tag: delete it and push v$appVersion instead"
+            Write-Error $msg
+            exit 1
+          }
+          "VERSION=$appVersion" >> $env:GITHUB_ENV
+          Write-Host "Application version v$appVersion matches tag v$env:TAG_VERSION"
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x" # client targets net9.0-windows (client/src/*/*.csproj)
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: relay/go.mod # relay/go.mod pins go 1.22
+
+      - name: Install Inno Setup
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install innosetup -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed" }
+
+      - name: Fetch and verify wintun.dll
+        # Not committed (see client/native/wintun/README.md - third-party binary, official signed
+        # build only). Downloaded here and verified the same way the README tells a human to:
+        # Authenticode signature must be Valid and signed by WireGuard LLC.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = $env:WINTUN_VERSION
+          $zipUrl = "https://www.wintun.net/builds/wintun-$ver.zip"
+          Write-Host "Downloading $zipUrl"
+          Invoke-WebRequest -Uri $zipUrl -OutFile wintun.zip
+
+          Expand-Archive -Path wintun.zip -DestinationPath wintun_extracted
+          $dll = Get-ChildItem -Path wintun_extracted -Recurse -Filter wintun.dll |
+            Where-Object { $_.FullName -match '\\amd64\\' } | Select-Object -First 1
+          if (-not $dll) { throw "wintun.dll (amd64) not found inside wintun-$ver.zip" }
+
+          $sig = Get-AuthenticodeSignature $dll.FullName
+          if ($sig.Status -ne 'Valid') {
+            throw "wintun.dll signature status is '$($sig.Status)', expected Valid. Refusing to use it."
+          }
+          if ($sig.SignerCertificate.Subject -notmatch 'WireGuard LLC') {
+            throw "wintun.dll is signed by '$($sig.SignerCertificate.Subject)', expected WireGuard LLC. Refusing to use it."
+          }
+          Write-Host "wintun.dll signature OK: $($sig.SignerCertificate.Subject)"
+
+          New-Item -ItemType Directory -Force -Path client\native\wintun | Out-Null
+          Copy-Item $dll.FullName client\native\wintun\wintun.dll -Force
+
+      - name: Prepare the PUBG server profile
+        # profiles/pubg-vn.json (real IP ranges) is gitignored on purpose - it's live production
+        # context, not public. A CI checkout never has it. Per project decision, this workflow
+        # packages the public example profile instead; swap in the real one before this step
+        # (e.g. from a secret) if a release needs to ship real IPs.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path profiles\pubg-vn.json)) {
+            Write-Warning "profiles\pubg-vn.json not present (expected - it's gitignored). Using profiles\pubg-vn.example.json instead. This release's installer/client package will NOT have real PUBG server IPs."
+            Copy-Item profiles\pubg-vn.example.json profiles\pubg-vn.json
+          }
+
+      - name: Build client and package the installer
+        # Reuses gpb.ps1's own `installer` verb end to end: it Native-AOT publishes both the
+        # service and the UI (-c Release -r win-x64), checks every file the installer needs is
+        # there, then runs Inno Setup. No version argument: VERSION was already validated above
+        # to match the tag, so gpb.ps1 is left to read it rather than being told it a second time.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\gpb.ps1 installer
+          if ($LASTEXITCODE -ne 0) { throw "gpb.ps1 installer failed" }
+
+          $installer = "installer\dist\GamePingBooster-Setup-$env:VERSION.exe"
+          if (-not (Test-Path $installer)) { throw "Expected installer not found: $installer" }
+          Write-Host "Installer OK: $installer"
+
+      - name: Package the client zip
+        # No existing script produces a plain client package (only the installer does), so this
+        # stages the same files the installer copies - see installer/GamePingBooster.iss [Files] -
+        # and zips them for people who don't want to run an installer.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = "dist\client"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          $svcPublish = "client\src\GamePingBooster.Service\bin\Release\net9.0-windows\win-x64\publish"
+          $appPublish = "client\src\GamePingBooster.App\bin\Release\net9.0-windows\win-x64\publish"
+          # Flat copy, same as gpb.ps1's own `publish` verb does for these two folders - Native
+          # AOT publish output here has no subdirectories worth preserving.
+          Get-ChildItem $svcPublish, $appPublish -File | Where-Object { $_.Extension -ne '.pdb' } |
+            ForEach-Object { Copy-Item $_.FullName $stage -Force }
+          Copy-Item client\native\wintun\wintun.dll $stage -Force
+          New-Item -ItemType Directory -Force -Path "$stage\profiles" | Out-Null
+          Copy-Item profiles\pubg-vn.json "$stage\profiles\pubg-vn.json" -Force
+
+          $zipName = "GamePingBooster-Client-$env:VERSION-win-x64.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $zipName -Force
+          Write-Host "Client package OK: $zipName"
+
+      - name: Build and package the relay server
+        # Reuses relay/deploy.ps1 -PackageOnly as-is: it cross-compiles relayd for linux/amd64
+        # with the version stamped in from VERSION (-X main.version=...) and tars it up with the
+        # deploy scripts, exactly what a self-host operator downloads from a release.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # deploy.ps1 does its own Set-Location into relay\ and never restores it, so the repo
+          # root is captured first and restored after - otherwise the paths below would resolve
+          # relative to relay\ instead of the checkout root.
+          $root = Get-Location
+          & (Join-Path $root 'relay\deploy.ps1') -PackageOnly
+          $exit = $LASTEXITCODE
+          Set-Location $root
+          if ($exit -ne 0) { throw "relay\deploy.ps1 -PackageOnly failed" }
+
+          $src = Join-Path $root 'relay\gpb-relay.tar.gz'
+          if (-not (Test-Path $src)) { throw "Expected relay package not found: $src" }
+          $serverPackage = Join-Path $root "GamePingBooster-Server-$env:VERSION-linux-amd64.tar.gz"
+          Copy-Item $src $serverPackage -Force
+          Write-Host "Server package OK: $serverPackage"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release create "${{ github.ref_name }}" `
+            "installer\dist\GamePingBooster-Setup-$env:VERSION.exe" `
+            "GamePingBooster-Client-$env:VERSION-win-x64.zip" `
+            "GamePingBooster-Server-$env:VERSION-linux-amd64.tar.gz" `
+            --repo "${{ github.repository }}" `
+            --title "Game Ping Booster v$env:VERSION" `
+            --verify-tag `
+            --generate-notes
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
