@@ -26,17 +26,56 @@
     Defaults to ..\..\profiles\pubg-vn.json.
 
 .PARAMETER MaxPrefixWidth
-    Widest prefix that may be accepted. Default 20 (/20 = 4096 addresses).
+    Widest prefix that may be accepted, and the width the builder tries FIRST. Default 20
+    (/20 = 4096 addresses).
 
-    Both this and MaxTotalAddresses were set from measurement rather than caution. Azure publishes
-    southeastasia in /16s and /17s, so the cap decides how much one sighting is worth: at /21 a
-    match landed on an uncovered server about twice in ten, at /20 the same set of observations
-    covers roughly twice the ground. Ten matches at /20 missed twice, which is the number to beat
-    by capturing more, not by widening further.
+    The builder narrows on its own: if the whole profile does not fit under -MaxTotalAddresses at
+    this width, it rebuilds one bit narrower and tries again, down to -NarrowestPrefixWidth. That
+    only works because every run rebuilds the CIDR lists from observed.txt instead of adding to
+    what the profile already had, so the width applies to the whole profile rather than only to
+    today's sightings.
 
-    Going wider than /20 is where the cost starts to be real - /19 pulls in 143,000 addresses and
-    /18 over 225,000, which is most of Azure southeastasia. Narrow instead (21, 22) if the profile
-    ever needs to fit a smaller ceiling; that costs coverage per sighting, never correctness.
+    Accreting is what dead-ended this profile once already: blocks recorded weeks earlier kept
+    their width forever, narrowing could not reach them, the total came to rest at exactly 131,072
+    addresses, and the only move left was to raise the very limit that exists to prevent it.
+
+    Width is a bet on what one sighting is worth - at /20 one observed server also speaks for the
+    4095 addresses around it, at /21 for 2047. Narrowing costs coverage per sighting, never
+    correctness: a server in the uncovered half is captured and added next session.
+
+    The one measurement on record contradicts itself and needs redoing. It says a match landed on
+    an uncovered server about twice in ten at /21, and also that ten matches at /20 missed twice,
+    which would make the two widths equal and leave /20 with nothing to stand on. Treat the
+    starting width as unmeasured until someone repeats it.
+
+    Widening past /20 is never automatic. /19 is about 143,000 addresses and /18 about 225,000 -
+    10% and 16% of AzureCloud.southeastasia, which is 1,383,855 addresses in the 2026-08-31
+    service tags. The earlier note here called /18 "most of" that region; it is off by six times.
+
+.PARAMETER NarrowestPrefixWidth
+    Floor for the automatic narrowing. Default 24 (/24 = 256 addresses).
+
+    Below this a block covers little more than the servers already seen, so a profile that still
+    does not fit has a data problem rather than a packing problem: either observed.txt is holding
+    addresses the game has stopped using, or the ceiling is genuinely too low. The builder stops
+    and says which options are left, rather than narrowing towards /32 and calling it a success.
+
+.PARAMETER ManualCidrPath
+    Ranges to include that no cloud range file can confirm, one per line as '<regionId> <cidr>'.
+    Defaults to manual-cidrs.txt next to this script.
+
+    This file exists because the rebuild is destructive. A CIDR typed straight into the profile
+    JSON is gone on the next run without a word, so anything looked up by hand out of
+    observed-unverified.txt belongs here instead, with a comment recording what it turned out to
+    be and when it was checked.
+
+.PARAMETER AllowCoverageLoss
+    Write the profile even when ranges it already had would disappear completely.
+
+    A rebuild is only as complete as observed.txt, and that file has been reset before. When a
+    range in the current profile has nothing behind it in the rebuilt set - not even a narrower
+    piece of itself - the usual cause is missing history rather than a server that went away, so
+    the build stops instead of quietly shrinking what the client routes.
 
 .PARAMETER MaxTotalAddresses
     Ceiling for the whole profile. Default 131,072.
@@ -66,7 +105,10 @@ param(
     [int]$MinLandmarkSightings = 2,
     [int]$MaxLandmarksPerRegion = 3,
     [int]$MaxPrefixWidth = 20,
+    [int]$NarrowestPrefixWidth = 24,
     [int]$MaxTotalAddresses = 131072,
+    [string]$ManualCidrPath,
+    [switch]$AllowCoverageLoss,
     [switch]$DryRun,
     [string[]]$AwsRegions = @('ap-southeast-1', 'ap-northeast-1', 'ap-northeast-2'),
     [string[]]$AzureRegions = @('southeastasia', 'japaneast', 'koreacentral')
@@ -77,6 +119,7 @@ $ErrorActionPreference = 'Stop'
 if (-not $ObservedIpPath) { $ObservedIpPath = Join-Path $PSScriptRoot 'observed.txt' }
 if (-not $LandmarkObservedPath) { $LandmarkObservedPath = Join-Path $PSScriptRoot 'landmarks-observed.txt' }
 if (-not $ProfilePath) { $ProfilePath = Join-Path $PSScriptRoot '..\..\profiles\pubg-vn.json' }
+if (-not $ManualCidrPath) { $ManualCidrPath = Join-Path $PSScriptRoot 'manual-cidrs.txt' }
 $cacheDir = Join-Path $PSScriptRoot '.cache'
 $unverifiedPath = Join-Path $PSScriptRoot 'observed-unverified.txt'
 
@@ -306,12 +349,15 @@ foreach ($region in $AzureRegions) {
 Write-Host "    $($azurePrefixes.Count) Azure prefixes in $($AzureRegions -join ', ')"
 
 # ------------------------------------------------------------------ matching
+#
+# Which published cloud prefix an address falls inside does not depend on the width the profile
+# ends up using, so it is resolved once, here. Turning a match into an actual profile prefix -
+# the clamp - is Get-ClampedPrefixes below, and that runs again for every width the builder tries.
 
 Write-Host ""
 Write-Host "==> Matching" -ForegroundColor Cyan
 
-$byRegion = @{}      # profile region id -> list of CIDRs
-$sourcesByRegion = @{}
+$matched = @()
 $unverified = @()
 
 foreach ($ip in $observed) {
@@ -343,29 +389,178 @@ foreach ($ip in $observed) {
         continue
     }
 
-    $regionId = $regionMap[$cloudRegion]
-    # When the published prefix is wider than we allow, keep the /MaxPrefixWidth BLOCK that
-    # contains this address. The obvious alternative - collapse to the observed /24 - is what this
-    # used to do, and it threw away 99.6% of a /16: Azure publishes southeastasia as /16s and
-    # /17s, so every single /24 needed its own separate sighting and the profile could never
-    # saturate no matter how long anyone played. Clamping keeps the cap meaningful and bounded
-    # while letting one observation speak for the block it landed in.
+    $matched += [pscustomobject]@{
+        Address = $ip; Value = $value; Published = $best; PublishedBits = $bestBits
+        Source = $source; RegionId = $regionMap[$cloudRegion]
+    }
+}
+Write-Host "    $($matched.Count) matched in an Asian cloud range, $($unverified.Count) held back"
+
+function Get-ClampedPrefixes {
+    param([int]$Width)
+
+    # When the published prefix is wider than we allow, keep the /Width BLOCK that contains this
+    # address. The obvious alternative - collapse to the observed /24 - is what this used to do,
+    # and it threw away 99.6% of a /16: Azure publishes southeastasia as /16s and /17s, so every
+    # single /24 needed its own separate sighting and the profile could never saturate no matter
+    # how long anyone played. Clamping keeps the cap meaningful and bounded while letting one
+    # observation speak for the block it landed in.
     # Decimal with an L suffix, not 0xFFFFFFFF: PowerShell 5.1 parses that hex literal as int32
     # BEFORE any cast, so it arrives as -1 and every mask built from it comes out negative.
-    $hostBits = 32 - $MaxPrefixWidth
+    $hostBits = 32 - $Width
     $capMask = [uint32](4294967295L -band (-bnot ((1L -shl $hostBits) - 1L)))
-    $fallback = (ConvertFrom-UInt32Address ([uint32]($value -band $capMask))) + "/$MaxPrefixWidth"
-    if ($bestBits -lt $MaxPrefixWidth) {
-        $chosen = $fallback
-        Write-Host ("    {0,-18} {1,-22} published as {2}, using {3}" -f $ip, $source, $best, $chosen)
-    } else {
-        $chosen = $best
-        Write-Host ("    {0,-18} {1,-22} {2}" -f $ip, $source, $chosen)
+
+    $byRegion = @{}
+    $sources = @{}
+    $lines = @()
+
+    foreach ($m in $matched) {
+        $fallback = (ConvertFrom-UInt32Address ([uint32]($m.Value -band $capMask))) + "/$Width"
+        if ($m.PublishedBits -lt $Width) {
+            $chosen = $fallback
+            $lines += ("    {0,-18} {1,-22} published as {2}, using {3}" -f $m.Address, $m.Source, $m.Published, $chosen)
+        } else {
+            $chosen = $m.Published
+            $lines += ("    {0,-18} {1,-22} {2}" -f $m.Address, $m.Source, $chosen)
+        }
+
+        if (-not $byRegion.ContainsKey($m.RegionId)) { $byRegion[$m.RegionId] = @(); $sources[$m.RegionId] = @() }
+        $byRegion[$m.RegionId] += $chosen
+        $sources[$m.RegionId] += $m.Source
     }
 
-    if (-not $byRegion.ContainsKey($regionId)) { $byRegion[$regionId] = @(); $sourcesByRegion[$regionId] = @() }
-    $byRegion[$regionId] += $chosen
-    $sourcesByRegion[$regionId] += $source
+    return @{ ByRegion = $byRegion; Sources = $sources; Lines = $lines }
+}
+
+function Read-ManualCidrs {
+    param([string]$Path)
+
+    # Ranges no cloud range file can vouch for, kept outside the profile because the profile is
+    # regenerated from observed.txt on every run and would drop them without a word.
+    #   asia-sg  85.236.96.0/20   # checked 2026-09-09, <whose network it turned out to be>
+    $out = @{}
+    if (-not (Test-Path $Path)) { return $out }
+
+    foreach ($line in Get-Content $Path) {
+        $text = ($line -split '#')[0].Trim()
+        if (-not $text) { continue }
+        $fields = $text -split '\s+'
+        if ($fields.Count -lt 2) {
+            throw "$Path : '$line' - expected '<regionId> <cidr>', for example 'asia-sg 85.236.96.0/20'"
+        }
+        if ($fields[1] -notmatch '^\d{1,3}(\.\d{1,3}){3}/\d{1,2}$') {
+            throw "$Path : '$($fields[1])' is not an IPv4 CIDR"
+        }
+        if (-not $out.ContainsKey($fields[0])) { $out[$fields[0]] = @() }
+        $out[$fields[0]] += $fields[1]
+    }
+    return $out
+}
+
+function Test-CidrsOverlap {
+    param([string]$A, [string]$B)
+    $aBits = [int]$A.Split('/')[1]
+    $bBits = [int]$B.Split('/')[1]
+    $bits = [math]::Min($aBits, $bBits)
+    if ($bits -eq 0) { return $true }
+    $mask = [uint32]::MaxValue -shl (32 - $bits)
+    return (((ConvertTo-UInt32Address $A.Split('/')[0]) -band $mask) -eq
+            ((ConvertTo-UInt32Address $B.Split('/')[0]) -band $mask))
+}
+
+function New-ProfileAtWidth {
+    param([object]$Source, [int]$Width, [hashtable]$Manual, [object[]]$Landmarks)
+
+    # Work on a copy. The width search builds the whole profile several times over, and a rejected
+    # attempt must not leave its prefixes behind in the object the next attempt starts from.
+    $data = $Source | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    $g = $data.games | Where-Object { $_.id -eq $GameId }
+
+    $clamped = Get-ClampedPrefixes -Width $Width
+    $byRegion = $clamped.ByRegion
+    $sources = $clamped.Sources
+
+    $previous = @{}; $current = @{}; $added = @{}; $warnings = @(); $newCount = 0
+    $regionIds = @(@($g.regions | ForEach-Object { $_.id }) + @($byRegion.Keys) + @($Manual.Keys) |
+                   Sort-Object -Unique)
+
+    foreach ($regionId in $regionIds) {
+        $region = $g.regions | Where-Object { $_.id -eq $regionId }
+        if (-not $region) {
+            $region = [pscustomobject]@{
+                id = $regionId; name = $regionNames[$regionId]; source = ''; note = ''; cidrs = @(); landmarks = @()
+            }
+            $g.regions += $region
+        }
+        if ($null -eq $region.PSObject.Properties['landmarks']) {
+            $region | Add-Member -NotePropertyName landmarks -NotePropertyValue @()
+        }
+
+        $previous[$regionId] = @($region.cidrs)
+
+        # The rebuild proper: today's matches plus anything hand-added, and nothing at all carried
+        # over from the file. Adjacent halves are still merged, which is what keeps the route
+        # count down once the blocks get narrower.
+        $fresh = @(@($byRegion[$regionId]) + @($Manual[$regionId]) | Where-Object { $_ })
+        $union = @()
+        if ($fresh.Count -gt 0) {
+            $union = @(Merge-AdjacentPrefixes -Cidrs $fresh -MinPrefixWidth $Width | Sort-Object)
+        }
+
+        # Drop anything that covers a landmark. Loud, and it does not stop the run: the rest of
+        # the capture is still good, and a collision means the address behind that prefix needs
+        # looking at, not that the tool failed.
+        $swallowed = @()
+        foreach ($cidr in $union) {
+            foreach ($lm in $Landmarks) {
+                if (Test-IpInCidr -Ip $lm.Value -Cidr $cidr) {
+                    $swallowed += [pscustomobject]@{ Cidr = $cidr; Landmark = $lm.Address; Region = $lm.Region }
+                }
+            }
+        }
+        if ($swallowed.Count -gt 0) {
+            foreach ($hit in $swallowed) {
+                $warnings += ("$($hit.Cidr) covers $($hit.Landmark), the datacentre probe for " +
+                              "'$($hit.Region)'. LEFT OUT. Routing it would make the game measure that " +
+                              "region through the relay and every other region over the player's own " +
+                              "connection - see the design notes.")
+            }
+            $excluded = @($swallowed.Cidr | Sort-Object -Unique)
+            $union = @($union | Where-Object { $excluded -notcontains $_ })
+        }
+
+        $added[$regionId] = @($union | Where-Object { $previous[$regionId] -notcontains $_ })
+        $newCount += $added[$regionId].Count
+        $current[$regionId] = $union
+        $region.cidrs = $union
+
+        # A region with nothing observed keeps the note it was given by hand - asia-jp's says
+        # "only fill this in after capturing in Japan", and replacing that with a generated line
+        # about zero addresses would throw away an instruction for a list that is meant to be
+        # empty.
+        if ($union.Count -gt 0) {
+            $region.source = (($sources[$regionId] | Sort-Object -Unique) -join ', ')
+            $region.note = "Auto-generated by Build-PubgProfile.ps1 on $((Get-Date).ToString('yyyy-MM-dd')) " +
+                           "from $($observed.Count) observed addresses, rebuilt from scratch on every run. " +
+                           "Cloud providers publish these inside much wider blocks, so anything wider than " +
+                           "/$Width is clamped to the /$Width block around the observed address. " +
+                           "Keep capturing until several sessions in a row add nothing new."
+        }
+    }
+
+    $total = 0; $prefixes = 0
+    foreach ($r in $g.regions) {
+        foreach ($c in @($r.cidrs)) {
+            $prefixes++
+            $total += [math]::Pow(2, 32 - [int]$c.Split('/')[1])
+        }
+    }
+
+    return @{
+        Data = $data; Width = $Width; Total = [int]$total; Prefixes = $prefixes
+        Previous = $previous; Current = $current; Added = $added
+        Warnings = $warnings; Lines = $clamped.Lines; NewCount = $newCount
+    }
 }
 
 if ($unverified.Count -gt 0) {
@@ -618,57 +813,81 @@ if ($landmarks.Count -eq 0) {
     Test-LandmarkRegions -Landmarks $landmarks -Azure $azure
 }
 
-$totalNew = 0
-foreach ($regionId in ($byRegion.Keys | Sort-Object)) {
-    $region = $game.regions | Where-Object { $_.id -eq $regionId }
-    if (-not $region) {
-        $region = [pscustomobject]@{
-            id = $regionId; name = $regionNames[$regionId]; source = ''; note = ''; cidrs = @(); landmarks = @()
+$manualCidrs = Read-ManualCidrs -Path $ManualCidrPath
+$manualCount = 0
+foreach ($k in $manualCidrs.Keys) { $manualCount += @($manualCidrs[$k]).Count }
+if ($manualCount -gt 0) {
+    Write-Host "    $manualCount hand-added prefix(es) from $(Split-Path $ManualCidrPath -Leaf)"
+}
+
+# Rebuild rather than accrete, and narrow until the whole profile fits.
+#
+# Every run regenerates the CIDR lists from observed.txt, so -MaxPrefixWidth applies to the entire
+# profile instead of only to today's sightings. Accreting is what dead-ended this profile at
+# exactly 131,072 addresses: blocks recorded weeks earlier kept their width forever, so narrowing
+# could not shrink them and the only move left was to raise the limit that exists to stop exactly
+# that. The cost of rebuilding is that hand-written prefixes do not survive - they go in
+# manual-cidrs.txt, which is read back in above.
+$attempt = $null
+for ($width = $MaxPrefixWidth; $width -le $NarrowestPrefixWidth; $width++) {
+    $attempt = New-ProfileAtWidth -Source $profileData -Width $width -Manual $manualCidrs -Landmarks $landmarks
+    if ($attempt.Total -le $MaxTotalAddresses) { break }
+    Write-Host ("    /{0}: {1} prefixes, {2} addresses - over the {3} limit, narrowing to /{4}" -f
+                $width, $attempt.Prefixes, $attempt.Total, $MaxTotalAddresses, ($width + 1)) -ForegroundColor DarkYellow
+    $attempt = $null
+}
+
+if (-not $attempt) {
+    Write-Host ""
+    Write-Warning "Even at /$NarrowestPrefixWidth the profile does not fit under $MaxTotalAddresses addresses."
+    Write-Host "    Narrowing further is not worth doing - a /$NarrowestPrefixWidth already covers little beyond the"
+    Write-Host "    servers actually seen, so this is a data problem rather than a packing one. Either age out"
+    Write-Host "    addresses that have not appeared for several sessions (observed.txt keeps a sighting count"
+    Write-Host "    per address), or raise -MaxTotalAddresses deliberately, knowing that number is what keeps a"
+    Write-Host "    whole cloud region out of the routing table."
+    exit 1
+}
+
+$profileData = $attempt.Data
+$game = $profileData.games | Where-Object { $_.id -eq $GameId }
+
+Write-Host ""
+Write-Host "==> Building at /$($attempt.Width)" -ForegroundColor Cyan
+foreach ($line in $attempt.Lines) { Write-Host $line }
+foreach ($w in $attempt.Warnings) { Write-Warning $w }
+
+# A rebuild is only as complete as observed.txt, and that file has been reset before - on
+# 2026-09-05, with the history archived beside it as observed.txt.bak-20260905. So before writing,
+# check that every range the profile already had still has something behind it. A range with no
+# overlap at all in the rebuilt set means the observations that produced it are missing, not that
+# the servers went away, and writing that out would quietly shrink what the client routes.
+$lostGround = @()
+foreach ($regionId in $attempt.Previous.Keys) {
+    foreach ($old in @($attempt.Previous[$regionId])) {
+        $survives = $false
+        foreach ($new in @($attempt.Current[$regionId])) {
+            if (Test-CidrsOverlap -A $old -B $new) { $survives = $true; break }
         }
-        $game.regions += $region
+        if (-not $survives) { $lostGround += "$regionId : $old" }
     }
-    if ($null -eq $region.PSObject.Properties['landmarks']) {
-        $region | Add-Member -NotePropertyName landmarks -NotePropertyValue @()
+}
+if ($lostGround.Count -gt 0) {
+    Write-Host ""
+    Write-Warning "$($lostGround.Count) range(s) in the current profile have nothing behind them in $(Split-Path $ObservedIpPath -Leaf):"
+    foreach ($l in ($lostGround | Sort-Object)) { Write-Host "      $l" }
+    if (-not $AllowCoverageLoss) {
+        Write-Host "    Nothing was written. This usually means observed.txt is missing history rather than"
+        Write-Host "    those servers being gone - look for an observed.txt.bak-* worth merging back in first."
+        Write-Host "    Re-run with -AllowCoverageLoss once you are satisfied they really should go."
+        exit 1
     }
+    Write-Host "    -AllowCoverageLoss was given, so they are being dropped." -ForegroundColor Yellow
+}
 
-    $before = @($region.cidrs)
-    # Union with what the profile already had, then re-aggregate over the whole set: a prefix
-    # added today may be the missing half of one recorded weeks ago.
-    $union = Merge-AdjacentPrefixes -Cidrs (@($before) + @($byRegion[$regionId])) -MinPrefixWidth $MaxPrefixWidth
-    $union = @($union | Sort-Object)
-
-    # Drop anything that covers a landmark, before it can be counted as "new" and reported as
-    # progress. Loud, and it does not stop the run: the rest of the capture is still good, and a
-    # collision means the address behind that prefix needs looking at, not that the tool failed.
-    $swallowed = @()
-    foreach ($cidr in $union) {
-        foreach ($lm in $landmarks) {
-            if (Test-IpInCidr -Ip $lm.Value -Cidr $cidr) {
-                $swallowed += [pscustomobject]@{ Cidr = $cidr; Landmark = $lm.Address; Region = $lm.Region }
-            }
-        }
-    }
-    if ($swallowed.Count -gt 0) {
-        foreach ($hit in $swallowed) {
-            Write-Warning ("$($hit.Cidr) covers $($hit.Landmark), the datacentre probe for " +
-                           "'$($hit.Region)'. LEFT OUT. Routing it would make the game measure that " +
-                           "region through the relay and every other region over the player's own " +
-                           "connection - see the design notes.")
-        }
-        $excluded = @($swallowed.Cidr | Sort-Object -Unique)
-        $union = @($union | Where-Object { $excluded -notcontains $_ })
-    }
-
-    $added = @($union | Where-Object { $before -notcontains $_ })
-    $totalNew += $added.Count
-
-    $region.cidrs = $union
-    $region.source = (($sourcesByRegion[$regionId] | Sort-Object -Unique) -join ', ')
-    $region.note = "Auto-generated by Build-PubgProfile.ps1 on $((Get-Date).ToString('yyyy-MM-dd')) " +
-                   "from $($observed.Count) observed addresses. Cloud providers publish these inside much " +
-                   "wider blocks, so anything wider than /$MaxPrefixWidth is clamped to the /$MaxPrefixWidth block around the observed address. " +
-                   "Keep capturing until several sessions in a row add nothing new."
-
+$totalNew = $attempt.NewCount
+foreach ($regionId in ($attempt.Current.Keys | Sort-Object)) {
+    $union = @($attempt.Current[$regionId])
+    $added = @($attempt.Added[$regionId])
     $addedText = ''
     if ($added.Count -gt 0) { $addedText = " (+$($added.Count) new: $($added -join ', '))" }
     Write-Host "    $regionId : $($union.Count) prefixes$addedText"
@@ -716,6 +935,8 @@ if ($LASTEXITCODE -ne 0) {
     Copy-Item "$ProfilePath.bak" $ProfilePath -Force
     Write-Host ""
     Write-Warning "Validation failed - the previous profile has been restored, nothing was changed."
-    Write-Host "    Narrow the blocks and try again, e.g. -MaxPrefixWidth 21, or raise -MaxTotalAddresses deliberately."
+    Write-Host "    The address total is the builder's job now, so a failure here is one of the other"
+    Write-Host "    checks: a range in manual-cidrs.txt wider than /$MaxPrefixWidth, one that covers a landmark,"
+    Write-Host "    contains the relay IP, or overlaps private space. The error above says which."
     exit 1
 }
