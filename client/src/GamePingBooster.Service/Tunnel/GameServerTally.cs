@@ -144,7 +144,7 @@ internal sealed class GameServerTally
             foreach (var (key, flow) in ordered)
             {
                 var address = new IPAddress(BinaryPrimitives.ReverseEndianness(key.Address));
-                builder.Append("\n    ").Append(address);
+                builder.Append("\n    ").Append("***");
                 if (key.Port != 0) builder.Append(':').Append(key.Port);
                 builder.Append('/').Append(ProtocolName(key.Protocol))
                        .Append("  ").Append(flow.Packets).Append(" pkt, ")
