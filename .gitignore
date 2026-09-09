@@ -72,3 +72,5 @@ token.hex
 
 # Ban sao device.key / token / config truoc khi chay `gpb reset`
 .reset-backup/
+profiles/pubg-vn.json.bak-20260909-preRebuild
+tools/profile-builder/manual-cidrs.txt
