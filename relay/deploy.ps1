@@ -160,7 +160,7 @@ function Get-RelayInstallArgs {
     # These are arguments rather than environment variables because sudo resets the environment.
     # The public key is always called licence.pub in the payload, so neither its local path nor a
     # Windows path can leak into the remote command line. The private licence key is never read.
-    $args = "--max-clients $($Relay.MaxClients)"
+    $args = "--max-clients $($Relay.MaxClients) --min-tier $($Relay.MinTier)"
     if ($Relay.Mode -eq 'token') {
         $args += ' --licence-key ../licence.pub'
     } else {

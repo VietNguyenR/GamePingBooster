@@ -142,7 +142,7 @@ public sealed class StatusMessage
     /// This is the RTT to the relay over the physical path, not through the tunnel: the pinned
     /// /32 route keeps relay traffic off the virtual adapter, so keepalives never enter it.
     ///
-    /// It is live - a keepalive every three seconds - and it is the wrong number to put in front
+    /// It is live - a keepalive every second - and it is the wrong number to put in front
     /// of a player on its own. A tester saw 23 ms here while his game showed 70-80, because the
     /// leg from the relay on to the game server is not in it. Show <see cref="GamePingMs"/> as
     /// the headline and keep this as the detail that explains it.
@@ -150,23 +150,44 @@ public sealed class StatusMessage
     [JsonPropertyName("tunnelPingMs")] public double? TunnelPingMs { get; set; }
 
     /// <summary>
-    /// Estimated latency to the game's datacentre through the tunnel - what the game will show.
-    /// Null when no region could be measured, or before connecting.
+    /// Latency to the game's server through the tunnel - what the game will show. Null before
+    /// connecting, and while neither of the two ways of arriving at it has produced anything.
     ///
-    /// Live, and an estimate, in a specific way worth understanding. It is the live
-    /// <see cref="TunnelPingMs"/> plus a fixed offset for the relay-to-datacentre leg, where the
-    /// offset was taken by subtracting the first leg from a real end-to-end measurement at
-    /// connect time - so the relay's own forwarding cost is inside it. That split is deliberate:
-    /// the variable part of a player's ping is their own connection, which is measured every
-    /// three seconds, while the leg between two datacentres barely moves (0.07 ms of jitter over
-    /// five echoes, measured 2026-09-05).
+    /// It comes from one of two places, and <see cref="GamePingDirect"/> says which:
     ///
-    /// Note this is NOT the "two numbers added together" that the design notes rejects
-    /// for *choosing* a relay. That rejection is about building a total from two independent
-    /// measurements, which silently omits the relay's forwarding cost. Here the total was
-    /// measured first and the offset derived from it.
+    ///   1. MEASURED. An ICMP echo through the live tunnel to the address the game is actually
+    ///      playing on, once a second. That travels the whole path the game's packets travel, so
+    ///      there is no arithmetic in it at all.
+    ///
+    ///   2. ESTIMATED. The live <see cref="TunnelPingMs"/> plus an offset for the
+    ///      relay-to-datacentre leg, measured once at connect time against the region's landmark.
+    ///      The split is deliberate: the part that moves is the player's own connection, while
+    ///      the leg between two datacentres barely does (0.07 ms of jitter over five echoes,
+    ///      2026-09-05). Used when the game server does not answer echoes, or between matches.
+    ///
+    /// The estimate is what shipped first, and it was wrong on real hardware in a way worth
+    /// recording. Its offset came from subtracting a single handshake sample from a best-of-three
+    /// echo; on 2026-09-10 those were 45 and 45, the offset came out as zero, and the app spent
+    /// the session showing the relay ping under a label saying in-game ping - 42-43 ms against
+    /// 46-50 ms in the game. Both legs are now measured the same way, and the direct measurement
+    /// supersedes the whole calculation whenever it is available.
+    ///
+    /// Note the estimate is NOT the "two numbers added together" that the design notes
+    /// rejects for *choosing* a relay. That rejection is about building a total from two
+    /// independent measurements, which silently omits the relay's forwarding cost. Here the total
+    /// was measured first and the offset derived from it.
     /// </summary>
     [JsonPropertyName("gamePingMs")] public double? GamePingMs { get; set; }
+
+    /// <summary>
+    /// True when <see cref="GamePingMs"/> was measured against the game's own server, false when
+    /// it is the landmark estimate.
+    ///
+    /// Worth showing rather than hiding. The two are not equally trustworthy, and a player
+    /// comparing our number against the one in the game is entitled to know which they are
+    /// looking at - especially since the estimate is the one that has been wrong before.
+    /// </summary>
+    [JsonPropertyName("gamePingDirect")] public bool GamePingDirect { get; set; }
 
     /// <summary>Display name of the region the game will use, e.g. "Southeast Asia (Singapore)".</summary>
     [JsonPropertyName("gameRegionName")] public string? GameRegionName { get; set; }

@@ -273,3 +273,101 @@ func TestTokenHandshakeIsIdempotentPerDevice(t *testing.T) {
 		t.Fatal("the session the relay pointed at twice does not exist")
 	}
 }
+
+// mintTierFor is mintFor with the plan tier spelled out, for the -min-tier gate below.
+func mintTierFor(t *testing.T, licence *ecdsa.PrivateKey, device *ecdsa.PrivateKey, tier byte) []byte {
+	t.Helper()
+	tok, err := protocol.BuildToken(licence, 42,
+		protocol.MarshalPublicKey(&device.PublicKey), time.Now().Add(time.Hour), tier, 0)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	return tok
+}
+
+// tierHandshake runs one token handshake against a relay set to minTier and returns the answer.
+func tierHandshake(t *testing.T, minTier, tier byte) (*Server, protocol.HandshakeResult) {
+	t.Helper()
+	s, cli, licence, relayPub := licensedRelay(t)
+	s.cfg.MinTier = minTier
+
+	device, err := protocol.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, nonce, err := protocol.BuildHandshakeReqToken(device, mintTierFor(t, licence, device, tier),
+		clientID(11), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cli.Write(req); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := protocol.ParseHandshakeRespToken(relayPub, recvPacket(t, cli), nonce)
+	if err != nil {
+		t.Fatalf("parse answer: %v", err)
+	}
+	return s, res
+}
+
+func TestATierBelowTheRelayMinimumIsRefused(t *testing.T) {
+	// The gate that turns "this relay was not listed in your profile" into an actual refusal.
+	// Before it, a premium relay was protected only by nobody having told the client its address,
+	// and an address is not a credential: a valid token from any plan opened it.
+	s, res := tierHandshake(t, 2, 1)
+
+	if res.Status != protocol.StatusTierTooLow {
+		t.Fatalf("status is %d, want StatusTierTooLow (%d)", res.Status, protocol.StatusTierTooLow)
+	}
+
+	// Answered - the licence is real - but not admitted anywhere.
+	if res.Session != (protocol.SessionID{}) {
+		t.Fatalf("an under-tier token was given session %x", res.Session)
+	}
+	if sess := s.lookup(res.Session); sess != nil {
+		t.Fatal("an under-tier token created a session")
+	}
+	if !res.ClientIP.IsUnspecified() {
+		t.Fatalf("an under-tier token was handed the inner address %v", res.ClientIP)
+	}
+}
+
+func TestATierAtTheRelayMinimumIsAdmitted(t *testing.T) {
+	// Equal passes. The comparison is `tier < minTier`, so a plan that exactly meets the bar is
+	// in - an off-by-one here would lock every customer out of the tier they just paid for.
+	_, res := tierHandshake(t, 2, 2)
+	if res.Status != protocol.StatusOK {
+		t.Fatalf("status is %d, want StatusOK", res.Status)
+	}
+	if res.Session == (protocol.SessionID{}) {
+		t.Fatal("a token at the minimum tier got no session")
+	}
+}
+
+func TestTheDefaultMinTierAdmitsEveryPlan(t *testing.T) {
+	// -min-tier defaults to 0, so switching this build on changes nothing until an operator
+	// deliberately raises the bar on a particular relay. A tier-0 token is the weakest thing that
+	// can arrive, and it has to get in.
+	_, res := tierHandshake(t, 0, 0)
+	if res.Status != protocol.StatusOK {
+		t.Fatalf("status is %d, want StatusOK - the default must serve everyone", res.Status)
+	}
+}
+
+func TestATierAboveTheRelayMinimumIsAdmitted(t *testing.T) {
+	// -min-tier is a FLOOR, not an equality. A relay set to 2 serves 2, 3, 4 and every tier above
+	// it; only 0 and 1 are turned away.
+	//
+	// Written because the opposite reading is the natural one - "min-tier 2 means the tier-2
+	// relay" - and getting it backwards would be expensive in the quiet direction: the customer
+	// on the most expensive plan is exactly the one who would find a premium relay refusing them,
+	// and nothing in the code would look wrong.
+	_, res := tierHandshake(t, 2, 5)
+	if res.Status != protocol.StatusOK {
+		t.Fatalf("status is %d, want StatusOK - a tier above the floor must get in", res.Status)
+	}
+	if res.Session == (protocol.SessionID{}) {
+		t.Fatal("a token above the minimum tier got no session")
+	}
+}

@@ -45,9 +45,12 @@ public sealed class LicenceClient : IDisposable
     /// signs in: there is no password call here any more, and the app therefore has no code path
     /// that could handle a password even if something asked it to.
     ///
-    /// <c>/auth/login</c> still exists on the SERVER, for binaries already installed. The name
-    /// <see cref="LoginResult"/> is left as it is because it is the shape both endpoints answer
-    /// with, and renaming it would suggest the two had diverged when they have not.
+    /// The password endpoint this replaced, <c>/auth/login</c>, was deleted from the server on
+    /// 2026-09-10. It had been kept for binaries already installed, and an audit found there were
+    /// none: the form came out of this file four days before the only release ever tagged. What
+    /// remained was the one route on the service that took a password over JSON with nothing in
+    /// front of it. The name <see cref="LoginResult"/> is left alone - it is the shape this
+    /// endpoint answers with, and renaming it now would be churn for its own sake.
     ///
     /// The verifier is the PKCE secret this process kept while only its hash travelled through
     /// the browser. The redirect URI is sent again so the server can check the code is being

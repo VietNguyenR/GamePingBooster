@@ -48,6 +48,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_SRC="${HERE}/../relayd"
 
 MAX_CLIENTS=0
+MIN_TIER=0
 PSK_FILE=""
 LICENCE_KEY=""
 FORCE_PSK=no
@@ -56,6 +57,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --max-clients)
       MAX_CLIENTS="${2:-}"
+      shift 2
+      ;;
+    --min-tier)
+      MIN_TIER="${2:-}"
       shift 2
       ;;
     --psk-file)
@@ -76,7 +81,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "usage: $0 [--max-clients N] [--psk-file PATH | --psk | --licence-key PATH] [--report-url URL]" >&2
+      echo "usage: $0 [--max-clients N] [--min-tier N] [--psk-file PATH | --psk | --licence-key PATH] [--report-url URL]" >&2
       exit 2
       ;;
   esac
@@ -124,6 +129,14 @@ fi
 
 if ! [[ "$MAX_CLIENTS" =~ ^[0-9]+$ ]]; then
   echo "--max-clients must be a whole number, got '${MAX_CLIENTS}'" >&2
+  exit 2
+fi
+
+# Range-checked here as well as in relayd, because the failure is silent in the dangerous
+# direction: relayd takes this as one byte, so 256 becomes 0 and 0 serves everybody. A premium
+# relay would come up looking perfectly healthy while enforcing nothing.
+if ! [[ "$MIN_TIER" =~ ^[0-9]+$ ]] || (( MIN_TIER > 255 )); then
+  echo "--min-tier must be a whole number 0-255, got '${MIN_TIER}'" >&2
   exit 2
 fi
 
@@ -295,7 +308,7 @@ else
   AUTH_FLAG="-psk-file /etc/gpb/psk"
 fi
 
-echo "==> Installing the systemd unit (${AUTH_MODE} mode, max-clients ${MAX_CLIENTS})"
+echo "==> Installing the systemd unit (${AUTH_MODE} mode, max-clients ${MAX_CLIENTS}, min-tier ${MIN_TIER})"
 # Substituted into a temporary copy, never into the file in the payload: substituting in place
 # would leave a second run of this script with the placeholder already gone, so it would quietly
 # keep the OLD number - the kind of bug that shows up as "I changed the limit and nothing
@@ -306,9 +319,10 @@ echo "==> Installing the systemd unit (${AUTH_MODE} mode, max-clients ${MAX_CLIE
 # command would fail with "unknown option to s". __MAX_CLIENTS__ keeps / because a number
 # contains none.
 sed -e "s/__MAX_CLIENTS__/${MAX_CLIENTS}/" \
+    -e "s/__MIN_TIER__/${MIN_TIER}/" \
     -e "s|__AUTH_FLAG__|${AUTH_FLAG}|" \
     "${HERE}/relayd.service" > "/tmp/relayd.service.$$"
-# Any placeholder, not just the two named above. A unit installed with __AUTH_FLAG__ left in it
+# Any placeholder, not just the three named above. A unit installed with __AUTH_FLAG__ left in it
 # would hand relayd an unknown flag, which is a service that never starts - and systemd reports
 # that as a restart loop rather than as the typo it is.
 if grep -q '__[A-Z_]*__' "/tmp/relayd.service.$$"; then

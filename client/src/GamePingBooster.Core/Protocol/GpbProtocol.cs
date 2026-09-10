@@ -63,6 +63,15 @@ public static class GpbProtocol
     public const byte StatusCredentialExpired = 4;
     public const byte StatusCredentialRevoked = 5;
 
+    /// <summary>
+    /// The licence verified, but this relay is reserved for a higher plan than the token carries.
+    ///
+    /// Distinct from an expired credential on purpose: nothing is wrong with the subscription and
+    /// signing in again will not help. The relay is simply not one this plan reaches, and the
+    /// only actions that change that are upgrading or picking a different relay.
+    /// </summary>
+    public const byte StatusTierTooLow = 6;
+
     // Field offsets shared by both request layouts. Everything after the header moved by one
     // when the auth-mode byte was inserted, which is the single easiest thing to get wrong here.
     private const int ReqOffMode = 1;

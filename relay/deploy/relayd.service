@@ -18,9 +18,14 @@ Type=simple
 EnvironmentFile=-/etc/gpb/relayd.env
 
 # The auth flag on the ExecStart line below is a placeholder, substituted by install.sh into a
-# temporary copy of this file the same way the max-clients one is. It becomes either -psk-file or
-# -licence-key, because relayd serves exactly ONE authentication mode and refuses to start if it
-# is given both or neither.
+# temporary copy of this file the same way the max-clients and min-tier ones are. It becomes
+# either -psk-file or -licence-key, because relayd serves exactly ONE authentication mode and
+# refuses to start if it is given both or neither.
+#
+# min-tier comes from RELAY_<NAME>_MIN_TIER in gpb.conf and is the lowest plan tier this relay
+# admits; 0 admits everyone. It has to agree with the relay's minTier on the licence server, which
+# decides a different question - who is TOLD this address. relayd reports the value it enforces
+# with every status snapshot so the licence server can say when the two have drifted.
 #
 # A placeholder rather than the flag itself, and that is the whole point: this line used to read
 # `-psk-file /etc/gpb/psk`, so a relay hand-started in the other mode was put back into PSK mode
@@ -37,6 +42,7 @@ ExecStart=/usr/local/bin/relayd \
   __AUTH_FLAG__ \
   -rate-limit 64 \
   -max-clients __MAX_CLIENTS__ \
+  -min-tier __MIN_TIER__ \
   -log-level info
 
 # relayd needs CAP_NET_ADMIN to open the TUN device and to run `ip addr/link`.

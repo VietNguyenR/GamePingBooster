@@ -57,8 +57,27 @@ type Token struct {
 	UserID    uint64
 	DeviceKey *ecdsa.PublicKey
 	Expiry    time.Time
-	Tier      byte
-	MaxSess   byte
+
+	// Tier is the customer's plan, 0-255, as the licence server sees it. The relay compares it
+	// against its own -min-tier and refuses a token that falls short; it knows nothing else about
+	// plans, and deliberately holds no table of them. A tier this build has never heard of is
+	// therefore not an error - a number is a number, and a new plan needs no relay deploy.
+	Tier byte
+
+	// MaxSess is the plan's concurrent-session allowance, and NOTHING ENFORCES IT.
+	//
+	// Said plainly because a signed field reads like a guarantee. The licence server writes it,
+	// this package parses it, and no caller has ever looked at it: one device key can open as
+	// many sessions at once as it likes on any relay. The limit that does bite is deviceLimit,
+	// applied when a token is signed, and the relay never sees that one at all.
+	//
+	// It is kept rather than removed. Removing a field means a token layout change, which means
+	// every relay in the fleet has to be redeployed before the licence server can mint one - an
+	// expensive move for a business rule nobody has asked for. Leaving the byte reserves the
+	// option to enforce it later at no cost. If concurrency needs limiting before then, the
+	// twenty-second status report already carries user_id and device_key for every live session,
+	// so the licence server can see it without the relay changing at all.
+	MaxSess byte
 
 	// deviceKeyRaw is kept so the relay can key an address reservation on the device rather
 	// than on the client id, which a client chooses for itself and could otherwise use to take

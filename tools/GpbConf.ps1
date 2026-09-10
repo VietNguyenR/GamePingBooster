@@ -143,6 +143,7 @@ function Get-GpbRelay {
             Listen       = ''
             Endpoint     = ''
             MaxClients   = '0'
+            MinTier      = '0'
             ReportUrl    = $reportUrl
             Mode         = $mode
             LicenceKey   = $licenceKey
@@ -164,6 +165,19 @@ function Get-GpbRelay {
     if (-not $max) { $max = '0' }
     if ($max -notmatch '^\d+$') {
         throw "RELAY_${slug}_MAX is '$max'. It must be a whole number - the count of clients this relay accepts at once, or 0 for no limit."
+    }
+
+    # The lowest plan tier this relay serves. Empty means 0 - serves everyone - which is what
+    # every relay did before the setting existed, so an existing gpb.conf keeps working untouched.
+    #
+    # It has to agree with the relay's minTier on the licence server, and the two are separate on
+    # purpose: this one decides who gets IN, that one decides who is TOLD the address. Being the
+    # only number in the system with two homes, it is also the only one relayd reports back so the
+    # licence server can say when they have drifted apart.
+    $minTier = $conf["RELAY_${slug}_MIN_TIER"]
+    if (-not $minTier) { $minTier = '0' }
+    if ($minTier -notmatch '^\d+$' -or [int]$minTier -gt 255) {
+        throw "RELAY_${slug}_MIN_TIER is '$minTier'. It must be a whole number 0-255 - the lowest plan tier this relay serves, or 0 for everyone."
     }
 
     $key = $conf["RELAY_${slug}_KEY"]
@@ -195,6 +209,7 @@ function Get-GpbRelay {
         Listen       = $listen
         Endpoint     = "${hostName}:${listen}"
         MaxClients   = $max
+        MinTier      = $minTier
         ReportUrl    = $reportUrl
         Mode         = $mode
         LicenceKey   = $licenceKey

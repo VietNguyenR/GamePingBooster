@@ -117,6 +117,51 @@ internal sealed class GameServerTally
     }
 
     /// <summary>
+    /// The address the game is sending most of its packets to, or null when nothing has been
+    /// seen since the last <see cref="Format"/>.
+    ///
+    /// This is the address the in-game ping is measured against. It is known here and nowhere
+    /// else: the game picks its match server at runtime, tells nobody, and this tally is already
+    /// reading the destination out of every outbound packet for the log line. Measuring to a
+    /// landmark instead was an estimate standing in for exactly this.
+    ///
+    /// Packets are summed per ADDRESS, not per flow. A server is talked to on more than one port
+    /// over a session - 22361 then 26524 on the same host, in the 2026-09-10 capture - and three
+    /// flows to one server must not lose to one flow somewhere else.
+    ///
+    /// Unlike <see cref="Format"/> this does not clear. It is read once a second, and a reader
+    /// that emptied the tally would blind the 30-second log line that shares it.
+    /// </summary>
+    public IPAddress? PrimaryDestination
+    {
+        get
+        {
+            lock (_gate)
+            {
+                if (_flows.Count == 0) return null;
+
+                var byAddress = new Dictionary<uint, long>();
+                foreach (var (key, flow) in _flows)
+                {
+                    byAddress.TryGetValue(key.Address, out var running);
+                    byAddress[key.Address] = running + flow.Packets;
+                }
+
+                uint best = 0;
+                long bestPackets = -1;
+                foreach (var (address, packets) in byAddress)
+                {
+                    if (packets <= bestPackets) continue;
+                    bestPackets = packets;
+                    best = address;
+                }
+
+                return bestPackets < 0 ? null : new IPAddress(BinaryPrimitives.ReverseEndianness(best));
+            }
+        }
+    }
+
+    /// <summary>
     /// Renders the summary and clears it, so each line covers one interval rather than repeating
     /// a running total that gets harder to read the longer a session lasts.
     ///

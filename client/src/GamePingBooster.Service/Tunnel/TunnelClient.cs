@@ -56,6 +56,33 @@ internal sealed class TunnelClient : IDisposable
     private int _keepaliveTicks;
 
     /// <summary>
+    /// The echo currently in flight through the live tunnel, or null when none is.
+    ///
+    /// One slot, not a dictionary: probes are sent one at a time and time out well inside their
+    /// own interval, so there is never a second one outstanding. The downlink thread reads this
+    /// field for every packet it carries, and a hashtable lookup on the packet path to hold at
+    /// most one entry would be cost for nothing.
+    /// </summary>
+    private volatile PendingProbe? _pendingProbe;
+    private ushort _probeSequence;
+
+    private sealed class PendingProbe
+    {
+        public required IPAddress Target { get; init; }
+        public required ushort Id { get; init; }
+        public required ushort Sequence { get; init; }
+        public required long SentTicks { get; init; }
+
+        /// <summary>
+        /// Completed by the downlink thread. Continuations run asynchronously on purpose: the
+        /// downlink thread is the one carrying game packets into the adapter, and letting an
+        /// awaiting probe resume inline would put its work on the latency path.
+        /// </summary>
+        public TaskCompletionSource<double> Completion { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    /// <summary>
     /// Which game addresses this tunnel is carrying traffic to. Diagnostic only - see
     /// <see cref="GameServerTally"/> for the question it exists to answer.
     /// </summary>
@@ -180,6 +207,9 @@ internal sealed class TunnelClient : IDisposable
                             "Your subscription has expired. Sign in again to renew it.",
                         GpbProtocol.StatusCredentialRevoked =>
                             "This device is no longer authorised. Check your devices in the app.",
+                        GpbProtocol.StatusTierTooLow =>
+                            "This relay is reserved for a higher plan. Your subscription is fine - " +
+                            "pick another relay, or upgrade to reach this one.",
                         _ => $"The relay refused the connection (status {result.Status})."
                     });
                 }
@@ -308,6 +338,157 @@ internal sealed class TunnelClient : IDisposable
     /// </summary>
     private const int LandmarkTimeoutMs = 2000;
 
+    /// <summary>
+    /// Best of <paramref name="attempts"/> round trips to the relay, measured with pings rather
+    /// than handshakes.
+    ///
+    /// This exists to make the first leg comparable with the second. The offset that turns the
+    /// relay ping into an in-game estimate is <c>endToEnd - legOne</c>, and until now legOne was
+    /// <see cref="HandshakeRttMs"/> - a SINGLE sample - while endToEnd was the best of three
+    /// echoes. Subtracting a best-of-three from a single sample does not measure a distance, it
+    /// measures which of the two got luckier, and on 2026-09-10 it produced 45 - 45 = 0 on a path
+    /// whose second leg is really about 2.5 ms. The app then showed the relay ping with a label
+    /// saying in-game ping.
+    ///
+    /// A ping is the right instrument for the repeat: it costs one small packet, and unlike a
+    /// handshake it does not consume a session or an address out of the relay's pool - which is
+    /// the reason best-of-three handshakes were rejected when this was first written.
+    ///
+    /// Same constraint as <see cref="MeasureThroughTunnelAsync"/>: after the handshake, before
+    /// the pump threads take the socket.
+    /// </summary>
+    public async Task<double?> MeasureRelayRttAsync(int attempts, CancellationToken ct)
+    {
+        if (_socket is null || _sessionId == 0) return null;
+
+        var buffer = new byte[GpbProtocol.MaxPacketLen];
+        double? best = null;
+
+        for (var attempt = 0; attempt < attempts; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var sentAt = _clock.ElapsedTicks;
+            try
+            {
+                var ping = GpbProtocol.BuildPing(_sessionId, (ulong)sentAt);
+                await _socket.SendAsync(ping, SocketFlags.None, ct).ConfigureAwait(false);
+            }
+            catch (SocketException)
+            {
+                return best;
+            }
+
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromMilliseconds(RelayPingTimeoutMs));
+            try
+            {
+                while (true)
+                {
+                    var n = await _socket.ReceiveAsync(buffer, SocketFlags.None, timeout.Token).ConfigureAwait(false);
+                    if (!GpbProtocol.TryReadPong(buffer.AsSpan(0, n), out var sid, out var stamp)) continue;
+                    if (sid != _sessionId) continue;
+
+                    // Time against the stamp the relay echoed back, not against sentAt: a pong
+                    // for an earlier attempt still in flight would otherwise be timed on this
+                    // attempt's clock and report a relay that is nearer than it is.
+                    if (stamp != (ulong)sentAt) continue;
+
+                    var rtt = (_clock.ElapsedTicks - sentAt) * 1000.0 / Stopwatch.Frequency;
+                    if (best is null || rtt < best) best = rtt;
+                    break;
+                }
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                // This attempt went unanswered. The others still count; a relay that answers none
+                // of them returns null and the caller falls back to the handshake sample.
+            }
+            catch (SocketException)
+            {
+                return best;
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// A relay ping is a round trip to a machine that is already talking to us, so it either
+    /// comes back quickly or it is lost. Nothing like the landmark timeout is needed.
+    /// </summary>
+    private const int RelayPingTimeoutMs = 500;
+
+    /// <summary>
+    /// One ICMP echo to <paramref name="target"/> through the tunnel while it is carrying
+    /// traffic, answered by the downlink thread.
+    ///
+    /// This is the measurement everything else was standing in for. <see cref="GameServerTally"/>
+    /// knows the address the game actually chose, and an echo to that address travels the exact
+    /// path the game's packets take - the player's connection, the relay, the relay's onward
+    /// route, the server itself - so what comes back needs no offset, no subtraction and no
+    /// clamping. The landmark model estimated all of that from a different host measured once at
+    /// connect time.
+    ///
+    /// Unlike <see cref="MeasureThroughTunnelAsync"/> this CANNOT read the socket: by now the
+    /// downlink thread owns it. So the reply is picked out of the downlink path instead - see the
+    /// probe check in <see cref="DownlinkLoop"/> - and handed back through a completion source.
+    ///
+    /// Whether a live game server answers ICMP at all is not known yet. Testing it against
+    /// servers from a finished match cannot say: a match server is torn down when the match ends,
+    /// so silence there means the machine is gone, not that echo is filtered. The caller treats a
+    /// null as "no answer this time" and keeps the estimate running.
+    /// </summary>
+    public async Task<double?> ProbeGameServerAsync(IPAddress target, int timeoutMs, CancellationToken ct)
+    {
+        var socket = _socket;
+        if (socket is null || _sessionId == 0) return null;
+        if (_pendingProbe is not null) return null;   // one at a time; the caller is a timer
+
+        var id = (ushort)Random.Shared.Next(1, ushort.MaxValue);
+        var sequence = unchecked(++_probeSequence);
+
+        var inner = new byte[GpbProtocol.MaxPacketLen];
+        var wire = new byte[GpbProtocol.MaxPacketLen];
+        var innerLen = IcmpEcho.Build(inner, Session.ClientIp, target, id, sequence);
+        var wireLen = GpbProtocol.WriteData(wire, _sessionId, inner.AsSpan(0, innerLen));
+
+        var probe = new PendingProbe
+        {
+            Target = target,
+            Id = id,
+            Sequence = sequence,
+            SentTicks = _clock.ElapsedTicks,
+        };
+        _pendingProbe = probe;
+
+        try
+        {
+            await socket.SendAsync(wire.AsMemory(0, wireLen), SocketFlags.None, ct).ConfigureAwait(false);
+
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromMilliseconds(timeoutMs));
+            await using var registration = timeout.Token.Register(() => probe.Completion.TrySetCanceled());
+
+            return await probe.Completion.Task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return null;   // no answer inside the window
+        }
+        catch (SocketException)
+        {
+            return null;
+        }
+        finally
+        {
+            // Always clear the slot, including on the timeout path. Leaving a dead probe in place
+            // would make the downlink thread keep testing every packet against it and would block
+            // every later probe, which fails closed to "the game server never answers".
+            _pendingProbe = null;
+        }
+    }
+
     /// <summary>Starts both pump threads plus the keepalive loop.</summary>
     public void StartPumping(WintunAdapter adapter, CancellationToken ct)
     {
@@ -427,6 +608,24 @@ internal sealed class TunnelClient : IDisposable
                     case GpbProtocol.TypeData:
                         if (GpbProtocol.TryReadData(buffer.AsSpan(0, n), out var sid, out var ip) && sid == _sessionId)
                         {
+                            // An answer to our own game-server probe, if one is outstanding. It is
+                            // consumed here rather than injected: the request was assembled by
+                            // hand instead of being sent through a socket, so Windows has no
+                            // matching request and would drop the reply on the floor - and doing
+                            // that would also count it as a delivered packet.
+                            //
+                            // The check costs a few length tests and a protocol byte compare, and
+                            // only while a probe is in flight, which is a fraction of a second
+                            // once a second. Everything else falls through untouched.
+                            var pending = _pendingProbe;
+                            if (pending is not null &&
+                                IcmpEcho.IsReplyTo(ip, pending.Target, pending.Id, pending.Sequence))
+                            {
+                                var rtt = (_clock.ElapsedTicks - pending.SentTicks) * 1000.0 / Stopwatch.Frequency;
+                                pending.Completion.TrySetResult(rtt);
+                                break;
+                            }
+
                             if (_adapter!.SendPacket(ip))
                             {
                                 Interlocked.Increment(ref _packetsReceived);
@@ -479,12 +678,20 @@ internal sealed class TunnelClient : IDisposable
     }
 
     /// <summary>
-    /// Pings every 3 seconds: it measures the RTT shown in the UI and keeps the ISP's NAT
-    /// mapping alive while the player sits in a lobby with no game traffic flowing.
+    /// Pings every second: it measures the RTT shown in the UI and keeps the ISP's NAT mapping
+    /// alive while the player sits in a lobby with no game traffic flowing.
+    ///
+    /// It was every three seconds, which made the number on screen a three-second-old sample
+    /// repeated three times - the status is pushed to the UI once a second, so two of every three
+    /// updates carried nothing new. A game redraws its own ping about once a second, and a
+    /// booster whose number lags it by up to three seconds looks wrong even when it is right.
+    ///
+    /// The extra traffic is nothing: one ping is a few dozen bytes, so this is well under a
+    /// kilobyte a minute against a game sending over a hundred packets a second.
     /// </summary>
     private async Task KeepaliveLoopAsync(CancellationToken ct)
     {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(3));
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
         while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
         {
             try
@@ -493,9 +700,12 @@ internal sealed class TunnelClient : IDisposable
                 await _socket!.SendAsync(ping, SocketFlags.None, ct).ConfigureAwait(false);
                 Interlocked.Increment(ref _pingsSent);
 
-                // Every tenth tick, so once every 30 seconds - the same cadence as the relay's own
-                // stats line, which makes the two logs easy to read side by side.
-                if (++_keepaliveTicks % 10 == 0) ReportDrops();
+                // Every thirtieth tick, so still once every 30 seconds now that the tick is a
+                // second - the same cadence as the relay's own stats line, which makes the two
+                // logs easy to read side by side. This divisor and the timer above have to move
+                // together; missing that would have turned a half-minute report into a ten-second
+                // one and tripled the noise in the log.
+                if (++_keepaliveTicks % 30 == 0) ReportDrops();
             }
             catch (Exception) when (!ct.IsCancellationRequested)
             {

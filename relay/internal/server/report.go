@@ -76,6 +76,16 @@ type Report struct {
 	PoolFree   int `json:"pool_free"`
 	Reserved   int `json:"reserved"`
 
+	// MinTier is the plan gate this relay is actually enforcing, as opposed to the one the
+	// licence server believes it is.
+	//
+	// It is reported for exactly one reason: the number lives in two places - the -min-tier flag
+	// on this VPS and the Relay row upstream - and the failure mode when they disagree is
+	// invisible from both ends. A relay left at 0 while its row says 2 serves a premium location
+	// to everybody and looks completely healthy doing it. Sending the enforced value lets the
+	// licence server compare and complain, which turns a silent drift into a line somebody reads.
+	MinTier int `json:"min_tier"`
+
 	RxPackets uint64 `json:"rx_packets"`
 	TxPackets uint64 `json:"tx_packets"`
 	RxBytes   uint64 `json:"rx_bytes"`
@@ -136,6 +146,7 @@ func (s *Server) Snapshot(now time.Time) Report {
 		Listen:     listen,
 		Subnet:     s.cfg.Subnet.String(),
 		MaxClients: s.cfg.MaxClients,
+		MinTier:    int(s.cfg.MinTier),
 		RxPackets:  s.stats.rxPackets.Load(),
 		TxPackets:  s.stats.txPackets.Load(),
 		RxBytes:    s.stats.rxBytes.Load(),
@@ -294,6 +305,28 @@ func (s *Server) postReport(client *http.Client, priv *ecdsa.PrivateKey, pub str
 			return fmt.Errorf("%s said %s", s.cfg.ReportURL, resp.Status)
 		}
 		return fmt.Errorf("%s said %s: %s", s.cfg.ReportURL, resp.Status, detail)
+	}
+
+	// A success body is normally ignored. The one thing worth reading out of it is the licence
+	// server telling us our tier gate disagrees with the one it has on file - which is the whole
+	// reason min_tier is sent up. The operator who can fix it is reading THIS log, next to the
+	// flag that is wrong, not the licence server's.
+	//
+	// Best effort in every direction: a body that is missing, truncated or not JSON leaves the
+	// report a success, because a status snapshot that started failing over a diagnostic would
+	// be a worse bargain than never noticing the drift.
+	var ack struct {
+		TierMismatch *struct {
+			Configured int `json:"configured"`
+			Enforced   int `json:"enforced"`
+		} `json:"tierMismatch"`
+	}
+	ackBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	if err := json.Unmarshal(ackBody, &ack); err == nil && ack.TierMismatch != nil {
+		s.log.Warn("the licence server expects a different tier gate than this relay enforces",
+			"enforced_min_tier", ack.TierMismatch.Enforced,
+			"configured_min_tier", ack.TierMismatch.Configured,
+			"fix", "change -min-tier here, or the relay's minTier there, so the two agree")
 	}
 	return nil
 }

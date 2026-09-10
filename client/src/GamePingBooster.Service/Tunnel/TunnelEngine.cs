@@ -34,6 +34,15 @@ internal sealed class TunnelEngine : IAsyncDisposable
     private GameProcessWatcher? _watcher;
     private CancellationTokenSource? _cts;
     private Task? _supervisor;
+    private Task? _gamePingProbe;
+
+    /// <summary>
+    /// In-game ping measured directly against the server the game chose, smoothed; negative when
+    /// there is no measurement. Written by the probe loop, read by <see cref="Snapshot"/> on
+    /// whichever thread asks, hence the volatile access.
+    /// </summary>
+    private double _directPingMs = -1;
+    private long _directPingAtTick;
     private readonly ulong _clientId = ClientIdentity.Load();
 
     /// <summary>
@@ -382,6 +391,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             }
 
             StartSupervisor(token);
+            StartGamePingProbe(token);
 
             SetState(TunnelState.Connected,
                 _watcher.IsGameRunning
@@ -587,6 +597,14 @@ internal sealed class TunnelEngine : IAsyncDisposable
                 client = new TunnelClient(ParseEndpoint(relay.Endpoint), AuthFor(relay, psk), _clientId, _log);
                 await client.HandshakeAsync(attempts: 2, ct).ConfigureAwait(false);
 
+                // Both legs measured the same way, best of three. The handshake RTT is still
+                // taken and still logged, but it is one sample, and subtracting one sample from a
+                // best-of-three echo is what made the second leg come out as zero - see
+                // MeasureRelayRttAsync. It stays as the fallback for a relay that answers a
+                // handshake but not a ping.
+                var legOne = await client.MeasureRelayRttAsync(attempts: 3, ct).ConfigureAwait(false)
+                             ?? client.HandshakeRttMs;
+
                 double? endToEnd = null;
                 if (target is not null)
                 {
@@ -594,8 +612,8 @@ internal sealed class TunnelEngine : IAsyncDisposable
                         .ConfigureAwait(false);
                 }
 
-                probes.Add(new RelayProbe(relay, client, client.HandshakeRttMs, endToEnd));
-                _log($"  {relay.Name} [{relay.Id}] ({relay.Location}): {Describe(client.HandshakeRttMs, endToEnd, target)}");
+                probes.Add(new RelayProbe(relay, client, legOne, endToEnd));
+                _log($"  {relay.Name} [{relay.Id}] ({relay.Location}): {Describe(legOne, endToEnd, target)}");
             }
             catch (OperationCanceledException)
             {
@@ -640,7 +658,13 @@ internal sealed class TunnelEngine : IAsyncDisposable
     /// does the two jobs that matter, both at connect time: it picks the target region, and it is
     /// what RecordPath compares against to say in the log when the tunnel is not helping.
     /// </summary>
-    private sealed record PathMeasurement(string RegionName, double Offset);
+    /// <summary>
+    /// <paramref name="Landmark"/> is kept as well as the offset so the probe loop has something
+    /// known-answering to test itself against. Without it, a session where the in-game ping never
+    /// becomes a measurement leaves two possible causes and no way to tell them apart: the game
+    /// server filters ICMP, or probing through a live tunnel does not work at all.
+    /// </summary>
+    private sealed record PathMeasurement(string RegionName, double Offset, IPAddress Landmark);
 
     private volatile PathMeasurement? _path;
 
@@ -662,6 +686,9 @@ internal sealed class TunnelEngine : IAsyncDisposable
             var target = await ChooseTargetRegionAsync(ct).ConfigureAwait(false);
             if (target is null) return;
 
+            var legOne = await client.MeasureRelayRttAsync(attempts: 3, ct).ConfigureAwait(false)
+                         ?? client.HandshakeRttMs;
+
             var endToEnd = await client.MeasureThroughTunnelAsync(target.Landmark, attempts: 3, ct)
                 .ConfigureAwait(false);
             if (endToEnd is null)
@@ -672,10 +699,10 @@ internal sealed class TunnelEngine : IAsyncDisposable
                 return;
             }
 
-            _log($"{relay.Name}: {client.HandshakeRttMs:F0} ms to the relay, {endToEnd.Value:F0} ms " +
+            _log($"{relay.Name}: {legOne:F0} ms to the relay, {endToEnd.Value:F0} ms " +
                  $"end to end to {target.RegionName} - that second number is roughly what the game " +
                  "will show.");
-            RecordPath(target, client.HandshakeRttMs, endToEnd.Value);
+            RecordPath(target, legOne, endToEnd.Value);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -765,7 +792,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
                  "connection.");
             offset = 0;
         }
-        _path = new PathMeasurement(target.RegionName, offset);
+        _path = new PathMeasurement(target.RegionName, offset, target.Landmark);
 
         var saved = target.RttMs - endToEnd;
         if (saved >= 1)
@@ -854,6 +881,186 @@ internal sealed class TunnelEngine : IAsyncDisposable
         catch (OperationCanceledException)
         {
             // Normal shutdown.
+        }
+    }
+
+    // -------------------------------------------------- in-game ping, measured
+
+    /// <summary>How long a probe may take. Under the tick, so two are never in flight at once.</summary>
+    private const int ProbeTimeoutMs = 800;
+
+    /// <summary>Unanswered probes before the headline falls back to the landmark estimate.</summary>
+    private const int ProbeGiveUpAfter = 5;
+
+    /// <summary>How long to leave a silent server alone before trying it again.</summary>
+    private const int ProbeRetryQuietMs = 30_000;
+
+    /// <summary>Beyond this a reading is stale and the estimate takes the headline back.</summary>
+    private static readonly TimeSpan DirectPingGoesStale = TimeSpan.FromSeconds(5);
+
+    private void StartGamePingProbe(CancellationToken ct) =>
+        _gamePingProbe = Task.Run(() => ProbeGamePingAsync(ct), ct);
+
+    /// <summary>
+    /// Measures the in-game ping against the server the game is actually on, once a second.
+    ///
+    /// Everything before this measured a stand-in. The landmark is the endpoint the game probes
+    /// to pick a REGION, which is the right instrument for that job and the wrong one for this:
+    /// on 2026-09-10 the game played on 172.188.74.210 and 20.198.178.182 while the ping on
+    /// screen came from an echo to 20.43.187.66, taken once, before the match started, and then
+    /// held for the rest of the session.
+    ///
+    /// An echo to the real server travels the whole path the game's packets travel, so what comes
+    /// back needs no offset, no subtraction and no clamping - the three places the estimate could
+    /// go wrong, and did.
+    ///
+    /// Whether a live match server answers ICMP is still unknown, and cannot be settled by
+    /// testing addresses from a finished match: those machines are torn down with the match, so
+    /// silence proves nothing. This loop settles it with real data - it logs which way it went,
+    /// once per change, and falls back to the estimate when the answer is no.
+    /// </summary>
+    private async Task ProbeGamePingAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+        IPAddress? current = null;
+        var misses = 0;
+        var quietUntilTick = 0L;
+        var selfChecked = false;
+
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
+            {
+                var tunnel = _tunnel;
+                if (_state != TunnelState.Connected || tunnel is null)
+                {
+                    current = null;
+                    misses = 0;
+                    selfChecked = false;
+                    ForgetDirectPing();
+                    continue;
+                }
+
+                // Prove the mechanism works before there is anything to measure with it.
+                //
+                // The landmark answered an echo through this same tunnel a moment ago, during
+                // relay selection - but through a socket this loop no longer owns, over a path
+                // that reads replies a different way. If probing a LIVE tunnel is broken, every
+                // session would end with an in-game ping that never became a measurement and two
+                // candidate explanations: the game server filters ICMP, or this does not work.
+                // One packet at connect time tells them apart, in the log, before the match.
+                if (!selfChecked && _path is { } path)
+                {
+                    selfChecked = true;
+                    var check = await tunnel.ProbeGameServerAsync(path.Landmark, ProbeTimeoutMs, ct)
+                        .ConfigureAwait(false);
+                    _log(check is { } ms
+                        ? $"Probing through the live tunnel works - {ms:F0} ms to {path.RegionName}. " +
+                          "The in-game ping will be measured against the game's own server once a match starts."
+                        : "WARNING: an echo through the live tunnel to the landmark went unanswered, and that " +
+                          "landmark answered during relay selection. In-game ping will stay on the estimate " +
+                          "this session - this is a fault in the probe, not in the game server.");
+                }
+
+                var target = tunnel.Destinations.PrimaryDestination;
+                if (target is null)
+                {
+                    // No game traffic this second - between matches, in a menu, or just after the
+                    // 30-second log line cleared the tally it shares with us. The last reading is
+                    // left alone rather than cleared: it ages out by itself, and dropping the
+                    // headline to the estimate for one tick would make the number jump for no
+                    // reason the player can see.
+                    continue;
+                }
+
+                if (!target.Equals(current))
+                {
+                    // Addresses are deliberately not logged - see the tally, which masks them.
+                    if (current is not null) _log("The game moved to a different server - measuring the new one.");
+                    current = target;
+                    misses = 0;
+                    quietUntilTick = 0;
+                    ForgetDirectPing();
+                }
+
+                if (Environment.TickCount64 < quietUntilTick) continue;
+
+                var rtt = await tunnel.ProbeGameServerAsync(target, ProbeTimeoutMs, ct).ConfigureAwait(false);
+                if (rtt is { } measured)
+                {
+                    if (misses >= ProbeGiveUpAfter)
+                    {
+                        _log("The game server is answering echoes again - the in-game ping is measured, not estimated.");
+                    }
+                    else if (misses == 0 && Volatile.Read(ref _directPingMs) < 0)
+                    {
+                        _log($"In-game ping is now measured against the game server itself: {measured:F0} ms.");
+                    }
+                    misses = 0;
+                    RecordDirectPing(measured);
+                    continue;
+                }
+
+                misses++;
+                if (misses == ProbeGiveUpAfter)
+                {
+                    _log($"The game server did not answer {ProbeGiveUpAfter} echoes - it filters ICMP, or this " +
+                         $"one does. Falling back to the relay ping plus the measured second leg, and retrying " +
+                         $"every {ProbeRetryQuietMs / 1000}s.");
+                    ForgetDirectPing();
+                }
+                if (misses >= ProbeGiveUpAfter) quietUntilTick = Environment.TickCount64 + ProbeRetryQuietMs;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Normal shutdown.
+        }
+        catch (Exception ex)
+        {
+            // A diagnostic must never take the tunnel down with it. The estimate keeps working.
+            _log($"The in-game ping probe stopped: {ex.Message}. The displayed ping falls back to the estimate.");
+        }
+    }
+
+    /// <summary>
+    /// Folds one measurement into the displayed value.
+    ///
+    /// Lightly smoothed, half old and half new. The relay leg on this connection jitters about a
+    /// millisecond, so heavy smoothing would buy nothing and cost responsiveness - and a headline
+    /// that lags the game's own number is the complaint this work started from. It is enough to
+    /// stop a single unlucky sample redrawing the number.
+    /// </summary>
+    private void RecordDirectPing(double rttMs)
+    {
+        var previous = Volatile.Read(ref _directPingMs);
+        var smoothed = previous < 0 ? rttMs : (previous * 0.5) + (rttMs * 0.5);
+        Interlocked.Exchange(ref _directPingMs, smoothed);
+        Interlocked.Exchange(ref _directPingAtTick, Environment.TickCount64);
+    }
+
+    private void ForgetDirectPing()
+    {
+        Interlocked.Exchange(ref _directPingMs, -1);
+        Interlocked.Exchange(ref _directPingAtTick, 0);
+    }
+
+    /// <summary>
+    /// The measured in-game ping, or null when there is not a recent one.
+    ///
+    /// Staleness is checked rather than trusted: the probe loop clears the value when it gives up,
+    /// but it can also simply stop getting scheduled - a reconnect, a suspended machine - and a
+    /// number frozen on screen from a minute ago is worse than falling back to the estimate.
+    /// </summary>
+    private double? DirectGamePingMs
+    {
+        get
+        {
+            var value = Volatile.Read(ref _directPingMs);
+            if (value < 0) return null;
+            var at = Interlocked.Read(ref _directPingAtTick);
+            if (at == 0 || Environment.TickCount64 - at > DirectPingGoesStale.TotalMilliseconds) return null;
+            return value;
         }
     }
 
@@ -1010,8 +1217,16 @@ internal sealed class TunnelEngine : IAsyncDisposable
                         // so the in-game estimate goes blank rather than wrong. Reconnecting to
                         // the SAME relay keeps it, which is the common case: a relay that
                         // hiccuped is still exactly where it was.
+                        //
+                        // Blank is now much less costly than it was: the probe loop measures the
+                        // real server through the new tunnel within a second, and it does not
+                        // need the socket to itself to do it.
                         _path = null;
                     }
+
+                    // Belongs to the old tunnel either way, even when the relay is the same one:
+                    // the reading was taken over a session that no longer exists.
+                    ForgetDirectPing();
 
                     _tunnel = client;
                     ResetThroughputBaseline();
@@ -1231,6 +1446,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
         // in-game ping for a tunnel that no longer exists, and after a failover to a relay at a
         // different distance it would be reporting the wrong one.
         _path = null;
+        ForgetDirectPing();
 
         if (_watcher is not null)
         {
@@ -1261,6 +1477,14 @@ internal sealed class TunnelEngine : IAsyncDisposable
             _supervisor = null;
         }
 
+        if (_gamePingProbe is not null)
+        {
+            _cts?.Cancel();
+            try { await _gamePingProbe.ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+            _gamePingProbe = null;
+        }
+
         // Deleting the adapter comes last, and it is also the safety brake: any route still
         // pointing at it disappears along with it.
         _adapter?.Dispose();
@@ -1276,64 +1500,77 @@ internal sealed class TunnelEngine : IAsyncDisposable
 
     // -------------------------------------------------------------- status
 
-    public StatusMessage Snapshot() => new()
+    public StatusMessage Snapshot()
     {
-        State = _state,
-        Detail = _detail,
-        Error = _error,
-        RelayId = _relay?.Id,
-        RelayName = _relay?.Name,
-        // What is CONFIGURED, not what is connected, so the settings screen can show the current
-        // value before anything has been tried. The key is deliberately absent - see the
-        // set-relay comment in PipeServer.
-        RelayEndpoints = _config.RelayEndpoints,
-        // Ready to connect: SOME credential, and somewhere to send packets.
-        //
-        // The relay may come from the self-hosted setting OR from the profile's own list - both
-        // are normal, and treating only the first as configured disabled Connect on
-        // installations that worked fine.
-        //
-        // The credential may be a pre-shared key OR a licence token. Requiring the key would
-        // disable Connect on a licensed installation, which has no key at all and is not
-        // supposed to have one.
-        Configured = (_config.HasKey || _token is not null) && Relays.Count > 0,
-        TunnelPingMs = _tunnel?.LastRttMs,
-        // Live first leg plus the fixed second-leg offset, so the headline tracks the part that
-        // actually moves - the player's own connection - without re-probing the datacentre. Null
-        // until the first keepalive answers, which is right: an estimate built on no measurement
-        // is not better than showing nothing.
-        GamePingMs = _path is { } p && _tunnel?.LastRttMs is { } live ? live + p.Offset : null,
-        GameRegionName = _path?.RegionName,
-        LossRatio = _tunnel?.LossRatio,
-        GameRunning = _watcher?.IsGameRunning ?? false,
-        GameName = _game?.Name,
-        ActiveRoutes = _routes?.ActiveRouteCount ?? 0,
-        PacketsSent = _tunnel?.PacketsSent ?? 0,
-        PacketsReceived = _tunnel?.PacketsReceived ?? 0,
-        PacketsDropped = _tunnel?.PacketsDropped ?? 0,
-        // The PUBLIC half only. It is not a secret - it is the device's name, and the UI has to
-        // send it to the licence server to register this machine, so it has to be readable here.
-        // The private half never crosses the pipe in any form; see the set-relay note about the
-        // pipe being open to BuiltinUsers.
-        DevicePublicKey = _device.PublicKeyHex,
-        // Whether there IS a token and when it runs out - never the token itself. The UI needs
-        // both to know when to sign in and when to refresh; neither is a credential.
-        HasToken = _token is not null,
-        TokenExpiresAt = _token is null ? null : TokenStore.ExpiryOf(_token).ToUnixTimeSeconds(),
-        LicenceUrl = _config.LicenceUrl,
-        // Why Connect would be refused right now, in words, or null when it would not. Computed
-        // in the service rather than worked out again in the UI: the rule decides whether a
-        // connection is attempted at all, and two copies of it would drift into a button that is
-        // enabled for a connection that cannot happen, or disabled for one that could.
-        LicenceRefusal = LicenceRefusal(),
-        ProfileSource = _profileSource,
-        // Read from the file rather than remembered in a field, so it is right after a restart
-        // and right after somebody has copied a profile in by hand. A missing file is null,
-        // which the UI reads as "never" - correct on a machine that has never signed in.
-        ProfileUpdatedAt = File.Exists(SealedProfilePath)
-            ? new DateTimeOffset(File.GetLastWriteTimeUtc(SealedProfilePath)).ToUnixTimeSeconds()
-            : null,
-    };
+        // Read once. The headline and the flag saying how it was arrived at must agree, and
+        // reading the property twice inside the initializer could catch the probe going stale
+        // between the two - a status that says "measured" over an estimated number.
+        var direct = DirectGamePingMs;
+
+        return new StatusMessage
+        {
+            State = _state,
+            Detail = _detail,
+            Error = _error,
+            RelayId = _relay?.Id,
+            RelayName = _relay?.Name,
+            // What is CONFIGURED, not what is connected, so the settings screen can show the current
+            // value before anything has been tried. The key is deliberately absent - see the
+            // set-relay comment in PipeServer.
+            RelayEndpoints = _config.RelayEndpoints,
+            // Ready to connect: SOME credential, and somewhere to send packets.
+            //
+            // The relay may come from the self-hosted setting OR from the profile's own list - both
+            // are normal, and treating only the first as configured disabled Connect on
+            // installations that worked fine.
+            //
+            // The credential may be a pre-shared key OR a licence token. Requiring the key would
+            // disable Connect on a licensed installation, which has no key at all and is not
+            // supposed to have one.
+            Configured = (_config.HasKey || _token is not null) && Relays.Count > 0,
+            TunnelPingMs = _tunnel?.LastRttMs,
+            // The real thing when the game's own server answers an echo through the tunnel, and the
+            // estimate when it does not.
+            //
+            // The estimate is the live first leg plus the second-leg offset measured at connect time,
+            // so it tracks the part that actually moves - the player's own connection - without
+            // re-probing the datacentre. It is still an estimate against a stand-in host, which is
+            // why the measurement wins whenever there is one. Null until something has answered,
+            // which is right: a number built on no measurement is not better than showing nothing.
+            GamePingMs = direct ?? (_path is { } p && _tunnel?.LastRttMs is { } live ? live + p.Offset : null),
+            GamePingDirect = direct is not null,
+            GameRegionName = _path?.RegionName,
+            LossRatio = _tunnel?.LossRatio,
+            GameRunning = _watcher?.IsGameRunning ?? false,
+            GameName = _game?.Name,
+            ActiveRoutes = _routes?.ActiveRouteCount ?? 0,
+            PacketsSent = _tunnel?.PacketsSent ?? 0,
+            PacketsReceived = _tunnel?.PacketsReceived ?? 0,
+            PacketsDropped = _tunnel?.PacketsDropped ?? 0,
+            // The PUBLIC half only. It is not a secret - it is the device's name, and the UI has to
+            // send it to the licence server to register this machine, so it has to be readable here.
+            // The private half never crosses the pipe in any form; see the set-relay note about the
+            // pipe being open to BuiltinUsers.
+            DevicePublicKey = _device.PublicKeyHex,
+            // Whether there IS a token and when it runs out - never the token itself. The UI needs
+            // both to know when to sign in and when to refresh; neither is a credential.
+            HasToken = _token is not null,
+            TokenExpiresAt = _token is null ? null : TokenStore.ExpiryOf(_token).ToUnixTimeSeconds(),
+            LicenceUrl = _config.LicenceUrl,
+            // Why Connect would be refused right now, in words, or null when it would not. Computed
+            // in the service rather than worked out again in the UI: the rule decides whether a
+            // connection is attempted at all, and two copies of it would drift into a button that is
+            // enabled for a connection that cannot happen, or disabled for one that could.
+            LicenceRefusal = LicenceRefusal(),
+            ProfileSource = _profileSource,
+            // Read from the file rather than remembered in a field, so it is right after a restart
+            // and right after somebody has copied a profile in by hand. A missing file is null,
+            // which the UI reads as "never" - correct on a machine that has never signed in.
+            ProfileUpdatedAt = File.Exists(SealedProfilePath)
+                ? new DateTimeOffset(File.GetLastWriteTimeUtc(SealedProfilePath)).ToUnixTimeSeconds()
+                : null,
+        };
+    }
 
     /// <summary>Relay list for the UI to offer to the user.</summary>
     public IReadOnlyList<RelayEntry> Relays => _profile?.Relays ?? [];

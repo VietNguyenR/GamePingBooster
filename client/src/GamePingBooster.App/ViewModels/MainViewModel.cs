@@ -233,6 +233,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    private bool _gamePingDirect;
+    public bool GamePingDirect
+    {
+        get => _gamePingDirect;
+        private set
+        {
+            if (Set(ref _gamePingDirect, value)) Raise(nameof(GamePingText));
+        }
+    }
+
     private string? _gameRegionName;
     public string? GameRegionName
     {
@@ -360,8 +370,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// landmark for the game, or when no relay could echo one - both are real states and both are
     /// better shown as "unknown" than as the relay ping wearing a label that says game ping.
     /// </summary>
+    /// <summary>
+    /// A tilde when the number is the landmark estimate rather than a measurement against the
+    /// game's own server. One character, and it is the difference between a number that came off
+    /// the real path and one derived from a stand-in host - which is exactly the distinction a
+    /// player is making when they hold this up against the ping in the game.
+    /// </summary>
     public string GamePingText => GamePingMs is { } g
-        ? GameRegionName is { } region ? $"{g:F0} ms to {region}" : $"{g:F0} ms"
+        ? (GamePingDirect ? "" : "~") +
+          (GameRegionName is { } region ? $"{g:F0} ms to {region}" : $"{g:F0} ms")
         : "-";
 
     public string PingText => PingMs is { } p ? $"{p:F0} ms" : "-";
@@ -465,6 +482,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Error = status.Error;
         PingMs = status.TunnelPingMs;
         GamePingMs = status.GamePingMs;
+        GamePingDirect = status.GamePingDirect;
         GameRegionName = status.GameRegionName;
         LossRatio = status.LossRatio;
         GameRunning = status.GameRunning;
@@ -495,6 +513,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Detail = reason;
         PingMs = null;
         GamePingMs = null;
+        GamePingDirect = false;
         GameRegionName = null;
         LossRatio = null;
         ActiveRoutes = 0;

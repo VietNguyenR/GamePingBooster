@@ -40,9 +40,9 @@
          explain it rather than in a dialog after somebody has already typed one.
 
          The email/password form that used to sit here came out on 2026-09-06, once the browser
-         flow was confirmed working on a real machine. /auth/login still exists on the server -
-         it is a contract with binaries already installed - so restoring the form is a UI change,
-         not a protocol one. -->
+         flow was confirmed working on a real machine. The endpoint behind it was deleted on
+         2026-09-10, so restoring the form now means restoring the endpoint too - a protocol
+         change rather than a UI one. -->
     <Button Content="Sign in with your browser" Click="OnBrowserClick"
             IsEnabled="{Binding !Busy}" HorizontalAlignment="Stretch"
             HorizontalContentAlignment="Center"

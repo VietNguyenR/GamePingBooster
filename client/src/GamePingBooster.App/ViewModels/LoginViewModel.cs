@@ -17,9 +17,10 @@ namespace GamePingBooster.App.ViewModels;
 /// perfectly on a machine that has never signed in to anything.
 ///
 /// <b>This app never sees the password.</b> The email/password form that used to live here was
-/// removed on 2026-09-06 once the browser flow was confirmed working; `/auth/login` still exists
-/// on the server for binaries already installed, so bringing the form back would be a UI change
-/// rather than a protocol one. What is kept here is the refresh token, under DPAPI at user
+/// removed on 2026-09-06 once the browser flow was confirmed working, and `/auth/login` itself was
+/// deleted from the server on 2026-09-10 - it was being kept for binaries that turned out not to
+/// exist. Bringing a password form back would now be a protocol change, not a UI one, and that is
+/// the right way round. What is kept here is the refresh token, under DPAPI at user
 /// scope; what goes down to the service is the licence token, write-only.
 /// </summary>
 public sealed class LoginViewModel : INotifyPropertyChanged

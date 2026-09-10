@@ -54,6 +54,7 @@ func main() {
 		idleTimeout = flag.Duration("idle-timeout", 90*time.Second, "drop a session after this long without packets")
 		configureIf = flag.Bool("configure-if", true, "run `ip addr/link` to configure the TUN device")
 		maxClients  = flag.Int("max-clients", 0, "refuse new sessions past this many at once, 0 means the address pool is the only limit")
+		minTier     = flag.Int("min-tier", 0, "licensed mode: lowest plan tier this relay serves, 0 serves everyone; must match the relay's minTier on the licence server")
 		rateKBps    = flag.Int64("rate-limit", 64, "per-session cap in KB/s each way, 0 disables it; a real game session uses about 10")
 		burstKB     = flag.Int64("rate-burst", 0, "burst allowance in KB, 0 means four seconds at the sustained rate")
 		logLevel    = flag.String("log-level", "info", "debug | info | warn | error")
@@ -131,6 +132,14 @@ func main() {
 		}
 	}
 
+	// Range-checked rather than cast, because the quiet failure is the dangerous one: byte(256)
+	// is 0, and 0 is "serve everyone". A premium relay whose flag was fat-fingered would come up
+	// looking healthy while enforcing nothing at all.
+	if *minTier < 0 || *minTier > 255 {
+		log.Error("-min-tier must be 0-255", "given", *minTier)
+		os.Exit(1)
+	}
+
 	var (
 		psk        []byte
 		licencePub *ecdsa.PublicKey
@@ -166,6 +175,15 @@ func main() {
 		if err != nil {
 			log.Error("could not read the PSK", "err", err)
 			os.Exit(1)
+		}
+
+		// A tier arrives inside a licence token, and a PSK relay never sees one. Setting the flag
+		// here enforces nothing, and saying so is the difference between an operator finding out
+		// now and finding out when somebody who should not have got in is already in.
+		if *minTier > 0 {
+			log.Warn("-min-tier is ignored in PSK mode: tiers live in licence tokens, and a "+
+				"self-hosted relay authenticates with a shared key that carries no plan",
+				"min_tier", *minTier)
 		}
 
 		// A PSK relay has no key of its own, because a shared secret makes a forged answer
@@ -208,6 +226,7 @@ func main() {
 		IdleTimeout:   *idleTimeout,
 		MaxSessionAge: *maxAge,
 		MaxClients:    *maxClients,
+		MinTier:       byte(*minTier),
 		// Stated in KB on the command line because that is how anyone reasons about it, and
 		// converted here once rather than at every packet.
 		RateBytesPerSec: *rateKBps * 1024,

@@ -64,6 +64,21 @@ type Config struct {
 	RelayPriv   *ecdsa.PrivateKey
 	ConfigureIf bool // true = the relay runs `ip addr/link` for the TUN device itself
 
+	// MinTier is the lowest plan tier this relay serves. 0, the default, serves everyone.
+	//
+	// This is the enforcement half of a gate that used to have only a presentation half. The
+	// licence server decides which relays to LIST in a customer's profile by comparing the
+	// plan's tier against the relay row's minTier; nothing stopped a client that learned the
+	// address anyway - from a friend on a better plan, or by trying ports - from connecting on
+	// its own perfectly valid token. Withholding an address is not authorisation.
+	//
+	// It is a flag on the VPS rather than a value inside the token, because it describes THIS
+	// relay and not the customer. That does make it the one number living in two places: here,
+	// and in the licence server's Relay row. Drift between them is silent in the worst
+	// direction - a relay quietly serving a tier that is not paying for it - so the status
+	// report carries this value upstream and the licence server compares the two. See report.go.
+	MinTier byte
+
 	// Per-session, per-direction cap. 0 disables it. Sized so a game never reaches it: a real
 	// PUBG session runs at roughly 10 KB/s, so the default is a hundred times what the thing
 	// this relay exists for actually needs.
@@ -430,6 +445,22 @@ func (s *Server) handleHandshakeToken(pkt []byte, from netip.AddrPort) {
 	}
 	if err != nil {
 		s.log.Debug("handshake rejected", "from", from.String(), "err", err)
+		s.stats.dropped.Add(1)
+		return
+	}
+
+	// The plan gate. Answered rather than dropped, for the same reason an expired licence is:
+	// the signature verified, so this is a real customer holding a real licence who has arrived
+	// somewhere their plan does not reach. A timeout would send them to support; a status sends
+	// them to the upgrade page.
+	//
+	// Compared against the tier the LICENCE SERVER signed, never against anything the client
+	// said about itself. A client cannot raise its own tier without the licence signing key.
+	if tok.Tier < s.cfg.MinTier {
+		s.respondToken(protocol.StatusTierTooLow, protocol.SessionID{},
+			netip.Addr{}, 0, nonce, from)
+		s.log.Info("tier too low for this relay", "from", from.String(), "user", tok.UserID,
+			"tier", tok.Tier, "min_tier", s.cfg.MinTier)
 		s.stats.dropped.Add(1)
 		return
 	}

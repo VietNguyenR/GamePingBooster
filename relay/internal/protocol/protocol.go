@@ -73,9 +73,14 @@ const (
 
 // Status codes carried in HandshakeResp.
 //
-// StatusCredentialExpired and StatusCredentialRevoked are sent ONLY after the signature has
-// verified. Telling an unauthenticated stranger why they were refused would turn the relay into
-// an oracle; telling a real customer is the difference between a useful message and a timeout.
+// StatusCredentialExpired, StatusCredentialRevoked and StatusTierTooLow are sent ONLY after the
+// signature has verified. Telling an unauthenticated stranger why they were refused would turn
+// the relay into an oracle; telling a real customer is the difference between a useful message
+// and a timeout.
+//
+// Adding a code is additive and does not need a version bump: the client's switch has a default
+// arm that prints the number, so an old binary meeting a new code says "the relay refused the
+// connection (status 6)" rather than misreading it as something else.
 const (
 	StatusOK                = 0
 	StatusPoolFull          = 1
@@ -83,6 +88,15 @@ const (
 	StatusVersionMismatch   = 3
 	StatusCredentialExpired = 4
 	StatusCredentialRevoked = 5
+
+	// StatusTierTooLow: the licence is valid, but this relay is reserved for a higher plan.
+	//
+	// The tier byte inside the token is the customer's plan, and -min-tier is what this relay
+	// requires. Until this existed the tier gate was the licence server declining to PUT a relay
+	// in the profile, which hides an address rather than refusing one - and an address that
+	// merely has not been mentioned is not access control. Anybody who learned the host and port
+	// could connect on any valid token.
+	StatusTierTooLow = 6
 )
 
 // MaxSessionAge caps how long one handshake is good for.

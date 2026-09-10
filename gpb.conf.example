@@ -28,9 +28,22 @@
 #   RELAY_<NAME>_SUDO_PASSWORD   password for sudo, when it differs         [the one above]
 #   RELAY_<NAME>_LISTEN     UDP port relayd listens on, for players         [51820]
 #   RELAY_<NAME>_MAX        clients this relay accepts AT ONCE, 0 = no limit  [0]
+#   RELAY_<NAME>_MIN_TIER   lowest plan tier this relay serves, 0 = everyone  [0]
 #   RELAY_<NAME>_REPORT_URL where it posts its status snapshot               [RELAY_REPORT_URL]
 #   RELAY_<NAME>_MODE       psk (self-hosted) or token (licensed)           [psk]
 #   RELAY_<NAME>_LICENCE_KEY path to the licence PUBLIC key, required token mode
+#
+# MIN_TIER is the only setting here that has a twin somewhere else. It decides who the relay
+# LETS IN; the relay's minTier row on the licence server decides who is TOLD its address. Both are
+# needed - an address nobody was given is not access control, and a relay nobody was told about is
+# useless - but two copies of one number drift, and this pair drifts silently in the direction
+# that costs money: a premium relay left at 0 serves everybody and looks perfectly healthy doing
+# it. So relayd reports the value it is actually enforcing with every status snapshot, and the
+# licence server writes a line when the two disagree. Set both, or set neither.
+#
+# Deploy order matters when you turn it on: install the relay FIRST, then raise minTier on the
+# licence server. The other way round leaves a window where the profile has stopped listing the
+# relay while the relay is still admitting everyone who already knows the address.
 #
 # RELAY_REPORT_URL, with no name in it, sets the reporting endpoint for every relay at once,
 # which is normally what you want - one licence server, several relays. The per-relay form is
