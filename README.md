@@ -191,9 +191,10 @@ meaning on another system and say so instead of failing oddly.
 | `./gpb status` | Asks the running service for its live counters over the named pipe: state, packets, drops, tunnel ping, loss, active routes. |
 | `./gpb logs` | Follows the service log in `%ProgramData%\GamePingBooster\logs`. |
 | `./gpb check` | **Run this during a match.** Answers whether the game's traffic is really going through the relay or straight out of the network card. Outside a match it has nothing to look at. |
+| `./gpb lag [seconds]` | **Run this while it is lagging.** Pings every segment of the path on the same tick - your router, the ISP's access network, its domestic core, the relay, and a landmark on a different network in the same region - then names the one segment that is at fault. Reads the tunnel's own numbers from the service rather than opening a session of its own, so it is safe to run mid-match. Needs no Administrator. Each run writes a full report - trace, verdict and every raw sample - under `%LOCALAPPDATA%\GamePingBooster\lag-reports`, plus a one-line history entry that becomes the baseline later runs are judged against. |
 | `./gpb capture` | Waits for the game to start, captures its traffic, and appends the server addresses it sees to `observed.txt`. Safe to Ctrl+C. |
 | `./gpb profile` | Turns what `capture` collected into `profiles/pubg-vn.json`. No arguments. |
-| `./gpb diag` | Collects everything needed to diagnose a client-side problem into one text file, with the PSK redacted. Attach it to a bug report. |
+| `./gpb diag` | Collects everything needed to diagnose a client-side problem into one text file, with the PSK redacted - including the three newest `./gpb lag` reports, so the bundle can answer whether the network was bad at the time. Attach it to a bug report. |
 | `./gpb installer [version]` | Publishes and then packages a setup `.exe` into `installer/dist/`. Needs [Inno Setup 6](https://jrsoftware.org/isdl.php). Give it a version to change one; see [Version](#version). |
 | `./gpb version [x.y.z]` | Prints the version everything is stamped with, or sets it. |
 | `./gpb reset` | **Deletes every trace of an installed Game Ping Booster from this machine**, so the installer can be tested on a development PC. See [Testing the installer](#testing-the-installer). |
@@ -250,7 +251,7 @@ which is shared with anything else that uses Wintun - WireGuard, most likely - s
 
 | Command | What it does |
 |---|---|
-| `./gpb test` | Everything: `gofmt`, `go vet`, the Go tests, then the C# build and the cross-language wire-format check. Skips the C# half with a warning if the .NET SDK is missing. |
+| `./gpb test` | Everything: `gofmt`, `go vet`, the Go tests, the lag-verdict rules, then the C# build and the cross-language wire-format check. Skips the C# half with a warning if the .NET SDK is missing. |
 | `./gpb help` | The same list, from the script itself. |
 
 `./gpb test` always passes `-count=1`. Go's test cache is not keyed on

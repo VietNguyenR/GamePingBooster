@@ -14,6 +14,7 @@
         .\gpb.ps1 capture             watch for the game and collect server addresses
         .\gpb.ps1 profile             rebuild the profile from what was captured
         .\gpb.ps1 check               is the game actually going through the relay right now
+        .\gpb.ps1 lag [seconds]       run this DURING the lag: which segment is at fault
         .\gpb.ps1 logs                follow the service log
         .\gpb.ps1 status              read the tunnel's live counters
         .\gpb.ps1 test                every test on both sides
@@ -430,6 +431,15 @@ switch ($Verb.ToLowerInvariant()) {
         try { & (Join-Path $builder 'Test-GameRouting.ps1') } finally { Pop-Location }
     }
 
+    'lag' {
+        # Its own file rather than a block here, for the same reason as reset: the verdict rests
+        # on an argument about which rung can be trusted, and that argument has to be written
+        # down next to the code that makes it or it will be quietly optimised away.
+        $seconds = 20
+        if ($Arg1 -and [int]::TryParse($Arg1, [ref]$null)) { $seconds = [int]$Arg1 }
+        & (Join-Path $tools 'Diagnose-Lag.ps1') -Seconds $seconds
+    }
+
     'logs' {
         $log = Join-Path $programData 'logs\gpb-service.log'
         if (-not (Test-Path $log)) { throw "No log at $log - has the service ever run?" }
@@ -492,6 +502,12 @@ switch ($Verb.ToLowerInvariant()) {
         } else {
             Warn "Git's bash not found - skipped tools\test-relay-deploy-mode.sh"
         }
+
+        # Pure logic, no network and no service: it drives the lag verdict with synthetic
+        # samples, which is the only way to reach its branches. A healthy connection reaches one.
+        Say "Lag diagnosis: the verdict rules"
+        & (Join-Path $tools 'Test-DiagnoseLag.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "the lag diagnosis tests failed" }
 
         Say "C#: build and wire-format check"
         & dotnet build (Join-Path $client 'GamePingBooster.sln') --nologo -v quiet

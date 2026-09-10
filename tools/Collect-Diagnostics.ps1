@@ -133,6 +133,23 @@ foreach ($f in $rotations) {
     Get-Content $f | Out-File -FilePath $out -Append -Encoding utf8
 }
 
+# The lag reports, newest last, so this bundle answers "was the network bad at the time" without
+# a second round trip. They live under LOCALAPPDATA because `lag` must never need Administrator,
+# which is also why they are not in the ProgramData tree everything else here comes from.
+$lagDir = Join-Path $env:LOCALAPPDATA "GamePingBooster\lag-reports"
+$lagReports = Get-ChildItem $lagDir -Filter "lag-*.txt" -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 3
+if ($lagReports) {
+    foreach ($f in ($lagReports | Sort-Object LastWriteTime)) {
+        Section "LAG DIAGNOSIS: $($f.Name)"
+        Get-Content $f.FullName | Out-File -FilePath $out -Append -Encoding utf8
+    }
+} else {
+    Section "LAG DIAGNOSIS"
+    Emit "None recorded. Run .\gpb.ps1 lag while the problem is happening - afterwards there is"
+    Emit "nothing left to measure, and this bundle cannot say whether the network was at fault."
+}
+
 Write-Host ""
 Write-Host "Wrote $out"
 Write-Host "Size: $([math]::Round((Get-Item $out).Length / 1KB, 1)) KB"
