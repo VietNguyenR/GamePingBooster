@@ -172,7 +172,7 @@ public sealed class StatusMessage
     /// 46-50 ms in the game. Both legs are now measured the same way, and the direct measurement
     /// supersedes the whole calculation whenever it is available.
     ///
-    /// Note the estimate is NOT the "two numbers added together" that the design notes
+    /// Note the estimate is NOT the "two numbers added together" that relay selection
     /// rejects for *choosing* a relay. That rejection is about building a total from two
     /// independent measurements, which silently omits the relay's forwarding cost. Here the total
     /// was measured first and the offset derived from it.

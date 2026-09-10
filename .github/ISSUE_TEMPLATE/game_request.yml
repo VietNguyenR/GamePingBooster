@@ -1,0 +1,90 @@
+name: Game support request / Đề nghị hỗ trợ game
+description: Ask for a game that is not supported yet
+title: "[Game] "
+labels: ["game request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Cảm ơn bạn. Điền giúp mình mấy ô dưới đây — **tên tiến trình** và **khu vực máy chủ** là
+        hai thứ bắt buộc, phần còn lại có thì tốt.
+
+        Nói trước cho rõ ràng: thêm một game **không phải chuyện viết code**. Nó là chuyện bắt gói
+        thật trong lúc chơi, để tìm ra game nói chuyện với những địa chỉ nào, rồi đối chiếu với dải
+        IP mà AWS/Azure công bố. Nghĩa là nó cần một người **thật sự chơi game đó** — có thể là
+        bạn. Nếu bạn sẵn sàng chạy một lệnh bắt gói và gửi kết quả thì việc này nhanh hơn rất
+        nhiều.
+
+  - type: input
+    id: game
+    attributes:
+      label: Game name / Tên game
+      placeholder: "Valorant"
+    validations:
+      required: true
+
+  - type: input
+    id: process
+    attributes:
+      label: Process name / Tên tiến trình
+      description: |
+        Mở Task Manager → tab Details trong lúc game đang chạy, tìm dòng của game.
+
+        Cẩn thận: tên hiển thị và tên file thường khác nhau. PUBG hiện là "PUBG: BATTLEGROUNDS"
+        nhưng tiến trình thật tên `TslGame.exe`. Mình cần **tên file .exe**.
+      placeholder: "VALORANT-Win64-Shipping.exe"
+    validations:
+      required: true
+
+  - type: input
+    id: region
+    attributes:
+      label: Server region / Khu vực máy chủ
+      description: Khu vực bạn chọn trong game, hoặc khu vực game tự xếp bạn vào.
+      placeholder: "Singapore / Tokyo / Hong Kong"
+    validations:
+      required: true
+
+  - type: input
+    id: current-ping
+    attributes:
+      label: Current ping / Ping hiện tại
+      description: Ping trong game khi KHÔNG bật booster, và nhà mạng bạn đang dùng.
+      placeholder: "khoảng 120ms, Viettel"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: capture
+    attributes:
+      label: Can you help with a capture? / Bạn giúp bắt gói được không?
+      description: |
+        Đây là thứ quyết định game của bạn có được thêm hay không. Không có capture thì chỉ còn
+        cách đoán, mà đoán sai nghĩa là route nhầm traffic của người khác qua relay.
+      options:
+        - "Có — mình chơi game này thường xuyên và chạy được lệnh bắt gói"
+        - "Có thể, nếu có hướng dẫn từng bước"
+        - "Không — mình chỉ muốn đề nghị thôi"
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else / Ghi chú thêm
+      description: |
+        Ví dụ: game có nhiều khu vực và bạn hay bị xếp nhầm; game dùng launcher riêng; hay bạn đã
+        biết nó chạy trên cloud nào.
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+
+        **Nếu bạn chọn "Có" ở trên**, mình sẽ trả lời kèm hướng dẫn chạy
+        `tools\profile-builder\Capture-GameTraffic.ps1`. Nó chỉ đọc header gói tin — địa chỉ và
+        cổng — **không đọc nội dung**, và không đụng gì vào tiến trình game. Bạn chơi vài trận
+        bình thường, nó ghi ra một file text, bạn gửi lại đây.
+
+        Một điều cần biết trước: mỗi game được hỗ trợ là một dải IP được thêm vào bảng định tuyến
+        của mọi người dùng. Nên game nào cũng phải có bằng chứng thật, không thêm theo cảm tính.

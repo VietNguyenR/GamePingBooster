@@ -738,7 +738,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
         {
             _log("No region could be measured, so the relays are compared on the first leg only. " +
                  "The profile declares no landmark for any region, or none of them answered - " +
-                 "see the design notes.");
+                 "and pick a region that is worse both ways.");
         }
         else
         {

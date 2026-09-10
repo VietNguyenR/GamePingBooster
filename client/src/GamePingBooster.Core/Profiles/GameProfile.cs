@@ -51,7 +51,7 @@ public sealed class RegionEntry
     /// Stable addresses that stand in for this region when its latency has to be measured.
     ///
     /// For PUBG these are the endpoints the game itself probes on UDP 8081 to choose a
-    /// datacentre - see the design notes. They are the right stand-in for three reasons:
+    /// datacentre. They are the right stand-in for three reasons:
     /// they are inside the region, they recur across sessions (gameplay servers do not), and
     /// they answer ICMP, so measuring them needs no cooperation from anyone.
     ///

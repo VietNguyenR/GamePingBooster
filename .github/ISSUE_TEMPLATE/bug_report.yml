@@ -1,0 +1,139 @@
+name: Bug report / Báo lỗi
+description: Something does not work, or works differently than it should
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Tiếng Việt hoàn toàn ổn — cứ viết bằng tiếng bạn thoải mái nhất.
+
+        **Trước khi gửi, hãy chạy lệnh này và đính kèm file nó tạo ra:**
+
+        ```powershell
+        .\gpb.ps1 diag
+        ```
+
+        Nó gom log dịch vụ, bảng định tuyến, danh sách card mạng và Windows event log vào **một
+        file text trên Desktop**. Khoá PSK đã được che sẵn. Ba lỗi khó nhất của dự án này đều chỉ
+        giải thích được khi có đủ những thứ đó cùng lúc — thiếu nó thì một báo lỗi thường biến
+        thành ba vòng hỏi đi hỏi lại "gửi thêm giúp mình...".
+
+        ---
+
+        > ⚠️ **Đây không phải nơi báo lỗ hổng bảo mật.** Dùng nút **Report a vulnerability** ở tab
+        > Security để gửi riêng tư. Mở issue công khai là công bố lỗ hổng trước khi có bản vá.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened / Chuyện gì đã xảy ra
+      description: Mô tả cụ thể. "Không chạy" chưa đủ để bắt đầu tìm nguyên nhân.
+      placeholder: |
+        Bật booster, vào trận thì ping vẫn 80ms như khi tắt. App hiện "Connected"
+        và báo 45ms, nhưng trong game không đổi gì.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead / Bạn mong đợi điều gì
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce / Các bước tái hiện
+      description: |
+        Đánh số từng bước, từ lúc mở app. Nếu lỗi chỉ thỉnh thoảng mới xảy ra thì nói rõ
+        khoảng bao lâu một lần và bạn có nhận ra quy luật gì không.
+      placeholder: |
+        1. Mở Game Ping Booster, đăng nhập
+        2. Bấm Connect, đợi tới khi hiện "Connected"
+        3. Mở PUBG, vào một trận Erangel
+        4. Xem ping ở góc trên bên phải
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: input
+    id: frequency
+    attributes:
+      label: How often / Tần suất
+      placeholder: "Lần nào cũng bị / khoảng 1 trong 5 trận / mới bị một lần"
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics bundle / File chẩn đoán
+      description: |
+        **Kéo thả file mà `.\gpb.ps1 diag` tạo ra vào ô này.**
+
+        Nếu chưa chạy được lệnh đó, dán phần cuối của
+        `C:\ProgramData\GamePingBooster\logs\gpb-service.log` — càng nhiều dòng quanh thời điểm
+        lỗi càng tốt.
+      placeholder: Kéo file vào đây, hoặc dán log.
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots / Ảnh chụp màn hình
+      description: |
+        Nếu lỗi nhìn thấy được: chụp **màn hình app** và **ping trong game**. Với chuyện ping
+        lệch nhau thì hai ảnh này nói được nhiều hơn cả đoạn mô tả.
+      placeholder: Kéo ảnh vào đây.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / Phiên bản
+      description: "Xem ở About trong app, hoặc chạy `.\\gpb.ps1 version`"
+      placeholder: "0.1.6"
+    validations:
+      required: true
+
+  - type: input
+    id: relay
+    attributes:
+      label: Relay
+      description: Relay nào đang dùng lúc gặp lỗi (tên hiện trong app)
+      placeholder: "SG licensed 1"
+
+  - type: input
+    id: isp
+    attributes:
+      label: ISP and location / Nhà mạng và khu vực
+      description: |
+        Đường truyền là biến số lớn nhất trong dự án này. Cùng một bản build có thể chạy hoàn hảo
+        trên FPT và tệ trên Viettel, chỉ vì tuyến cáp khác nhau.
+      placeholder: "Viettel, Hà Nội"
+    validations:
+      required: true
+
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: "Nhấn Win+R, gõ `winver`"
+      placeholder: "Windows 11 Pro 24H2"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: Tôi đã tìm thử xem có issue nào trùng chưa
+          required: true
+        - label: Tôi đã kiểm rằng file đính kèm không chứa PSK, token hay mật khẩu của tôi
+          required: true

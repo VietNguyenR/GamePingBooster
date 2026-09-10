@@ -92,7 +92,7 @@ if (-not $LandmarkPath) { $LandmarkPath = Join-Path $PSScriptRoot 'landmarks-obs
 # whichever answers fastest. Those endpoints must never reach observed.txt, because everything in
 # observed.txt ends up routed, and a routed probe makes the game measure one region through the
 # relay and the rest over the player's own connection - it then compares the two and can pick a
-# region that is worse both ways. See the design notes.
+# region that is worse both ways.
 #
 # -MinPackets used to be the only thing keeping them out, and it is not enough on its own: the
 # probes hit 90 packets in a 186-second session, so a long enough evening pushes them over any
@@ -576,7 +576,7 @@ function Write-SessionResult {
             '#',
             '# These are LANDMARKS, not game servers, and nothing here may ever be routed - the game',
             '# pings one per region to decide where to put the player, so a routed one makes it',
-            '# compare a tunnelled path against direct ones. See the design notes.',
+            '# compare a tunnelled path against direct ones.',
             '#',
             '# Nothing reads this file automatically. It accumulates across sessions because one',
             '# capture rarely sees every region - packet counts range from 90 down to 12, and the',

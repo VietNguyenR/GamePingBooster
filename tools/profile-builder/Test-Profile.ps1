@@ -59,7 +59,7 @@ foreach ($game in $profileData.games) {
     # The game's own datacentre probe endpoints. None of them may be inside a routed range: the
     # game measures these to choose a server, and routing some while leaving the rest on the
     # player's connection makes it compare two different paths. That is not theoretical - it put
-    # a tester in Korea on a profile that only covered Singapore. See the design notes.
+    # a tester in Korea on a profile that only covered Singapore.
     $landmarks = @()
     foreach ($region in $game.regions) {
         foreach ($lm in @($region.landmarks)) {
@@ -74,7 +74,7 @@ foreach ($game in $profileData.games) {
     if ($landmarks.Count -eq 0) {
         $warnings += ("Game '$($game.id)' declares no landmarks, so relays can only be compared on " +
                       "the leg to the relay - the leg from the relay to the game server is invisible. " +
-                      "See the design notes.")
+                      "a server that is worse both ways.")
     }
 
     foreach ($region in $game.regions) {

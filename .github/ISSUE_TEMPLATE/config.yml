@@ -1,0 +1,14 @@
+# Blank issues stay ON.
+#
+# The two forms cover the cases worth structuring - a bug and a game request - and turning blank
+# issues off would mean anything else (a question, a documentation mistake, an idea) has to be
+# forced into a form that does not fit it, or not filed at all. A wrong-shaped issue is easy to
+# retitle; an issue nobody filed is invisible.
+blank_issues_enabled: true
+
+contact_links:
+  - name: Security vulnerability / Lỗ hổng bảo mật
+    url: https://github.com/VietNguyenR/GamePingBooster/security/advisories/new
+    about: >-
+      Báo riêng tư, KHÔNG mở issue công khai. Dự án có xác thực, thanh toán và hạ tầng relay -
+      một issue công khai là công bố lỗ hổng trước khi có bản vá.

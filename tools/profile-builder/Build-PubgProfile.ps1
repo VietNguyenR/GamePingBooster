@@ -523,7 +523,7 @@ function New-ProfileAtWidth {
                 $warnings += ("$($hit.Cidr) covers $($hit.Landmark), the datacentre probe for " +
                               "'$($hit.Region)'. LEFT OUT. Routing it would make the game measure that " +
                               "region through the relay and every other region over the player's own " +
-                              "connection - see the design notes.")
+                              "connection, then compare the two.")
             }
             $excluded = @($swallowed.Cidr | Sort-Object -Unique)
             $union = @($union | Where-Object { $excluded -notcontains $_ })
@@ -584,7 +584,7 @@ if ($unverified.Count -gt 0) {
 # That third case is checkable, and this is the one place with the data to check it: Microsoft
 # publishes which region owns every address, and this script has already downloaded that file to
 # do its real job. So it costs one pass over 11,000 prefixes to turn a silent wrong answer into a
-# warning. See the design notes.
+# warning.
 # Which Azure region owns each of these addresses, as a hashtable address -> {Region, Cidr, Bits}.
 #
 # One pass over the whole file rather than one per address, because it is 11,000 prefixes and
@@ -774,7 +774,7 @@ function Test-LandmarkRegions {
             Write-Warning ("$($lm.Address) is declared under '$($lm.Region)' but Azure publishes it " +
                            "in $($hit.Region) ($($hit.Cidr)), $whose. The client would measure the " +
                            "wrong datacentre and choose a relay for it. Fix the profile before " +
-                           "shipping - see the design notes.")
+                           "shipping.")
         }
     }
 
@@ -797,7 +797,7 @@ if (-not $game) { throw "The profile has no game with id '$GameId'." }
 # routing some of them while leaving the rest on the player's own connection makes it compare two
 # different paths and pick a region that is worse both ways. That is not a hypothetical - it is
 # how 20.43.176.0/20 got in, why a tester was sent to Korea, and the reason this check exists.
-# See HANDOFF section 6a and the design notes.
+# See HANDOFF section 6a.
 Add-ObservedLandmarks -Game $game -Azure $azure -Path $LandmarkObservedPath
 
 $landmarks = @()
@@ -808,7 +808,7 @@ foreach ($r in $game.regions) {
 }
 if ($landmarks.Count -eq 0) {
     Write-Warning ("The profile declares no landmarks, so nothing stops a prefix from swallowing " +
-                   "the game's own datacentre probes. See the design notes.")
+                   "the game's own datacentre probes.")
 } else {
     Test-LandmarkRegions -Landmarks $landmarks -Azure $azure
 }
