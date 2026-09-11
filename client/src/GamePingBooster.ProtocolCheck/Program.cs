@@ -82,6 +82,7 @@ internal static class Program
         CheckCryptoP256(root.GetProperty("cryptoP256"));
         CheckHandshakeReqToken(root.GetProperty("handshakeReqToken"));
         CheckProfileEnvelope(root);
+        CheckLobbyRoutes();
 
         Console.WriteLine();
         if (_failures == 0)
@@ -96,6 +97,67 @@ internal static class Program
     }
 
     // ------------------------------------------------------------------ checks
+
+    /// <summary>
+    /// The lobby routes: the JSON name the licence server will have to send, and the rules that
+    /// keep a hand-typed list from routing something it must not.
+    ///
+    /// Not a wire-format check, and here anyway: this is the one C# program `gpb test` runs, and
+    /// these rules are the only thing standing between a typo in a profile and a player's LAN or
+    /// relay traffic going into the tunnel for as long as it is up - not merely while the game runs.
+    /// </summary>
+    private static void CheckLobbyRoutes()
+    {
+        const string withField = """
+            {"schemaVersion":1,"games":[{"id":"pubg","name":"PUBG","processNames":["TslGame"],
+             "lobbyAddresses":["35.71.163.61","52.223.4.221/32"],"regions":[]}],"relays":[]}
+            """;
+        const string withoutField = """
+            {"schemaVersion":1,"games":[{"id":"pubg","name":"PUBG","processNames":["TslGame"],"regions":[]}],"relays":[]}
+            """;
+
+        var parsed = System.Text.Json.JsonSerializer.Deserialize(withField,
+            GamePingBooster.Core.Profiles.ProfileJsonContext.Default.ProfileBundle)!;
+        Check("profile: lobbyAddresses is read under that exact name",
+            parsed.Games[0].LobbyAddresses.Count == 2,
+            $"got {parsed.Games[0].LobbyAddresses.Count} address(es) - the JSON name and GameEntry disagree");
+
+        var old = System.Text.Json.JsonSerializer.Deserialize(withoutField,
+            GamePingBooster.Core.Profiles.ProfileJsonContext.Default.ProfileBundle)!;
+        Check("profile: a profile without lobbyAddresses gives an empty list, not null",
+            old.Games[0].LobbyAddresses is { Count: 0 }, "the licence server does not send the field yet");
+
+        var relays = new[] { "203.0.113.10:51820" };
+        var landmarks = new[] { "20.43.187.66" };
+
+        List<string> Routes(params string[] entries) =>
+            GamePingBooster.Core.Profiles.LobbyRoutes.ToHostRoutes(entries, relays, landmarks, []);
+        int Refused(params string[] entries)
+        {
+            var rejected = new List<GamePingBooster.Core.Profiles.LobbyRoutes.Rejection>();
+            GamePingBooster.Core.Profiles.LobbyRoutes.ToHostRoutes(entries, relays, landmarks, rejected);
+            return rejected.Count;
+        }
+
+        var accepted = Routes("35.71.163.61", "52.223.4.221/32", " 35.71.163.61 ");
+        Check("lobby: a bare address and a /32 both become a /32, duplicates collapse",
+            accepted.SequenceEqual(["35.71.163.61/32", "52.223.4.221/32"]), string.Join(", ", accepted));
+
+        Check("lobby: a range wider than /32 is refused", Refused("35.71.128.0/17") == 1 && Routes("35.71.128.0/17").Count == 0,
+            "a /17 would route other programs' traffic while the game is closed");
+        Check("lobby: /31 is refused too", Refused("35.71.163.60/31") == 1, "only /32 may pass");
+        Check("lobby: private, CGNAT, loopback, link-local and multicast are refused",
+            Refused("10.0.0.5", "172.16.0.1", "192.168.1.1", "100.64.0.1", "127.0.0.1", "169.254.1.1", "224.0.0.1", "255.255.255.255") == 8,
+            "one of the special-use ranges got through");
+        Check("lobby: a relay's own address is refused", Refused("203.0.113.10") == 1,
+            "it would compete with the pinned relay route");
+        Check("lobby: a landmark is refused", Refused("20.43.187.66") == 1,
+            "the game would measure that region through the relay");
+        Check("lobby: shorthand IPv4 that IPAddress.Parse accepts is refused",
+            Refused("1", "10.1", "35.71.163.061") == 3, "\"1\" parses as 0.0.0.1 and must not become a route");
+        Check("lobby: garbage is refused, not thrown", Refused("", "pubg.com", "35.71.163.61/abc") == 3,
+            "an unparseable entry must be reported, not crash route installation");
+    }
 
     /// <summary>
     /// HandshakeReq cannot be rebuilt byte for byte here - the nonce is random - so this checks

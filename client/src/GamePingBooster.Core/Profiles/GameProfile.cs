@@ -33,6 +33,30 @@ public sealed class GameEntry
 
     /// <summary>Server regions for the game; the player picks one (or leaves it on automatic).</summary>
     [JsonPropertyName("regions")] public List<RegionEntry> Regions { get; set; } = [];
+
+    /// <summary>
+    /// Addresses of the game's lobby, routed through the tunnel from the moment it connects -
+    /// NOT only while the game is running, which is the one way these differ from every range in
+    /// <see cref="RegionEntry.Cidrs"/>.
+    ///
+    /// Why they cannot wait for the game like the rest: the lobby connection is TCP and the game
+    /// opens it in its first seconds, while the game routes go in only after the process watcher
+    /// (a two-second poll) has noticed it. A connection opened on the normal path and then caught
+    /// by a route mid-flight keeps its original source address, and the relay drops every packet
+    /// whose inner source is not the address it assigned - so a late route does not accelerate the
+    /// lobby, it hangs it until the game reconnects. Gameplay never meets this: a match starts long
+    /// after the routes are in.
+    ///
+    /// Single addresses only, as "a.b.c.d" or "a.b.c.d/32". Anything wider is refused by
+    /// <see cref="LobbyRoutes"/>, because these stay routed while the game is closed and a range
+    /// would pull other programs' traffic through the relay all day. For PUBG these are the static
+    /// anycast pair of its AWS Global Accelerator, which belong to that accelerator alone.
+    ///
+    /// Absent from a profile means no lobby routes, and an older client simply ignores the field.
+    /// The licence server does not send it yet: its profile is assembled from the database, not
+    /// from this file (web-service/app/lib/profile.server.ts).
+    /// </summary>
+    [JsonPropertyName("lobbyAddresses")] public List<string> LobbyAddresses { get; set; } = [];
 }
 
 public sealed class RegionEntry

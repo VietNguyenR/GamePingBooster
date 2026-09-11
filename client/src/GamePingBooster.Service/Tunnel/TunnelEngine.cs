@@ -379,6 +379,12 @@ internal sealed class TunnelEngine : IAsyncDisposable
             _routes.ConfigureAdapter(_adapter.InterfaceIndex, session.ClientIp, prefixLength: 24, session.Mtu);
             _tunnel.StartPumping(_adapter, token);
 
+            // The lobby goes on the tunnel NOW, before the game exists, rather than with the game
+            // routes below. See GameEntry.LobbyAddresses: the lobby is a TCP connection the game
+            // opens in its first seconds, and one caught by a route after it opened is dropped by
+            // the relay for carrying the wrong source address - a late lobby route hangs the lobby.
+            InstallLobbyRoutes();
+
             // Watch the game so routes come and go with it.
             _watcher = new GameProcessWatcher(_game.ProcessNames);
             _watcher.GameStateChanged += OnGameStateChanged;
@@ -1176,6 +1182,16 @@ internal sealed class TunnelEngine : IAsyncDisposable
             routes.RemoveGameRoutes(adapter.InterfaceIndex);
         }
 
+        // The lobby too, for the same reason: pointed at an adapter with no relay behind it, the
+        // lobby would sit in a blackhole for as long as this loop takes, and that can be minutes.
+        // No flag to remember whether to put it back - it goes back on every successful reconnect,
+        // exactly as it went on at connect.
+        if (routes.ActiveLobbyRouteCount > 0)
+        {
+            _log("Tunnel is down - removing lobby routes so the lobby falls back to the normal path.");
+            routes.RemoveLobbyRoutes(adapter.InterfaceIndex);
+        }
+
         var candidates = FailoverOrder(previous);
         var delay = TimeSpan.FromSeconds(2);
 
@@ -1248,6 +1264,8 @@ internal sealed class TunnelEngine : IAsyncDisposable
                         _log($"Got a different inner IP ({session.ClientIp}) - reconfiguring the adapter.");
                         routes.ConfigureAdapter(adapter.InterfaceIndex, session.ClientIp, prefixLength: 24, session.Mtu);
                     }
+
+                    InstallLobbyRoutes();
 
                     if (hadGameRoutes || _config.RouteWithoutGame || (_watcher?.IsGameRunning ?? false))
                     {
@@ -1366,6 +1384,48 @@ internal sealed class TunnelEngine : IAsyncDisposable
         WarnAboutRoutedLandmarks(cidrs);
         _routes.InstallGameRoutes(_adapter.InterfaceIndex, cidrs);
         _log($"Installed {cidrs.Count} routes into the virtual adapter.");
+    }
+
+    /// <summary>
+    /// Puts the game's lobby addresses on the tunnel. Called whenever a tunnel comes up - at
+    /// connect and after every reconnect - and independent of whether the game is running.
+    ///
+    /// LobbyRoutes decides what is allowed; everything it refuses is logged by name and reason.
+    /// A failure here never fails the connection: the lobby staying on the normal path is exactly
+    /// what the player had before lobby routes existed, and losing the whole tunnel over it would
+    /// trade that for no acceleration at all.
+    ///
+    /// Note what a reconnect to a DIFFERENT relay does to a lobby connection regardless: it leaves
+    /// through a new address, which the lobby server sees as a stranger, and the game has to
+    /// connect again. Nothing on this side can prevent that; it is why failover is a last resort.
+    /// </summary>
+    private void InstallLobbyRoutes()
+    {
+        if (_adapter is null || _routes is null || _tunnel is null || _game is null) return;
+        if (_game.LobbyAddresses.Count == 0) return;
+
+        var relays = (_profile?.Relays ?? []).Select(r => r.Endpoint).ToList();
+        if (_relay is not null) relays.Add(_relay.Endpoint);
+        var landmarks = _game.Regions.SelectMany(r => r.Landmarks);
+
+        var rejected = new List<LobbyRoutes.Rejection>();
+        var hostRoutes = LobbyRoutes.ToHostRoutes(_game.LobbyAddresses, relays, landmarks, rejected);
+        foreach (var refusal in rejected)
+        {
+            _log($"WARNING: lobby address '{refusal.Entry}' is not routed - {refusal.Reason}.");
+        }
+        if (hostRoutes.Count == 0) return;
+
+        try
+        {
+            _routes.InstallLobbyRoutes(_adapter.InterfaceIndex, hostRoutes);
+            _log($"Installed {hostRoutes.Count} lobby route(s) into the virtual adapter " +
+                 $"({string.Join(", ", hostRoutes)}) - now, not when {_game.Name} starts.");
+        }
+        catch (Exception ex)
+        {
+            _log($"Could not install the lobby routes, so the lobby stays on the normal path: {ex.Message}");
+        }
     }
 
     /// <summary>

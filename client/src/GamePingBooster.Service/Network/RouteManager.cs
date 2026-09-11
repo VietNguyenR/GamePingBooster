@@ -24,6 +24,12 @@ namespace GamePingBooster.Service.Network;
 internal sealed class RouteManager
 {
     private readonly List<string> _installedPrefixes = [];
+
+    // The lobby's host routes, kept apart from the game routes because they live on a different
+    // clock: installed when the tunnel connects and left in place when the game exits. One shared
+    // list would have RemoveGameRoutes pull the lobby off the tunnel every time a match ended.
+    private readonly List<string> _lobbyPrefixes = [];
+
     private string? _pinnedRelayPrefix;
 
     // The interface the pin was made through. Deleting a route REQUIRES naming its interface, and
@@ -32,13 +38,18 @@ internal sealed class RouteManager
     private uint _pinnedRelayInterface;
 
     /// <summary>Number of routes currently installed.</summary>
-    public int ActiveRouteCount => _installedPrefixes.Count + (_pinnedRelayPrefix is null ? 0 : 1);
+    public int ActiveRouteCount =>
+        _installedPrefixes.Count + _lobbyPrefixes.Count + (_pinnedRelayPrefix is null ? 0 : 1);
 
     /// <summary>
-    /// Game routes only, excluding the pinned relay route. The reconnect path uses this to tell
-    /// whether it pulled the game off the tunnel and therefore owes it a reinstall on success.
+    /// Game routes only, excluding the pinned relay route and the lobby. The reconnect path uses
+    /// this to tell whether it pulled the game off the tunnel and therefore owes it a reinstall on
+    /// success.
     /// </summary>
     public int ActiveGameRouteCount => _installedPrefixes.Count;
+
+    /// <summary>Lobby host routes currently installed.</summary>
+    public int ActiveLobbyRouteCount => _lobbyPrefixes.Count;
 
     /// <summary>
     /// Assigns the inner IP and MTU to the virtual adapter. Call this after the relay has
@@ -154,6 +165,12 @@ internal sealed class RouteManager
         {
             if (!IsValidIPv4Cidr(cidr)) continue;
             if (_installedPrefixes.Contains(cidr)) continue;
+
+            // Already in the table as a lobby route. Adding it here would first DELETE it (see
+            // below), and RemoveGameRoutes would later delete it again when the game exits -
+            // taking the lobby off the tunnel with it. The lobby owns it; leave it alone.
+            if (_lobbyPrefixes.Contains(cidr)) continue;
+
             fresh.Add(cidr);
         }
         if (fresh.Count == 0) return;
@@ -190,10 +207,66 @@ internal sealed class RouteManager
         _installedPrefixes.Clear();
     }
 
+    /// <summary>
+    /// Installs the lobby's host routes into the virtual adapter. Same mechanics as
+    /// <see cref="InstallGameRoutes"/> - on-link, metric 1, delete-then-add, recorded before adding -
+    /// but tracked separately so the game exiting does not remove them.
+    ///
+    /// Takes validated "a.b.c.d/32" prefixes from LobbyRoutes.ToHostRoutes; it does not re-judge
+    /// them.
+    /// </summary>
+    public void InstallLobbyRoutes(uint tunInterfaceIndex, IEnumerable<string> hostRoutes)
+    {
+        var fresh = new List<string>();
+        foreach (var prefix in hostRoutes)
+        {
+            if (!IsValidIPv4Cidr(prefix)) continue;
+            if (_lobbyPrefixes.Contains(prefix)) continue;
+
+            // The same /32 is already in the table as a game route (routeWithoutGame, or a profile
+            // listing it in both places). Take it over without touching the table: deleting and
+            // re-adding would drop the route for a moment for nothing, and leaving it on the game
+            // list would have the game's exit remove it.
+            if (_installedPrefixes.Remove(prefix))
+            {
+                _lobbyPrefixes.Add(prefix);
+                continue;
+            }
+
+            fresh.Add(prefix);
+        }
+        if (fresh.Count == 0) return;
+
+        RunNetshScript(
+            fresh.Select(prefix =>
+                $"interface ipv4 delete route prefix={prefix} interface={tunInterfaceIndex} store=active").ToList(),
+            ignoreErrors: true);
+
+        _lobbyPrefixes.AddRange(fresh);
+
+        foreach (var prefix in fresh)
+        {
+            RunNetsh($"interface ipv4 add route prefix={prefix} interface={tunInterfaceIndex} metric=1 store=active");
+        }
+    }
+
+    /// <summary>Removes the lobby's host routes, leaving game routes and the pinned relay route alone.</summary>
+    public void RemoveLobbyRoutes(uint tunInterfaceIndex)
+    {
+        if (_lobbyPrefixes.Count == 0) return;
+
+        var commands = _lobbyPrefixes
+            .Select(prefix => $"interface ipv4 delete route prefix={prefix} interface={tunInterfaceIndex} store=active")
+            .ToList();
+        RunNetshScript(commands, ignoreErrors: true);
+        _lobbyPrefixes.Clear();
+    }
+
     /// <summary>Removes everything this RouteManager installed. Always call this on teardown.</summary>
     public void RemoveAll(uint tunInterfaceIndex)
     {
         RemoveGameRoutes(tunInterfaceIndex);
+        RemoveLobbyRoutes(tunInterfaceIndex);
 
         if (_pinnedRelayPrefix is not null)
         {

@@ -117,6 +117,41 @@ foreach ($game in $profileData.games) {
         }
     }
 
+    # Lobby addresses are routed from the moment the tunnel connects, not only while the game runs,
+    # so they get the strictest rules in this file. The client applies the same ones and skips what
+    # fails (client/src/GamePingBooster.Core/Profiles/LobbyRoutes.cs); catching it here means it
+    # never ships instead of being skipped on every player's machine with a line in a log.
+    foreach ($entry in @($game.lobbyAddresses)) {
+        if ($null -eq $entry) { continue }
+        $label = "$($game.id)/lobbyAddresses: $entry"
+        $address = "$entry".Trim()
+        if ($address -match '/') {
+            $parts = $address.Split('/')
+            if ($parts[1] -ne '32') {
+                $errors += "$label - only single addresses (/32) are allowed. These stay routed while the game is closed, so a range would pull other programs' traffic through the relay"
+                continue
+            }
+            $address = $parts[0]
+        }
+        $parsedIp = $null
+        if ($address -notmatch '^\d{1,3}(\.\d{1,3}){3}$' -or
+            -not [System.Net.IPAddress]::TryParse($address, [ref]$parsedIp) -or
+            $parsedIp.ToString() -ne $address) {
+            $errors += "$label - not an IPv4 address"
+            continue
+        }
+        $value = ConvertTo-UInt32Address $address
+        foreach ($special in ($privateRanges + @('100.64.0.0/10', '224.0.0.0/4', '240.0.0.0/4'))) {
+            if (Test-IpInCidr $value $special) { $errors += "$label - inside $special, which is not a lobby server" }
+        }
+        if ($relayIps -contains $address) {
+            $errors += "$label - IS A RELAY IP. It would compete with the pinned relay route and can loop tunnel traffic back into the tunnel"
+        }
+        foreach ($lm in $landmarks) {
+            if ($lm.Value -eq $value) { $errors += "$label - is the landmark for region '$($lm.Region)'. Landmarks must never be routed" }
+        }
+    }
+
     if ($game.processNames.Count -eq 0) {
         $errors += "Game '$($game.id)' declares no processNames - routes would never be installed"
     }

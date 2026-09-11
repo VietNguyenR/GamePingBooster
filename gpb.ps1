@@ -11,7 +11,9 @@
 
         .\gpb.ps1 dev                 build and start the service (as LocalSystem) plus the UI
         .\gpb.ps1 stop                stop both
-        .\gpb.ps1 capture             watch for the game and collect server addresses
+        .\gpb.ps1 capture [udp|tcp|all]  watch for the game and collect server addresses (udp);
+                                      tcp/all also report which lobby/login connections never
+                                      answered, into tcp-sessions.txt - never into the profile
         .\gpb.ps1 profile             rebuild the profile from what was captured
         .\gpb.ps1 check               is the game actually going through the relay right now
         .\gpb.ps1 lag [seconds]       run this DURING the lag: which segment is at fault
@@ -447,8 +449,12 @@ switch ($Verb.ToLowerInvariant()) {
     }
 
     'capture' {
+        # udp when nothing is given, which is what capture has always done. The script validates
+        # the value itself, so a typo is refused before anything is captured.
+        $captureArgs = @{}
+        if ($Arg1) { $captureArgs['Protocol'] = $Arg1.ToLowerInvariant() }
         Push-Location $builder
-        try { & (Join-Path $builder 'Capture-GameTraffic.ps1') } finally { Pop-Location }
+        try { & (Join-Path $builder 'Capture-GameTraffic.ps1') @captureArgs } finally { Pop-Location }
     }
 
     'profile' {
