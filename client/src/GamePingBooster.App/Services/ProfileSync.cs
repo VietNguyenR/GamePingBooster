@@ -117,8 +117,13 @@ public sealed class ProfileSync
             await _pipe.SendAsync(new CommandMessage { Verb = "set-profile", Profile = sealedHex })
                 .ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+            // Genuinely cancelled. LicenceClient now reports its timeouts as
+            // LicenceTimeoutException, which lands in the network-failure catch below - but an
+            // HttpClient timeout used to arrive here as an OperationCanceledException, and rethrown
+            // from App.axaml.cs, where the call is fire-and-forget, it simply vanished: the game list
+            // stayed old and nothing said so. The filter keeps that from coming back.
             throw;
         }
         catch (LicenceException ex)

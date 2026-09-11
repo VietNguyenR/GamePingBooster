@@ -105,9 +105,10 @@ public sealed class AccountViewModel : INotifyPropertyChanged
         {
             Error = ex.Message;
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // The window closed. Nothing to report to.
+            // The window closed. Nothing to report to. A timeout is NOT this - it falls through
+            // to the catch below and says so, instead of leaving the window blank.
         }
         catch (Exception ex)
         {

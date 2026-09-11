@@ -124,16 +124,27 @@ public sealed class LoginViewModel : INotifyPropertyChanged
         {
             Error = ex.Message;
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+            // Only the window closing cancels this, so in practice nobody reads it. Kept so the
+            // catch below never has to guess.
             Error = "Cancelled.";
+        }
+        catch (LicenceTimeoutException ex)
+        {
+            // Only the licence server's calls throw this - LoopbackAuth's own four-minute wait for
+            // the browser is a plain TimeoutException and goes to the catch below - so reaching here
+            // means the browser has already said "Signed in": that page is served by our listener
+            // before the exchange. The message has to say so, or the person goes looking for the
+            // problem in the wrong place. Its own text carries the deadline that ran out, which
+            // is 30 seconds for the exchange and 10 for the token call after it.
+            Error = ex.Message + " The browser part worked - try again.";
         }
         catch (Exception ex)
         {
-            // Every failure here is one the password form can still get past - a browser that
-            // will not open, a port that cannot be claimed, a proxy in the way - so say so rather
-            // than leaving somebody stuck at a button that does not work.
-            Error = ex.Message + " You can still sign in with your email and password above.";
+            // A browser that will not open, a port that cannot be claimed, a proxy in the way.
+            // There is no other way in any more, so the only honest next step is another attempt.
+            Error = ex.Message + " Try again.";
         }
         finally
         {

@@ -74,3 +74,4 @@ token.hex
 .reset-backup/
 profiles/pubg-vn.json.bak-20260909-preRebuild
 tools/profile-builder/manual-cidrs.txt
+tools/Test-LicenceConnection.ps1

@@ -11,8 +11,8 @@ namespace GamePingBooster.App.Services;
 ///
 /// The app listens on 127.0.0.1, opens the default browser at the licence server's
 /// <c>/app/authorize</c> page, and waits for the browser to come back to that port with a
-/// one-time code. The code is then exchanged for the same refresh token the password form
-/// produces, so everything downstream - licence token, set-token, profile sync - is untouched.
+/// one-time code. The code is then exchanged for the same refresh token the removed password form
+/// used to produce, so everything downstream - licence token, set-token, profile sync - is untouched.
 ///
 /// Two things make it worth doing. The app never sees the password, which matters for software
 /// that installs a network driver and asks for administrator rights. And the device-limit
@@ -168,7 +168,7 @@ public sealed class LoopbackAuth
         {
             throw new TimeoutException(
                 $"No answer from the browser within {Timeout.TotalMinutes:F0} minutes. " +
-                "If the browser did not open, use the email and password form instead.");
+                "If no browser window opened, check that Windows has a default browser set.");
         }
     }
 

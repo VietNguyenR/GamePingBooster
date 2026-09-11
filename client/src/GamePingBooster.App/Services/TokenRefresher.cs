@@ -228,8 +228,15 @@ public sealed class TokenRefresher : IAsyncDisposable
 
             _report($"Licence renewed, valid until {renewed.LocalDateTime:g}.");
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+            // Shutting down. Only a genuine cancellation may leave this method by throwing.
+            //
+            // Without the filter an HttpClient timeout came through here too, and LoopAsync calls
+            // this outside any try: one renewal slower than ten seconds ended the loop, the task
+            // behind `_loop ??=` stayed finished so Start() never restarted it, and the licence
+            // quietly ran out a day later with nothing in the log to say why. A timeout is a
+            // network failure and is handled as one below.
             throw;
         }
         catch (LicenceException ex)

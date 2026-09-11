@@ -23,20 +23,81 @@ namespace GamePingBooster.App.Services;
 /// </summary>
 public sealed class LicenceClient : IDisposable
 {
+    /// <summary>
+    /// How long a request may take, for every call except <see cref="ExchangeAsync"/>.
+    ///
+    /// Short: most of these have somebody looking at them, and a request that has not answered in
+    /// ten seconds should say so rather than hang. The ones that run in the background retry on
+    /// their own, so a short deadline costs them nothing.
+    /// </summary>
+    public static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// How long <see cref="ExchangeAsync"/> may take. Longer than the rest, because giving up on
+    /// this one is far more expensive than on any other.
+    ///
+    /// The code it spends is single-use, and the server marks it spent while handling the request -
+    /// whether or not anybody is still waiting for the answer. So a client that gives up at ten
+    /// seconds on a server that finishes at twelve has thrown the code away, and there is no retry:
+    /// the same request now gets "no longer valid". The person has to go through the browser
+    /// again, and the refresh token the server issued is orphaned. Every other call can simply be
+    /// made again.
+    ///
+    /// Thirty seconds because the production server was measured (2026-09-11) at up to 4.4 s for a
+    /// single-query request rejected with a bogus code, and the real exchange runs several
+    /// queries. It stays far inside the code's own five-minute life.
+    /// </summary>
+    public static readonly TimeSpan ExchangeTimeout = TimeSpan.FromSeconds(30);
+
     private readonly HttpClient _http;
 
     public LicenceClient(string baseUrl)
     {
-        _http = new HttpClient
+        // Connections race the host's addresses instead of trying them in turn. Without this, a line
+        // whose IPv6 silently drops packets spends 22 s per IPv6 address before trying IPv4 - 44 s
+        // against this server - while the browser on the same machine works. See HappyEyeballs.
+        var handler = new SocketsHttpHandler { ConnectCallback = HappyEyeballs.ConnectCallback };
+
+        _http = new HttpClient(handler, disposeHandler: true)
         {
             BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/"),
-            // Short: this is a sign-in box somebody is looking at, not a background job. A
-            // request that has not answered in ten seconds should say so rather than hang.
-            Timeout = TimeSpan.FromSeconds(10),
+            // Off. Each call sets its own deadline in WithDeadline, because one number for every
+            // call is wrong for the exchange - see ExchangeTimeout.
+            Timeout = System.Threading.Timeout.InfiniteTimeSpan,
         };
     }
 
     public void Dispose() => _http.Dispose();
+
+    /// <summary>
+    /// Runs one call under a deadline, and reports running out of time as a timeout.
+    ///
+    /// <b>That last part is the reason this exists.</b> HttpClient reports its own timeout as a
+    /// <see cref="TaskCanceledException"/>, a subclass of <see cref="OperationCanceledException"/>,
+    /// although nobody cancelled anything - and every caller reads OperationCanceledException as
+    /// "the window closed". That shipped three times at once: the sign-in form said "Cancelled."
+    /// after a sign-in that had worked in the browser, the account window stopped loading without
+    /// a word, and one slow renewal ended TokenRefresher's loop for the life of the process.
+    ///
+    /// So the translation happens here, once, where it is known which token fired: the caller's
+    /// means they gave up and is left alone; ours means the server was too slow and becomes
+    /// <see cref="LicenceTimeoutException"/>. Callers keep their `when (ct.IsCancellationRequested)`
+    /// filters as a second line, not the only one.
+    /// </summary>
+    private static async Task<T> WithDeadline<T>(TimeSpan timeout, CancellationToken ct,
+        Func<CancellationToken, Task<T>> call)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(timeout);
+        try
+        {
+            return await call(deadline.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            throw new LicenceTimeoutException(timeout);
+        }
+    }
 
     /// <summary>
     /// Trades a browser sign-in's one-time code for this account's refresh token.
@@ -55,16 +116,19 @@ public sealed class LicenceClient : IDisposable
     /// The verifier is the PKCE secret this process kept while only its hash travelled through
     /// the browser. The redirect URI is sent again so the server can check the code is being
     /// spent by whoever asked for it, and not by something that merely saw it go past.
+    ///
+    /// Runs under <see cref="ExchangeTimeout"/>, not the shorter default - see there for why.
     /// </summary>
-    public async Task<LoginResult> ExchangeAsync(string code, string verifier, string redirectUri,
-        CancellationToken ct)
-    {
-        var response = await _http.PostAsJsonAsync("auth/exchange",
-            new ExchangeRequest { Code = code, Verifier = verifier, RedirectUri = redirectUri },
-            LicenceJsonContext.Default.ExchangeRequest, ct).ConfigureAwait(false);
+    public Task<LoginResult> ExchangeAsync(string code, string verifier, string redirectUri,
+        CancellationToken ct) =>
+        WithDeadline(ExchangeTimeout, ct, async t =>
+        {
+            using var response = await _http.PostAsJsonAsync("auth/exchange",
+                new ExchangeRequest { Code = code, Verifier = verifier, RedirectUri = redirectUri },
+                LicenceJsonContext.Default.ExchangeRequest, t).ConfigureAwait(false);
 
-        return await ReadAsync(response, LicenceJsonContext.Default.LoginResult, ct).ConfigureAwait(false);
-    }
+            return await ReadAsync(response, LicenceJsonContext.Default.LoginResult, t).ConfigureAwait(false);
+        });
 
     /// <summary>
     /// Exchanges the refresh token for a licence token bound to this machine's device key.
@@ -72,20 +136,21 @@ public sealed class LicenceClient : IDisposable
     /// The device public key has to go up: the token names it, and that is what makes a stolen
     /// token useless to anybody who does not also hold the private half.
     /// </summary>
-    public async Task<TokenResult> FetchTokenAsync(string refreshToken, string devicePublicKey,
-        string deviceLabel, CancellationToken ct)
-    {
-        var response = await _http.PostAsJsonAsync("auth/token",
-            new TokenRequest
-            {
-                RefreshToken = refreshToken,
-                DevicePublicKey = devicePublicKey,
-                DeviceLabel = deviceLabel,
-            },
-            LicenceJsonContext.Default.TokenRequest, ct).ConfigureAwait(false);
+    public Task<TokenResult> FetchTokenAsync(string refreshToken, string devicePublicKey,
+        string deviceLabel, CancellationToken ct) =>
+        WithDeadline(RequestTimeout, ct, async t =>
+        {
+            using var response = await _http.PostAsJsonAsync("auth/token",
+                new TokenRequest
+                {
+                    RefreshToken = refreshToken,
+                    DevicePublicKey = devicePublicKey,
+                    DeviceLabel = deviceLabel,
+                },
+                LicenceJsonContext.Default.TokenRequest, t).ConfigureAwait(false);
 
-        return await ReadAsync(response, LicenceJsonContext.Default.TokenResult, ct).ConfigureAwait(false);
-    }
+            return await ReadAsync(response, LicenceJsonContext.Default.TokenResult, t).ConfigureAwait(false);
+        });
 
     /// <summary>
     /// Fetches the profile, SEALED to this machine's device key.
@@ -95,54 +160,56 @@ public sealed class LicenceClient : IDisposable
     /// through. The ranges therefore never exist in the UI's memory, never cross the IPC pipe in
     /// readable form, and never reach the disk unsealed.
     /// </summary>
-    public async Task<string> FetchProfileAsync(string refreshToken, string devicePublicKey,
-        string gameId, CancellationToken ct)
-    {
-        using var request = new HttpRequestMessage(HttpMethod.Get,
-            $"profile?game={Uri.EscapeDataString(gameId)}&device={Uri.EscapeDataString(devicePublicKey)}");
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshToken);
-
-        using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
-        if (response.IsSuccessStatusCode)
+    public Task<string> FetchProfileAsync(string refreshToken, string devicePublicKey,
+        string gameId, CancellationToken ct) =>
+        WithDeadline(RequestTimeout, ct, async t =>
         {
-            var body = await response.Content
-                .ReadFromJsonAsync(LicenceJsonContext.Default.SealedProfileResult, ct)
-                .ConfigureAwait(false);
-            if (string.IsNullOrWhiteSpace(body?.Envelope))
+            using var request = new HttpRequestMessage(HttpMethod.Get,
+                $"profile?game={Uri.EscapeDataString(gameId)}&device={Uri.EscapeDataString(devicePublicKey)}");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshToken);
+
+            using var response = await _http.SendAsync(request, t).ConfigureAwait(false);
+            if (response.IsSuccessStatusCode)
             {
-                throw new LicenceException("The licence server sent an empty game list.");
+                var body = await response.Content
+                    .ReadFromJsonAsync(LicenceJsonContext.Default.SealedProfileResult, t)
+                    .ConfigureAwait(false);
+                if (string.IsNullOrWhiteSpace(body?.Envelope))
+                {
+                    throw new LicenceException("The licence server sent an empty game list.");
+                }
+                return body.Envelope;
             }
-            return body.Envelope;
-        }
 
-        throw await ErrorAsync(response, ct, new()
-        {
-            [System.Net.HttpStatusCode.Unauthorized] = "Sign in again to update the game list.",
-            [System.Net.HttpStatusCode.PaymentRequired] = "This account has no active subscription.",
-            [System.Net.HttpStatusCode.TooManyRequests] = "Asked for the game list too often. It will update later.",
-        }).ConfigureAwait(false);
-    }
+            throw await ErrorAsync(response, t, new()
+            {
+                [System.Net.HttpStatusCode.Unauthorized] = "Sign in again to update the game list.",
+                [System.Net.HttpStatusCode.PaymentRequired] = "This account has no active subscription.",
+                [System.Net.HttpStatusCode.TooManyRequests] = "Asked for the game list too often. It will update later.",
+            }).ConfigureAwait(false);
+        });
 
     /// <summary>The account, for the Account screen. Nothing here is a credential.</summary>
-    public async Task<AccountResult> FetchAccountAsync(string refreshToken, CancellationToken ct)
-    {
-        using var request = new HttpRequestMessage(HttpMethod.Get, "account");
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshToken);
-
-        using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
-        if (response.IsSuccessStatusCode)
+    public Task<AccountResult> FetchAccountAsync(string refreshToken, CancellationToken ct) =>
+        WithDeadline(RequestTimeout, ct, async t =>
         {
-            return await response.Content
-                .ReadFromJsonAsync(LicenceJsonContext.Default.AccountResult, ct)
-                .ConfigureAwait(false)
-                ?? throw new LicenceException("The licence server sent an empty answer.");
-        }
+            using var request = new HttpRequestMessage(HttpMethod.Get, "account");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshToken);
 
-        throw await ErrorAsync(response, ct, new()
-        {
-            [System.Net.HttpStatusCode.Unauthorized] = "This sign-in has expired. Sign in again.",
-        }).ConfigureAwait(false);
-    }
+            using var response = await _http.SendAsync(request, t).ConfigureAwait(false);
+            if (response.IsSuccessStatusCode)
+            {
+                return await response.Content
+                    .ReadFromJsonAsync(LicenceJsonContext.Default.AccountResult, t)
+                    .ConfigureAwait(false)
+                    ?? throw new LicenceException("The licence server sent an empty answer.");
+            }
+
+            throw await ErrorAsync(response, t, new()
+            {
+                [System.Net.HttpStatusCode.Unauthorized] = "This sign-in has expired. Sign in again.",
+            }).ConfigureAwait(false);
+        });
 
     /// <summary>
     /// Ends the sign-in on the server.
@@ -151,13 +218,14 @@ public sealed class LicenceClient : IDisposable
     /// who wants their credentials off a machine should not be blocked by a network that is
     /// down. The credential is short-lived and revoking it is hygiene, not the mechanism.
     /// </summary>
-    public async Task LogoutAsync(string refreshToken, CancellationToken ct)
-    {
-        using var request = new HttpRequestMessage(HttpMethod.Post, "auth/logout");
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshToken);
-        using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
-        _ = response.IsSuccessStatusCode;
-    }
+    public Task LogoutAsync(string refreshToken, CancellationToken ct) =>
+        WithDeadline(RequestTimeout, ct, async t =>
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, "auth/logout");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshToken);
+            using var response = await _http.SendAsync(request, t).ConfigureAwait(false);
+            return response.IsSuccessStatusCode;
+        });
 
     private static async Task<LicenceException> ErrorAsync(HttpResponseMessage response,
         CancellationToken ct, Dictionary<System.Net.HttpStatusCode, string> known)
@@ -187,7 +255,7 @@ public sealed class LicenceClient : IDisposable
     /// Turns a response into either a result or an exception carrying a message worth showing.
     ///
     /// The server's own message is preferred over a status code, because the two failures that
-    /// matter - wrong password, and the device limit - are things the person can act on and a
+    /// matter - an expired sign-in, and the device limit - are things the person can act on and a
     /// status code is not. Anything unrecognised falls back to something honest rather than
     /// inventing a cause.
     /// </summary>
@@ -215,7 +283,9 @@ public sealed class LicenceClient : IDisposable
 
         throw new LicenceException(serverMessage ?? response.StatusCode switch
         {
-            System.Net.HttpStatusCode.Unauthorized => "That email and password do not match an account.",
+            // No password is ever sent from here, so a 401 can only mean the sign-in itself is no
+            // longer accepted - an expired or revoked refresh token, or a one-time code already spent.
+            System.Net.HttpStatusCode.Unauthorized => "That sign-in is no longer valid. Sign in again.",
             System.Net.HttpStatusCode.Forbidden => "This account is not allowed to add another device.",
             System.Net.HttpStatusCode.NotFound => "The licence server does not recognise this request. Check the address in settings.",
             _ => $"The licence server answered {(int)response.StatusCode}.",
@@ -236,6 +306,21 @@ public sealed class LicenceException(string message, System.Net.HttpStatusCode? 
 {
     /// <summary>The HTTP status behind it, or null when the request never got an answer.</summary>
     public System.Net.HttpStatusCode? StatusCode { get; } = status;
+}
+
+/// <summary>
+/// The licence server did not answer within the call's deadline.
+///
+/// A <see cref="TimeoutException"/>, deliberately NOT a <see cref="LicenceException"/>. A
+/// LicenceException means the server answered and said no, and callers act on that: TokenRefresher
+/// backs off for longer, and drops the licence outright on a 402. A timeout says nothing about the
+/// licence - it is a network failure, and every caller already has a catch for those.
+/// </summary>
+public sealed class LicenceTimeoutException(TimeSpan waited)
+    : TimeoutException($"The licence server did not answer within {waited.TotalSeconds:F0} seconds.")
+{
+    /// <summary>The deadline that ran out - 10 or 30 seconds depending on the call.</summary>
+    public TimeSpan Waited { get; } = waited;
 }
 
 public sealed class ExchangeRequest
