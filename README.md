@@ -223,6 +223,24 @@ Change it as part of a build, which is when it matters:
 installer filename; the numeric part alone goes into `AssemblyVersion` and `FileVersion`, because
 Windows will not accept anything else in a file version resource.
 
+### Releasing
+
+```
+./gpb release 0.1.8
+```
+
+That is the whole procedure. It refuses, before changing anything, when: you are not on `main`,
+there are uncommitted changes, `main` is behind `origin`, the tag already exists, or the version
+is not newer than the latest release. It then shows what it will do and asks once. After the tag
+is pushed, `.github/workflows/release.yml` builds the installer, the client zip and the relay
+package, and creates the release with them attached.
+
+**Never create or publish a release on the GitHub web page.** Releases on this repository are
+immutable. A published release accepts no new assets, so one published by hand can never receive
+the installer - and deleting it to try again makes its version number unusable forever. v0.1.7 was
+lost that way. If a push fails part way, run the same `./gpb release` again: it recognises its own
+release commit and tag and carries on from where it stopped.
+
 ### Testing the installer
 
 An installer's job is to work on a machine that has never seen the software, and a development
@@ -252,6 +270,7 @@ which is shared with anything else that uses Wintun - WireGuard, most likely - s
 | Command | What it does |
 |---|---|
 | `./gpb test` | Everything: `gofmt`, `go vet`, the Go tests, the lag-verdict rules, then the C# build and the cross-language wire-format check. Skips the C# half with a warning if the .NET SDK is missing. |
+| `./gpb release x.y.z` | **The only way to release.** Checks everything first, shows the plan and asks once, then bumps `VERSION`, commits, pushes `main` and the tag; GitHub Actions builds and publishes the release. See [Releasing](#releasing). |
 | `./gpb help` | The same list, from the script itself. |
 
 `./gpb test` always passes `-count=1`. Go's test cache is not keyed on

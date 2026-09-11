@@ -2,6 +2,15 @@ name: Release
 
 # Trigger: a version tag pushed anywhere (tags aren't scoped to a branch in GitHub's push
 # filters), but the "must be on main" rule is enforced explicitly in the validate step below.
+#
+# HOW TO RELEASE: `./gpb release x.y.z`. It bumps VERSION, commits, pushes main, then pushes the
+# tag that starts this workflow, and this workflow creates and publishes the release.
+#
+# DO NOT create or publish the release on the GitHub web page. Releases on this repository are
+# IMMUTABLE: a published release accepts no new assets, so one published before this workflow runs
+# can never receive the installer. And an immutable release that is deleted takes its tag name with
+# it for good - "you cannot reuse the same tag name" (GitHub docs). v0.1.7 was lost exactly that
+# way on 2026-09-11: published by hand, then deleted by an older version of the last step below.
 on:
   push:
     tags:
@@ -65,10 +74,11 @@ jobs:
           # override for it.
           $appVersion = (Get-Content VERSION -Raw).Trim()
           if ($appVersion -ne $env:TAG_VERSION) {
+            # No release exists yet at this point, so deleting the tag is still safe here - it is
+            # only a tag. ./gpb release refuses to push a mismatched pair in the first place.
             $msg = "Tag 'v$env:TAG_VERSION' does not match the application version 'v$appVersion' declared in VERSION.`n" +
-                   "Fix one of the two before releasing:`n" +
-                   "  - wrong VERSION file: .\gpb.ps1 version $env:TAG_VERSION   (commit it, then re-tag)`n" +
-                   "  - wrong tag: delete it and push v$appVersion instead"
+                   "Delete the tag (git push origin :refs/tags/v$env:TAG_VERSION) and release with ./gpb release x.y.z,`n" +
+                   "which writes VERSION and the tag together so the two cannot disagree."
             Write-Error $msg
             exit 1
           }
@@ -196,22 +206,43 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $tag = "${{ github.ref_name }}"
           $repo = "${{ github.repository }}"
+          $assets = @(
+            "installer\dist\GamePingBooster-Setup-$env:VERSION.exe",
+            "GamePingBooster-Client-$env:VERSION-win-x64.zip",
+            "GamePingBooster-Server-$env:VERSION-linux-amd64.tar.gz"
+          )
 
-          # Idempotent: a re-run of this same tag (retry after a transient failure, or a
-          # deliberate re-run) must not die on "a release with the same tag name already
-          # exists". Replace the release, never the tag - the tag was already pushed and
-          # validated before this job started, so only the release side is CI's to redo.
-          gh release view $tag --repo $repo *> $null
+          # THIS STEP NEVER DELETES A RELEASE. Releases here are immutable, and deleting one
+          # makes its tag name unusable forever. The previous version of this step "replaced" an
+          # existing release by deleting it first, meant as a harmless retry - under immutable
+          # releases that retry destroyed v0.1.7. Three cases, and none of them deletes anything:
+          $existing = gh release view $tag --repo $repo --json isDraft 2>$null
           if ($LASTEXITCODE -eq 0) {
-            Write-Host "Release $tag already exists - deleting it so this run can recreate it (the git tag itself is left alone)."
-            gh release delete $tag --repo $repo --yes
-            if ($LASTEXITCODE -ne 0) { throw "Failed to delete the existing release $tag" }
+            if (($existing | ConvertFrom-Json).isDraft) {
+              # A draft is the one state that can still take assets. Attach the build and
+              # publish it, leaving whatever title and notes were written on it alone.
+              Write-Host "A draft release for $tag already exists - attaching the build to it and publishing it."
+              gh release upload $tag @assets --repo $repo --clobber
+              if ($LASTEXITCODE -ne 0) { throw "gh release upload failed" }
+              gh release edit $tag --repo $repo --draft=false
+              if ($LASTEXITCODE -ne 0) { throw "gh release edit --draft=false failed" }
+              exit 0
+            }
+
+            $msg = "Release $tag is already PUBLISHED, so this build cannot be attached to it. Nothing was changed.`n`n" +
+                   "Releases on this repository are immutable: once published, a release accepts no new assets.`n" +
+                   "  - If this is a re-run of a release that already succeeded, there is nothing left to do.`n" +
+                   "  - If the release was published on the GitHub web page before this workflow ran, it has no`n" +
+                   "    installer and never will. Do NOT delete it to try again: deleting an immutable release`n" +
+                   "    makes the name $tag unusable forever. Release the next version with ./gpb release x.y.z,`n" +
+                   "    and let this workflow create the release instead of the web page."
+            Write-Error $msg
+            exit 1
           }
 
-          gh release create $tag `
-            "installer\dist\GamePingBooster-Setup-$env:VERSION.exe" `
-            "GamePingBooster-Client-$env:VERSION-win-x64.zip" `
-            "GamePingBooster-Server-$env:VERSION-linux-amd64.tar.gz" `
+          # No release yet - the normal path. gh creates it as a draft, uploads the assets, and only
+          # then publishes, which is the order immutable releases require.
+          gh release create $tag @assets `
             --repo $repo `
             --title "Game Ping Booster v$env:VERSION" `
             --verify-tag `

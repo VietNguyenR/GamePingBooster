@@ -31,6 +31,10 @@
         .\gpb.ps1 relay logs [name]   follow journalctl on a relay
         .\gpb.ps1 relay test          Go tests only
 
+        .\gpb.ps1 release x.y.z       bump VERSION, commit, push main and the tag; GitHub Actions
+                                      then builds and publishes the release. Never publish a
+                                      release on the GitHub web page - see .github/workflows/release.yml
+
     Relays are declared in gpb.conf - host, port, user, key or password, one block each. Copy
     gpb.conf.example to gpb.conf and fill it in; see `.\gpb.ps1 relay setup`.
 
@@ -80,6 +84,32 @@ function Add-VsWhereToPath {
     if ((Test-Path (Join-Path $p 'vswhere.exe')) -and ($env:PATH -notlike "*$p*")) {
         $env:PATH = "$p;$env:PATH"
     }
+}
+
+# Git's bash, found through git itself rather than through PATH. A bare `bash` on Windows 11 is
+# WSL's, which has no Y: and answers "No such file or directory" for a path that is plainly there -
+# measured here, and it reads like a missing file rather than a wrong shell. Git for Windows is
+# already required by ./gpb, so this is not a new dependency. Null when it cannot be found.
+#
+# Walks up from git.exe to the Git for Windows root - the directory holding git-bash.exe - instead
+# of assuming git.exe sits exactly two levels below it. That assumption holds for Git\cmd\git.exe,
+# which is what a normal PowerShell finds first, and fails for Git\mingw64\bin\git.exe, which is
+# what it finds when started from Git Bash, because Git Bash puts mingw64\bin at the front of PATH.
+# So this returned null for every gpb.ps1 run launched from Git Bash, and `test` silently skipped
+# the deploy-mode test there (found 2026-09-11, when `release` needed the same lookup).
+#
+# Always bin\bash.exe, never usr\bin\bash.exe: the one in bin sets up PATH for the MSYS tools, and
+# the real binary under usr, started directly from Windows, cannot find sed or awk.
+function Get-GitBash {
+    foreach ($git in @(Get-Command git -All -ErrorAction SilentlyContinue)) {
+        $dir = Split-Path $git.Source -Parent
+        for ($i = 0; $i -lt 4 -and $dir; $i++) {
+            $bash = Join-Path $dir 'bin\bash.exe'
+            if ((Test-Path (Join-Path $dir 'git-bash.exe')) -and (Test-Path $bash)) { return $bash }
+            $dir = Split-Path $dir -Parent
+        }
+    }
+    return $null
 }
 
 function Get-ServiceExe {
@@ -485,16 +515,7 @@ switch ($Verb.ToLowerInvariant()) {
         # out of a string built in two places, and getting it wrong takes a fleet offline quietly.
         # The test itself is a shell script because half of what it drives is one.
         #
-        # Git's bash, found through git itself rather than through PATH. A bare `bash` on Windows
-        # 11 is WSL's, which has no Y: and answers "No such file or directory" for a path that is
-        # plainly there - measured here, and it reads like a missing file rather than a wrong
-        # shell. Git for Windows is already required by ./gpb, so this is not a new dependency.
-        $gitBash = $null
-        $gitCmd = Get-Command git -ErrorAction SilentlyContinue
-        if ($gitCmd) {
-            $candidate = Join-Path (Split-Path (Split-Path $gitCmd.Source -Parent) -Parent) 'bin\bash.exe'
-            if (Test-Path $candidate) { $gitBash = $candidate }
-        }
+        $gitBash = Get-GitBash
         if ($gitBash) {
             Say "Relay deploy: the declared mode is the mode installed"
             & $gitBash ((Join-Path $tools 'test-relay-deploy-mode.sh') -replace '\\', '/')
@@ -516,6 +537,16 @@ switch ($Verb.ToLowerInvariant()) {
         if ($LASTEXITCODE -ne 0) { throw "the C# client and the Go relay disagree on the wire format" }
 
         Say "Everything passed" 'Green'
+    }
+
+    'release' {
+        # Implemented once, in ./gpb, and only reached from here. A release is git and nothing
+        # Windows-specific, and two copies of a sequence that ends in pushing a tag that can never
+        # be taken back would be two chances to push the wrong one.
+        $gitBash = Get-GitBash
+        if (-not $gitBash) { throw "Git's bash not found. Install Git for Windows, or run ./gpb release from Git Bash." }
+        & $gitBash ((Join-Path $root 'gpb') -replace '\\', '/') release $Arg1
+        exit $LASTEXITCODE
     }
 
     'publish' {

@@ -21,6 +21,8 @@
 #   ./gpb relay logs [name]      follow journalctl on a relay             (any OS)
 #   ./gpb relay setup            first-time setup, explained              (any OS)
 #   ./gpb test                   everything: Go, plus C# if the SDK is here
+#   ./gpb release x.y.z          bump VERSION, commit, push main and the tag  (any OS)
+#                                GitHub Actions then builds and publishes the release
 #
 #   ./gpb dev                    build and start the service and UI       (Windows)
 #   ./gpb capture                collect game server addresses            (Windows)
@@ -619,6 +621,180 @@ relay_deploy() {
     fi
 }
 
+# Exit 0 when $1 is a newer version than $2. The x.y.z part compares as numbers, so 0.1.10 is
+# newer than 0.1.9. On equal numbers a release outranks its pre-release (1.0.0 > 1.0.0-beta1),
+# and two pre-releases compare as text - good enough for the suffixes this project uses.
+version_gt() {
+    awk -v a="$1" -v b="$2" 'BEGIN {
+        split(a, ap, "-"); split(b, bp, "-")
+        split(ap[1], x, "."); split(bp[1], y, ".")
+        for (i = 1; i <= 3; i++) {
+            if (x[i] + 0 > y[i] + 0) exit 0
+            if (x[i] + 0 < y[i] + 0) exit 1
+        }
+        sa = substr(a, length(ap[1]) + 2); sb = substr(b, length(bp[1]) + 2)
+        if (sa == "" && sb != "") exit 0
+        if (sa != "" && sb == "") exit 1
+        exit !(sa > sb)
+    }'
+}
+
+# ./gpb release x.y.z - everything a release needs, in the one order that works.
+#
+# Why a command and not a page of instructions: releases on this repository are IMMUTABLE, so the
+# usual forgiving ways of fixing a release do not exist. A published release takes no new assets,
+# and a deleted one takes its tag name with it for good. v0.1.7 was lost on 2026-09-11 by the most
+# natural thing to try - publishing the release on the GitHub web page - which left CI nothing it
+# could attach the installer to. The only safe way in is to push a tag and let
+# .github/workflows/release.yml create the release, and this is that, with every precondition the
+# workflow would reject checked here first, while nothing has been pushed yet.
+#
+# Everything is checked before anything is changed, the plan is shown, and one "y" is asked for:
+# the last step is the one that cannot be taken back.
+#
+# Safe to run again after a failure part way. A push that fails leaves a release commit (and maybe a
+# local tag) behind; running the same command again recognises them and carries on from there.
+release() {
+    rel_ver=${1:-}
+    [ -n "$rel_ver" ] || die "which version? ./gpb release x.y.z   (VERSION is now $(relay_version))"
+    rel_ver=${rel_ver#v}
+    printf '%s' "$rel_ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' \
+        || die "'$1' is not a version. Use x.y.z, optionally with a suffix: 0.2.0, 1.0.0-beta1."
+    rel_tag="v$rel_ver"
+
+    need git "Install Git for Windows."
+    cd "$root"
+
+    # ------------------------------------------------------------------ preconditions
+    # The workflow refuses a tag that is not on main, so pushing one from anywhere else would only
+    # fail ten minutes later with the tag already public.
+    rel_branch=$(git symbolic-ref --short -q HEAD || true)
+    [ "$rel_branch" = main ] \
+        || die "releases are cut from main, and this is '${rel_branch:-a detached HEAD}'. Run: git switch main"
+
+    # Tracked changes only. The release commit must contain the version bump and nothing else, and
+    # `git commit` here would otherwise sweep in whatever happened to be half-finished.
+    if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+        git status --short --untracked-files=no >&2
+        die "uncommitted changes above. Commit or stash them first - a release commit holds the version and nothing else."
+    fi
+
+    say "Checking origin"
+    # main only, and never `--tags`: a tag that was moved on origin makes a tag fetch fail with
+    # "would clobber existing tag", which would block a release over something unrelated to it.
+    git fetch --quiet origin main
+    rel_behind=$(git rev-list --count HEAD..origin/main)
+    [ "$rel_behind" -eq 0 ] \
+        || die "main is $rel_behind commit(s) behind origin/main. Run git pull first, so the release is built from what is actually there."
+    rel_ahead=$(git rev-list --count origin/main..HEAD)
+
+    rel_remote_tags=$(git ls-remote --tags --refs origin 'v*' | sed 's#.*refs/tags/##')
+    if printf '%s\n' "$rel_remote_tags" | grep -qx "$rel_tag"; then
+        die "$rel_tag already exists on origin. Every release needs a new version: ./gpb release <next>"
+    fi
+
+    rel_latest=
+    for rel_t in $rel_remote_tags; do
+        rel_tv=${rel_t#v}
+        printf '%s' "$rel_tv" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' || continue
+        if [ -z "$rel_latest" ] || version_gt "$rel_tv" "$rel_latest"; then rel_latest=$rel_tv; fi
+    done
+    if [ -n "$rel_latest" ] && ! version_gt "$rel_ver" "$rel_latest"; then
+        die "$rel_tag is not newer than v$rel_latest, the latest release on origin. Use a higher version."
+    fi
+
+    rel_current=$(relay_version)
+    rel_resume=0
+    if [ "$rel_current" = "$rel_ver" ]; then
+        if [ "$(git log -1 --format=%s)" = "release: $rel_tag" ]; then
+            # The commit this command makes, and nothing since: a previous run that got this far
+            # and then failed to push. Carry on from there instead of bumping again.
+            rel_resume=1
+        else
+            # VERSION already names this version but no release commit of ours is on top. That is
+            # what a version already spent looks like - the state v0.1.7 was left in: bumped,
+            # tagged, published by hand, deleted. GitHub will not accept that tag name again, and
+            # there is no way to tell from here, so do not guess.
+            die "VERSION already says $rel_ver, but the last commit is not a release commit made by this command.
+    If $rel_tag was ever published on GitHub and then deleted, that name can never be used again.
+    Release the next version instead: ./gpb release <next>"
+        fi
+    elif version_gt "$rel_current" "$rel_ver"; then
+        die "VERSION is already $rel_current, which is newer than $rel_ver."
+    fi
+
+    rel_local_tag=0
+    if git rev-parse -q --verify "refs/tags/$rel_tag" >/dev/null; then
+        if [ "$rel_resume" = 1 ] && [ "$(git rev-parse "$rel_tag^{commit}")" = "$(git rev-parse HEAD)" ]; then
+            rel_local_tag=1
+        else
+            die "a local tag $rel_tag already exists, on $(git rev-parse --short "$rel_tag^{commit}"), but never reached origin.
+    If it is a leftover, delete it and run this again: git tag -d $rel_tag"
+        fi
+    fi
+
+    # ------------------------------------------------------------------ the plan
+    printf '\n'
+    say "Release $rel_tag"
+    printf '    VERSION now          %s\n' "$rel_current"
+    printf '    latest on origin     %s\n' "${rel_latest:+v$rel_latest}"
+    if [ "$rel_ahead" -gt 0 ]; then
+        printf '    unpushed on main     %s commit(s) - they go out with the release\n' "$rel_ahead"
+        git log --oneline origin/main..HEAD | sed 's/^/                           /'
+    fi
+    printf '\n'
+    if [ "$rel_resume" = 1 ]; then
+        printf '    1. (done already)    VERSION = %s, commit "release: %s"\n' "$rel_ver" "$rel_tag"
+    else
+        printf '    1. write VERSION     %s, and commit "release: %s"\n' "$rel_ver" "$rel_tag"
+    fi
+    printf '    2. git push origin main\n'
+    if [ "$rel_local_tag" = 1 ]; then
+        printf '    3. (done already)    git tag %s\n' "$rel_tag"
+    else
+        printf '    3. git tag %s\n' "$rel_tag"
+    fi
+    printf '    4. git push origin %s   -> GitHub Actions builds and publishes the release\n' "$rel_tag"
+    printf '\n    Step 4 cannot be undone: once the release is published, %s is spent for good.\n' "$rel_tag"
+    printf '    Continue? [y/N] '
+    read -r rel_answer || rel_answer=
+    case $rel_answer in
+        y | Y | yes | YES) ;;
+        *) die "stopped. Nothing was changed." ;;
+    esac
+
+    # ------------------------------------------------------------------ do it
+    if [ "$rel_resume" = 0 ]; then
+        # Exactly what `gpb version` writes: the bare version, ASCII, no trailing newline.
+        printf '%s' "$rel_ver" > "$root/VERSION"
+        git add VERSION
+        git commit --quiet -m "release: $rel_tag"
+        say "Committed release: $rel_tag"
+    fi
+
+    say "Pushing main"
+    git push origin main \
+        || die "pushing main failed. The release commit is still here; fix the push and run ./gpb release $rel_ver again - it carries on from this point."
+
+    if [ "$rel_local_tag" = 0 ]; then git tag "$rel_tag"; fi
+
+    say "Pushing $rel_tag"
+    git push origin "$rel_tag" \
+        || die "pushing $rel_tag failed. Nothing is published yet; fix the push and run ./gpb release $rel_ver again."
+
+    # Two substitutions, not one with an optional (\.git)?: sed's ERE has no lazy quantifier, so a
+    # single pattern keeps the ".git" inside the repository name and prints a link that 404s.
+    rel_url=$(git remote get-url origin | sed -nE 's#\.git$##; s#^(https://|git@)github\.com[:/]([^/]+/[^/]+)$#\2#p')
+    printf '\n'
+    say "Released $rel_tag - the build is running now"
+    if [ -n "$rel_url" ]; then
+        printf '    progress   https://github.com/%s/actions/workflows/release.yml\n' "$rel_url"
+        printf '    release    https://github.com/%s/releases/tag/%s   (once the build finishes)\n' "$rel_url" "$rel_tag"
+    fi
+    printf '\n    Leave the release alone on the web page until it shows its files. Editing the notes\n'
+    printf '    after that is fine; publishing, deleting or re-creating it is not.\n'
+}
+
 usage() {
     # Everything from line 2 until the comment block ends. This used to be `sed -n '2,33p'`,
     # which silently swallowed the last line of the help the moment a command was added above.
@@ -681,6 +857,8 @@ case "$verb" in
         fi
         say "Done"
         ;;
+
+    release) release "$@" ;;
 
     dev | capture | profile | check | lag | logs | status | stop | publish | diag | installer | reset | version)
         delegate "$verb" "$@"
