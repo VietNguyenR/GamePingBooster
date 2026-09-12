@@ -25,9 +25,11 @@
 #                                GitHub Actions then builds and publishes the release
 #
 #   ./gpb dev                    build and start the service and UI       (Windows)
-#   ./gpb capture [udp|tcp|all]  collect game server addresses (udp); tcp/all (Windows)
+#   ./gpb capture [game] [udp|tcp|all]  collect game server addresses         (Windows)
+#                                the game comes from tools/profile-builder/games.json, which
+#                                says which process to watch and which files to write
 #                                also show which lobby/login connections never answered
-#   ./gpb profile                rebuild the profile                      (Windows)
+#   ./gpb profile [game]         rebuild that game's profile              (Windows)
 #   ./gpb check                  is the game going through the relay      (Windows)
 #   ./gpb lag [seconds]          where the lag is: PC, home, ISP or relay (Windows) <~ tu dong detect xem tai sao ping lai cao, do personal network hay do relay server
 #   ./gpb logs | status | stop | publish | diag                           (Windows)

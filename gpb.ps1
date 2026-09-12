@@ -11,10 +11,10 @@
 
         .\gpb.ps1 dev                 build and start the service (as LocalSystem) plus the UI
         .\gpb.ps1 stop                stop both
-        .\gpb.ps1 capture [udp|tcp|all]  watch for the game and collect server addresses (udp);
-                                      tcp/all also report which lobby/login connections never
-                                      answered, into tcp-sessions.txt - never into the profile
-        .\gpb.ps1 profile             rebuild the profile from what was captured
+        .\gpb.ps1 capture [game] [udp|tcp|all]  watch for the game and collect server addresses
+                                      (udp); tcp/all also report which lobby/login connections
+                                      never answered, into tcp-sessions.txt - never the profile
+        .\gpb.ps1 profile [game]      rebuild that game's profile from what was captured
         .\gpb.ps1 check               is the game actually going through the relay right now
         .\gpb.ps1 lag [seconds]       run this DURING the lag: which segment is at fault
         .\gpb.ps1 logs                follow the service log
@@ -39,6 +39,11 @@
 
     Relays are declared in gpb.conf - host, port, user, key or password, one block each. Copy
     gpb.conf.example to gpb.conf and fill it in; see `.\gpb.ps1 relay setup`.
+
+    Games are declared in tools\profile-builder\games.json - which process to watch, which files
+    to write, which cloud regions an address may belong to. Leave the game out and the file's
+    "default" is used, which is what `capture` and `profile` always did. That file is committed;
+    gpb.conf is not.
 
 .EXAMPLE
     .\gpb.ps1 dev
@@ -75,6 +80,11 @@ $programData = Join-Path $env:ProgramData 'GamePingBooster'
 # same rules as the POSIX half in ./gpb. Nothing in this repository names a real host; see
 # gpb.conf.example.
 . (Join-Path $root 'tools\GpbConf.ps1')
+
+# Which game `capture` and `profile` are working on, and everything that differs between games.
+# Committed, unlike gpb.conf: a game's process name and address files are project data, not a
+# property of one machine. See tools\profile-builder\games.json.
+. (Join-Path $root 'tools\GpbGames.ps1')
 
 function Say($msg, $colour = 'Cyan') { Write-Host "==> $msg" -ForegroundColor $colour }
 function Warn($msg) { Write-Host "    $msg" -ForegroundColor Yellow }
@@ -449,17 +459,77 @@ switch ($Verb.ToLowerInvariant()) {
     }
 
     'capture' {
-        # udp when nothing is given, which is what capture has always done. The script validates
-        # the value itself, so a typo is refused before anything is captured.
-        $captureArgs = @{}
-        if ($Arg1) { $captureArgs['Protocol'] = $Arg1.ToLowerInvariant() }
+        # ./gpb capture [game] [udp|tcp|all], and either may be left out.
+        #
+        # The protocol used to be the FIRST argument, and `./gpb capture tcp` is in people's
+        # fingers and in the usage text of every older checkout. So a first argument that names a
+        # protocol is still read as one, rather than being looked up as a game and failing. The
+        # two vocabularies cannot collide: a game called udp, tcp or all is refused below.
+        $protocols = @('udp', 'tcp', 'all')
+        $gameName = $Arg1
+        $protocol = $Arg2
+        if ($Arg1 -and $protocols -contains $Arg1.ToLowerInvariant()) {
+            $gameName = $null
+            $protocol = $Arg1
+        }
+
+        $game = Get-GpbGame $root $gameName
+        if ($protocols -contains $game.Id) {
+            throw "games.json declares a game called '$($game.Id)', which is also a protocol name. Rename it."
+        }
+
+        $captureArgs = @{
+            WatchProcess = $game.WatchProcess
+            OutputPath   = $game.ObservedPath
+        }
+        if ($protocol) { $captureArgs['Protocol'] = $protocol.ToLowerInvariant() }
+
+        # A game with no datacentre-probe port collects no landmarks. Passing the PUBG default
+        # would fill its landmark file with whatever else happens to use 8081, and the builder
+        # would then treat that as the set of endpoints the game picks a region from.
+        if ($null -ne $game.ProbePort) {
+            $captureArgs['ProbePort'] = [int]$game.ProbePort
+            if ($game.LandmarkPath) { $captureArgs['LandmarkPath'] = $game.LandmarkPath }
+        }
+
+        Say "Capturing $($game.Name) - watching $($game.WatchProcess).exe"
+        Write-Host "    addresses -> $($game.ObservedPath)" -ForegroundColor DarkGray
+        if ($null -eq $game.ProbePort) {
+            Warn "$($game.Name) declares no probe port, so no landmarks are collected."
+        }
+
         Push-Location $builder
         try { & (Join-Path $builder 'Capture-GameTraffic.ps1') @captureArgs } finally { Pop-Location }
     }
 
     'profile' {
+        $game = Get-GpbGame $root $Arg1
+
+        # Refused rather than run. With no cloud regions declared, every observed address fails
+        # the builder's cross-check and the run finishes by writing a profile with no ranges in
+        # it - which is worse than an error, because it looks like a finished profile and would
+        # be pushed as one. games.json says per game what is still missing.
+        if (-not (Test-GpbGameBuildable $game)) {
+            $message = "$($game.Name) has no AWS or Azure regions declared in games.json, so every " +
+                "observed address would fail the cross-check and the profile would come out empty."
+            if ($game.Note) { $message += "`n`n    $($game.Note)" }
+            throw $message
+        }
+
+        $profileArgs = @{
+            GameId         = $game.Id
+            ObservedIpPath = $game.ObservedPath
+            ProfilePath    = $game.ProfilePath
+            ManualCidrPath = $game.ManualCidrPath
+            AwsRegions     = $game.AwsRegions
+            AzureRegions   = $game.AzureRegions
+        }
+        if ($game.LandmarkPath) { $profileArgs['LandmarkObservedPath'] = $game.LandmarkPath }
+
+        Say "Building the $($game.Name) profile -> $($game.ProfilePath)"
+
         Push-Location $builder
-        try { & (Join-Path $builder 'Build-PubgProfile.ps1') } finally { Pop-Location }
+        try { & (Join-Path $builder 'Build-PubgProfile.ps1') @profileArgs } finally { Pop-Location }
     }
 
     'check' {

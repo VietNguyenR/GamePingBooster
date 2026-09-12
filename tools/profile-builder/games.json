@@ -1,0 +1,64 @@
+{
+  "_comment": [
+    "Every game ./gpb capture and ./gpb profile know about, and everything that differs between",
+    "them. Adding a game is adding a block here - no script changes.",
+    "",
+    "This file is COMMITTED, unlike gpb.conf. Nothing in it is a secret or a property of one",
+    "machine: it is the shape of a game's network, which is the same for everybody working on",
+    "the project and is worth reviewing in a diff when it changes.",
+    "",
+    "Paths are relative to this folder. Two games must never share observedPath - it is",
+    "append-only, holds nothing but bare addresses, and once two games' addresses are mixed into",
+    "one file there is no way to tell them apart again.",
+    "",
+    "FIELDS",
+    "  name            what the game is called, for messages",
+    "  watchProcess    process to wait for, WITHOUT .exe - Capture-GameTraffic -WatchProcess",
+    "  probePort       UDP port the game probes datacentres on, to harvest landmarks;",
+    "                  null when the game has no such mechanism, and then no landmark is",
+    "                  collected and landmarkPath stays empty",
+    "  observedPath    where capture appends the addresses it attributes to the game",
+    "  landmarkPath    where capture appends probe endpoints; null when probePort is null",
+    "  manualCidrPath  ranges added by hand that the builder must keep",
+    "  profilePath     the profile the builder writes",
+    "  awsRegions      AWS regions whose published ranges an observed address may belong to",
+    "  azureRegions    the same for Azure",
+    "  note            anything a person needs to know before trusting the numbers above",
+    "",
+    "awsRegions and azureRegions are the builder's cross-check: an observed address inside none",
+    "of them is treated as unverified and kept out of the profile. A game that does not live in",
+    "AWS or Azure therefore needs BOTH lists empty and a different check written for it - see the",
+    "note on cs2. Empty lists are not a default to leave in place; they mean the cross-check is",
+    "missing, and ./gpb profile says so rather than writing a profile that looks finished."
+  ],
+
+  "default": "pubg",
+
+  "games": {
+    "pubg": {
+      "name": "PUBG",
+      "watchProcess": "TslGame",
+      "probePort": 8081,
+      "observedPath": "observed.txt",
+      "landmarkPath": "landmarks-observed.txt",
+      "manualCidrPath": "manual-cidrs.txt",
+      "profilePath": "../../profiles/pubg-vn.json",
+      "awsRegions": ["ap-southeast-1", "ap-northeast-1", "ap-northeast-2"],
+      "azureRegions": ["southeastasia", "japaneast", "koreacentral"],
+      "note": "Gameplay is UDP on Azure and AWS Asia. The game picks its region by probing one endpoint per Azure region on UDP 8081, which is what probePort harvests. The lobby is TCP 40002 on an AWS Global Accelerator and is declared on the licence server, not here."
+    },
+
+    "cs2": {
+      "name": "Counter-Strike 2",
+      "watchProcess": "cs2",
+      "probePort": null,
+      "observedPath": "observed-cs2.txt",
+      "landmarkPath": null,
+      "manualCidrPath": "manual-cidrs-cs2.txt",
+      "profilePath": "../../profiles/cs2-vn.json",
+      "awsRegions": [],
+      "azureRegions": [],
+      "note": "NOT READY - capture works, the profile build does not. CS2 carries gameplay over Steam Datagram Relay: the client talks UDP to a Valve relay PoP, not to the match server, so an observed address belongs to Valve's own network and matches no AWS or Azure range. The cross-check above is therefore empty on purpose and ./gpb profile will refuse rather than write an empty profile. What it needs instead is the PoP list Valve publishes for appid 730, which also removes the need to widen prefixes statistically the way PUBG does. Region ranking has the same problem: there is no UDP 8081 equivalent, so landmarks must come from that PoP list too - until they do, relays are compared on the first leg alone, which the client already handles and logs."
+    }
+  }
+}
