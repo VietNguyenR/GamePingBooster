@@ -46,6 +46,11 @@
       <Setter Property="Background" Value="#111111" />
       <Setter Property="BorderBrush" Value="#242424" />
     </Style>
+    <!-- The update line: the one menu item that should catch the eye. -->
+    <Style Selector="MenuItem.update">
+      <Setter Property="Foreground" Value="#60A5FA" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
   </views:SurfaceWindow.Styles>
 
   <Grid RowDefinitions="Auto,*">
@@ -80,6 +85,10 @@
             <Separator Background="#242424" />
             <MenuItem Header="Open logs folder" Click="OnLogsClick" />
             <MenuItem Header="About" Click="OnAboutClick" />
+            <!-- Only there when UpdateChecker has found a newer release. -->
+            <Separator Background="#242424" IsVisible="{Binding HasUpdate}" />
+            <MenuItem Classes="update" Header="{Binding UpdateMenuText}" Click="OnUpdateClick"
+                      IsVisible="{Binding HasUpdate}" />
           </MenuFlyout>
         </Button.Flyout>
       </Button>

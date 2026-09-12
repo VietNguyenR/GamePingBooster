@@ -117,7 +117,26 @@ public partial class MainWindow : SurfaceWindow
     {
         if (DataContext is MainViewModel vm)
         {
-            await vm.ToggleAsync();
+            // The profile sync goes along so Connect fetches the latest profile first - see
+            // ToggleAsync. Null before App has attached it, in which case Connect behaves as before.
+            await vm.ToggleAsync(_profileSync);
+        }
+    }
+
+    /// <summary>
+    /// Opens the release page of the newer version. The URL comes from UpdateChecker, which only
+    /// ever hands over a page of this project's GitHub releases.
+    /// </summary>
+    private void OnUpdateClick(object? sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainViewModel { Update: { } update }) return;
+        try
+        {
+            Process.Start(new ProcessStartInfo(update.Url) { UseShellExecute = true });
+        }
+        catch (Exception)
+        {
+            // No default browser, or the shell refused. Nothing more useful to do from a menu item.
         }
     }
 

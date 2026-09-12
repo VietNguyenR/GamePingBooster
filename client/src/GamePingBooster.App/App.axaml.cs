@@ -13,6 +13,7 @@ public partial class App : Application
     private PipeClient? _pipe;
     private TokenRefresher? _refresher;
     private ProfileSync? _profileSync;
+    private UpdateChecker? _updates;
     private SystemTray? _tray;
 
     /// <summary>Guards the second pass: the Shutdown below raises ShutdownRequested again.</summary>
@@ -113,6 +114,11 @@ public partial class App : Application
             // the button - the app never rearranges the machine's routing on its own at startup.
             _pipe.Start();
             _refresher.Start();
+
+            // Checks GitHub for a newer release now and then, and puts a line in the menu when
+            // there is one. Marshalled for the same reason as the refresher's messages.
+            _updates = new UpdateChecker(update => Dispatcher.UIThread.Post(() => vm.Update = update));
+            _updates.Start();
         }
 
         base.OnFrameworkInitializationCompleted();
@@ -156,6 +162,7 @@ public partial class App : Application
             _tray?.Dispose();
 
             if (_refresher is not null) await _refresher.DisposeAsync();
+            if (_updates is not null) await _updates.DisposeAsync();
             if (_pipe is not null) await _pipe.DisposeAsync();
         }
         catch (Exception)

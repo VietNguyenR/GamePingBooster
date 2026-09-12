@@ -115,6 +115,27 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// <summary>What the menu item says. One entry, two states, no dead end either way.</summary>
     public string AccountMenuText => HasToken ? "Account" : "Sign in";
 
+    // ------------------------------------------------------------ updates
+
+    private AvailableUpdate? _update;
+
+    /// <summary>A newer release found by UpdateChecker, or null. Set on the UI thread.</summary>
+    public AvailableUpdate? Update
+    {
+        get => _update;
+        set
+        {
+            if (!Set(ref _update, value)) return;
+            Raise(nameof(HasUpdate));
+            Raise(nameof(UpdateMenuText));
+        }
+    }
+
+    public bool HasUpdate => Update is not null;
+
+    /// <summary>The last line of the menu, and only there when a newer release exists.</summary>
+    public string UpdateMenuText => Update is null ? "" : $"Update to latest version (v{Update.Version})";
+
     /// <summary>
     /// The last thing the renewer had to say, if anything.
     ///
@@ -442,8 +463,31 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    public async Task ToggleAsync()
+    // Set for the few seconds between pressing Connect and the connect reaching the service, while
+    // the profile is being fetched. A second press in that window would otherwise read the
+    // Connecting state, send a disconnect, and then watch the first press connect anyway.
+    private bool _connectInFlight;
+
+    /// <param name="profileSync">
+    /// When given, the latest profile is fetched from the licence server BEFORE the connect is sent.
+    ///
+    /// Without it, Connect used whatever profile was pulled when the app started, so a relay added
+    /// in the dashboard while the app was open simply did not exist until a restart - and the
+    /// lobby-tunnel switch could not reach a client that stayed open all day either.
+    ///
+    /// Ordering is what makes this work rather than a race: the fetch ends by writing set-profile
+    /// to the pipe, the service handles pipe commands one at a time in the order they arrive, and
+    /// ConnectAsync reloads the profile from disk. So the connect always sees the profile that was
+    /// just pushed.
+    ///
+    /// A fetch that fails never stops the connect. ProfileSync reports it and returns - offline,
+    /// licence server down, or the twelve-an-hour limit - and the service connects on the profile
+    /// it already has, which is exactly what pressing Connect did before this existed.
+    /// </param>
+    public async Task ToggleAsync(ProfileSync? profileSync = null)
     {
+        if (_connectInFlight) return;
+
         try
         {
             Error = null;
@@ -453,15 +497,32 @@ public sealed class MainViewModel : INotifyPropertyChanged
             }
             else
             {
+                _connectInFlight = true;
                 State = TunnelState.Connecting;
+
+                if (profileSync is not null && !string.IsNullOrWhiteSpace(LicenceUrl))
+                {
+                    Detail = "Getting the latest server list...";
+                    // ConfigureAwait(true): this is called from a click on the UI thread, and the
+                    // next line raises PropertyChanged - off the UI thread that breaks Avalonia's
+                    // bindings in ways that surface later and somewhere else.
+                    await profileSync
+                        .SyncAsync(LicenceUrl, DevicePublicKey, "pubg", force: true)
+                        .ConfigureAwait(true);
+                }
+
                 Detail = "Sending the request to the background service...";
-                await _pipe.ConnectTunnelAsync().ConfigureAwait(false);
+                await _pipe.ConnectTunnelAsync().ConfigureAwait(true);
             }
         }
         catch (Exception ex)
         {
             State = TunnelState.Faulted;
             Error = ex.Message;
+        }
+        finally
+        {
+            _connectInFlight = false;
         }
     }
 
