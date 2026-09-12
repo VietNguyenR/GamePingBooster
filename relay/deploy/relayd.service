@@ -40,7 +40,7 @@ ExecStart=/usr/local/bin/relayd \
   -subnet 10.77.0.0/24 \
   -mtu 1400 \
   __AUTH_FLAG__ \
-  -rate-limit 64 \
+  -rate-limit 256 \
   -max-clients __MAX_CLIENTS__ \
   -min-tier __MIN_TIER__ \
   -log-level info
