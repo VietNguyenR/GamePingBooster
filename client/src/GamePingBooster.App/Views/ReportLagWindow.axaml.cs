@@ -21,7 +21,7 @@ namespace GamePingBooster.App.Views;
 /// measures anything before somebody has agreed to it.
 ///
 /// Nothing is disconnected to take the measurement, and the text says so. That is not politeness:
-/// rungs 5 and 6 are read from the LIVE tunnel, and a report taken with the tunnel down would
+/// rungs 6 and 7 are read from the LIVE tunnel, and a report taken with the tunnel down would
 /// have four empty rows and nothing to compare them against. See LagDiagnostics.
 /// </summary>
 public partial class ReportLagWindow : SurfaceWindow

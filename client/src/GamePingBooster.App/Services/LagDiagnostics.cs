@@ -16,16 +16,32 @@ namespace GamePingBooster.App.Services;
 /// against the segment next to it, rather than against an absolute number. 8 ms of jitter to
 /// your own router is a catastrophe; 8 ms of jitter to Singapore is a Tuesday.
 ///
+/// IT HAS SINCE MOVED AHEAD OF THE SCRIPT, in three places and deliberately: rungs are compared
+/// tick by tick rather than window against window (see Inherits), the spike threshold no longer
+/// scales without limit (see BadReason), and rung 4 exists at all (see InternationalRung). All
+/// three came out of one report on 2026-09-12 that blamed a player Wi-Fi network and a player ISP
+/// for five seconds of trouble on the way to Singapore. The PowerShell still has the old method
+/// and will still say isp-access to the same numbers.
+///
 /// The rungs:
 ///
 ///   1  home router        the default gateway - Wi-Fi, cable, the box in the hallway
 ///   2  ISP access         first hop past the router, or the CGNAT address if there is one
 ///   3  ISP domestic core  the last hop before the RTT jumps, i.e. still inside the country
-///   4  relay              the relay's public address, over the physical path
-///   5  relay process      the service's own live keepalive RTT, read from its status
-///   6  in game            the service's measured game ping, read from its status
+///   4  international      rung 5 minus rung 3, tick by tick: the leg out of the country
+///   5  relay              the relay's public address, over the physical path
+///   6  relay process      the service's own live keepalive RTT, read from its status
+///   7  in game            the service's measured game ping, read from its status
 ///
-/// Rungs 5 and 6 are READ from the running service, never measured by opening a session of our
+/// RUNG 4 IS DERIVED, NOT PROBED. The international leg is the one stretch of this path with no
+/// address to ping - it is precisely the gap between the last domestic hop and the far end - so
+/// it is measured by subtracting rung 3 from rung 5 in each tick, which is only legitimate
+/// because those two are sampled inside the same one-second sweep. Until it existed the whole
+/// international path lived inside rung 5's tolerance, and that tolerance scales with rung 5's
+/// own distance: a relay 59 ms away had to spike by another 59 ms before anything was said. The
+/// report of 2026-09-12 spiked by 67 ms there and the verdict landed on the player's ISP.
+///
+/// Rungs 6 and 7 are READ from the running service, never measured by opening a session of our
 /// own. A second handshake during a match can land inside the relay's session-resume window and
 /// knock the live client off its own session - diagnosing a lag spike by causing a worse one.
 /// For the same reason nothing here disconnects, pauses or reconfigures the tunnel: the whole
@@ -82,7 +98,32 @@ public static class LagDiagnostics
 
         [property: JsonPropertyName("stats")] Stats? Stats,
         [property: JsonPropertyName("bad")] string? BadReason,
-        [property: JsonPropertyName("samples")] IReadOnlyList<double> Samples);
+        [property: JsonPropertyName("samples")] IReadOnlyList<double> Samples,
+
+        /// <summary>
+        /// The same run with one slot per second of the window and null where nothing came back,
+        /// so two rungs can be laid against each other TICK BY TICK.
+        ///
+        /// Samples alone cannot do that: a lost packet is simply absent from the list, so a single
+        /// timeout slides every later sample against its neighbour's and the comparison silently
+        /// starts reading the wrong second. Not serialised - the wire format carries what was
+        /// received, and the alignment is only needed while the verdict is being decided.
+        /// </summary>
+        [property: JsonIgnore] IReadOnlyList<double?> Ticks,
+
+        /// <summary>
+        /// True for the rungs read from the service's status rather than pinged in the sweep.
+        /// Those are a snapshot up to one push old, so they are allowed a tick of slack whenever
+        /// their timing is compared with anything else.
+        /// </summary>
+        [property: JsonIgnore] bool StatusDerived = false,
+
+        /// <summary>
+        /// True for a rung computed from two others rather than measured. Such a rung can BE the
+        /// verdict, but it can never be used to contradict one: rung 4 has rung 3 subtracted out
+        /// of it by construction, so a genuine fault at rung 3 leaves it perfectly flat.
+        /// </summary>
+        [property: JsonIgnore] bool Derived = false);
 
     public sealed record Hop(
         [property: JsonPropertyName("ttl")] int Ttl,
@@ -135,7 +176,7 @@ public static class LagDiagnostics
         /// True when the relay's own address is leaving by the TUNNEL instead of the physical card.
         ///
         /// That is the pinned /32 having failed, and it is not a latency problem - it is a routing
-        /// loop waiting to happen, and it makes rungs 4 and 5 measure the same thing so the report
+        /// loop waiting to happen, and it makes rungs 5 and 6 measure the same thing so the report
         /// silently stops being able to separate the wire from the box. Exactly the fault that
         /// took a day on 2026-09-12 before anyone looked at a routing table.
         /// </summary>
@@ -188,14 +229,21 @@ public static class LagDiagnostics
     /// Why this rung looks unhealthy, or null when it does not.
     ///
     /// Thresholds scale with distance, because the same millisecond means different things at
-    /// different distances. Loss does not scale: a lost packet is a lost packet at any range.
+    /// different distances. Loss does not scale: a lost packet is a lost packet at any range, and
+    /// past a point neither does a spike - see the cap below.
     /// </summary>
     internal static string? BadReason(Stats? s)
     {
         if (s is null || s.Received == 0 || s.P50 is not { } p50 || s.P95 is not { } p95) return null;
 
         var jitterLimit = Math.Max(4.0, 0.25 * p50);
-        var spikeLimit = Math.Max(15.0, p50);
+
+        // Scales with distance, but only so far. What breaks interpolation is a packet arriving
+        // 50 ms late, and the game does not care whether the rung it happened on sits 5 ms away
+        // or 60. Uncapped this read "max(15, p50)", which meant a 59 ms rung had to spike by
+        // another 59 ms before it was worth mentioning: on 2026-09-12 the relay rung reached
+        // 126 ms, missed that bar by six milliseconds, and was reported as healthy.
+        var spikeLimit = Math.Clamp(0.5 * p50, 15.0, 30.0);
 
         var reasons = new List<string>();
         if (s.LossPct > 2.0) reasons.Add($"{s.LossPct:N0}% loss");
@@ -209,30 +257,148 @@ public static class LagDiagnostics
     /// Does the symptom seen at <paramref name="inner"/> survive out to <paramref name="outer"/>?
     ///
     /// Physically it has to. Every packet that reaches the outer target has already crossed the
-    /// inner one, so jitter and loss introduced at the inner rung are still in the outer rung's
-    /// numbers - nothing further along the path can undo them. When the outer rung is visibly
-    /// CALMER than the inner one, the inner reading was never about the path at all: it is a
-    /// router answering pings to its own address slowly while forwarding everything else
-    /// perfectly. That is normal, it is what most routers do, and it is the single most common
-    /// way a tool like this blames the wrong box.
+    /// inner one, so delay introduced at the inner rung is still in the outer rung's numbers -
+    /// nothing further along the path can undo it. When the outer rung sits at its own normal
+    /// during the very seconds the inner one was disturbed, the inner reading was never about the
+    /// path at all: it is a router answering pings to its own address slowly while forwarding
+    /// everything else perfectly. That is normal, it is what most routers do, and it is the single
+    /// most common way a tool like this blames the wrong box.
+    ///
+    /// TICK BY TICK, not window against window. The previous version compared the two rungs'
+    /// jitter across the whole twenty seconds, so an inner rung passed as long as the outer one
+    /// was unsettled SOMEWHERE - by anything at all, including a fault with no connection to it.
+    /// That is exactly how the report of 2026-09-12 blamed a player's ISP access network: its
+    /// 4.4 ms of jitter came from two ticks that moved the domestic core by nothing whatsoever,
+    /// and it was waved through on jitter the core had picked up one tick earlier from a single
+    /// unrelated 99 ms answer of its own.
+    ///
+    /// What is compared is how much of the inner rung's excess over its OWN median is visible in
+    /// the same tick further out. Half of it is enough to pass: a stretch of path cannot carry a
+    /// disturbance away, but a probe can land just after one, and the rungs in a sweep are pinged
+    /// in sequence rather than all at once.
     ///
     /// Deliberately NOT "is the outer rung also bad by its own threshold". Those thresholds scale
     /// with distance, so by the time a fault at the home router reaches the relay rung it is well
     /// inside the relay's tolerance.
     /// </summary>
-    internal static bool Inherits(Stats inner, Stats? outer)
+    internal static bool Inherits(Rung inner, Rung outer)
     {
+        if (inner.Stats is not { } innerStats || innerStats.P50 is not { } innerP50) return true;
+
         // A mute outer rung contradicts nothing; silence is not evidence either way.
-        if (outer is null || outer.Received == 0) return true;
+        if (outer.Stats is not { Received: > 0 } outerStats || outerStats.P50 is not { } outerP50) return true;
 
         // Loss propagates strictly. One point of slack for rounding on a short window.
-        if (outer.LossPct + 1.0 < inner.LossPct) return false;
+        if (outerStats.LossPct + 1.0 < innerStats.LossPct) return false;
 
-        // Jitter accumulates along a path, so a real inner fault always leaves the outer rung at
-        // least as unsettled. Below 2 ms there is nothing to carry and the ratio is only noise.
-        if (inner.Jitter is { } ij && ij >= 2.0 && outer.Jitter is { } oj && oj < 0.6 * ij) return false;
+        // A rung read from the service's status is a snapshot up to one push old, so it is allowed
+        // to show the disturbance a tick either side. Rungs pinged in the same sweep are aligned to
+        // a few hundred milliseconds and get no such licence.
+        var slack = inner.StatusDerived || outer.StatusDerived ? 1 : 0;
 
-        return true;
+        var ticks = Math.Min(inner.Ticks.Count, outer.Ticks.Count);
+        var total = 0.0;
+        var carried = 0.0;
+
+        for (var t = 0; t < ticks; t++)
+        {
+            if (inner.Ticks[t] is not { } innerValue) continue;
+
+            var excess = innerValue - innerP50;
+            if (excess <= 0) continue;
+            total += excess;
+
+            var seen = 0.0;
+            for (var u = Math.Max(0, t - slack); u <= Math.Min(ticks - 1, t + slack); u++)
+            {
+                if (outer.Ticks[u] is { } outerValue) seen = Math.Max(seen, outerValue - outerP50);
+            }
+
+            carried += Math.Min(excess, Math.Max(0.0, seen));
+        }
+
+        // Nothing to disprove. A rung flagged on jitter that never actually rose above its own
+        // median has made no claim the outer rung is in a position to contradict.
+        if (total < 10.0) return true;
+
+        return carried >= 0.5 * total;
+    }
+
+    /// <summary>
+    /// Rung 4: what is left of the round trip once the domestic part is subtracted out, tick by
+    /// tick. Null when there is no domestic rung to subtract, or too little that survives it.
+    ///
+    /// The international leg is the one stretch of this path with no address to ping - it IS the
+    /// gap between the last domestic hop and the far end - so it is the one rung that has to be
+    /// arrived at rather than measured. The subtraction is only honest because both inputs come
+    /// from the same one-second sweep, a few hundred milliseconds apart.
+    ///
+    /// It exists because nothing else on the ladder can see this segment. Rung 5's thresholds are
+    /// sized for rung 5's distance, so an international leg swinging by 50 ms disappears inside a
+    /// 59 ms relay rung, and the verdict then falls to whichever domestic rung happened to look
+    /// worst - which is how a player's ISP took the blame for a bad night on a submarine cable in
+    /// the report of 2026-09-12.
+    /// </summary>
+    internal static Rung? InternationalRung(Rung? core, Rung? relay)
+    {
+        if (core is null || relay is null) return null;
+
+        var ticks = new List<double?>();
+        var samples = new List<double>();
+        var paired = Math.Min(core.Ticks.Count, relay.Ticks.Count);
+
+        for (var t = 0; t < paired; t++)
+        {
+            // A tick where the NEAR hop answered slower than the far one says nothing about what
+            // lies between them and everything about the near hop's own ICMP handling. Dropped
+            // rather than floored at zero: a floor would invent an excursion where there was only
+            // a router being slow about its own address.
+            double? value = core.Ticks[t] is { } near && relay.Ticks[t] is { } far && far >= near
+                ? far - near
+                : null;
+
+            ticks.Add(value);
+            if (value is { } usable) samples.Add(usable);
+        }
+
+        // Too few usable pairs and the percentiles are a guess dressed up as a measurement.
+        if (samples.Count < 5) return null;
+
+        // Sent equals received deliberately. Loss belongs to whichever real rung lost the packet
+        // and is reported there; counting it again here would invent a second fault with no owner.
+        var stats = Summarise(samples, samples.Count);
+
+        return new Rung(4, "international", "international leg", null, null,
+            stats, BadReason(stats), samples, ticks, StatusDerived: false, Derived: true);
+    }
+
+    /// <summary>
+    /// The innermost rung that is bad AND stays bad all the way out, or "clean".
+    ///
+    /// A fault propagates outward, so anything bad with calm rungs beyond it is a router
+    /// deprioritising pings to itself rather than a fault on the path - see Inherits, which is
+    /// where that judgement is actually made.
+    /// </summary>
+    internal static string Culprit(IReadOnlyList<Rung> ladder)
+    {
+        for (var i = 0; i < ladder.Count; i++)
+        {
+            if (ladder[i].BadReason is null) continue;
+
+            var survives = true;
+            for (var j = i + 1; j < ladder.Count; j++)
+            {
+                // A derived rung is not evidence about the rungs inside it. Rung 4 has rung 3
+                // subtracted out of it by construction, so a real fault at rung 3 leaves rung 4
+                // flat - and letting it vote would make every domestic verdict impossible.
+                if (ladder[j].Derived) continue;
+                if (!Inherits(ladder[i], ladder[j])) { survives = false; break; }
+            }
+
+            if (survives) return ladder[i].Key;
+        }
+
+        return "clean";
     }
 
     // ------------------------------------------------------------------ addresses
@@ -488,6 +654,10 @@ public static class LagDiagnostics
         public required string Label;
         public required string Address;
         public readonly List<double> Samples = [];
+
+        /// <summary>One slot per tick, null where the echo did not come back. See Rung.Ticks.</summary>
+        public readonly List<double?> Ticks = [];
+
         public int Sent;
     }
 
@@ -519,7 +689,7 @@ public static class LagDiagnostics
         if (relayIp is null)
         {
             notes.Add("The service named no relay, so the path to it could not be traced and " +
-                      "rungs 2 to 4 are missing - which is most of the point. Connect first, then " +
+                      "rungs 2 to 5 are missing - which is most of the point. Connect first, then " +
                       "report while the problem is happening.");
         }
 
@@ -567,7 +737,7 @@ public static class LagDiagnostics
 
         if (relayIp is not null)
         {
-            targets.Add(new Target { Number = 4, Key = "relay", Label = "relay", Address = relayIp });
+            targets.Add(new Target { Number = 5, Key = "relay", Label = "relay", Address = relayIp });
         }
 
         // ------------------------------------------------------------- sampling
@@ -578,6 +748,8 @@ public static class LagDiagnostics
 
         var tunnelSamples = new List<double>();
         var gameSamples = new List<double>();
+        var tunnelTicks = new List<double?>();
+        var gameTicks = new List<double?>();
         var statusSeen = 0;
         var gameRunning = false;
         string? gameRegion = null;
@@ -594,24 +766,33 @@ public static class LagDiagnostics
             foreach (var target in targets)
             {
                 target.Sent++;
+                double? sample = null;
                 try
                 {
                     var reply = await ping.SendPingAsync(target.Address, PingTimeoutMs).ConfigureAwait(false);
-                    if (reply.Status == IPStatus.Success) target.Samples.Add(reply.RoundtripTime);
+                    if (reply.Status == IPStatus.Success) sample = reply.RoundtripTime;
                 }
                 catch (Exception)
                 {
                     // Counted as loss by Sent outrunning Samples, which is what it is.
                 }
+
+                // Both lists, always. Samples is what was received and is what gets uploaded;
+                // Ticks keeps the empty second in place so the rungs stay side by side.
+                if (sample is { } rtt) target.Samples.Add(rtt);
+                target.Ticks.Add(sample);
             }
+
+            double? tunnelTick = null;
+            double? gameTick = null;
 
             if (latestStatus() is { } live)
             {
                 statusSeen++;
                 tunnelState = live.State.ToString();
                 gameRegion ??= live.GameRegionName;
-                if (live.TunnelPingMs is { } t) tunnelSamples.Add(t);
-                if (live.GamePingMs is { } g) { gameSamples.Add(g); gameRunning = true; }
+                if (live.TunnelPingMs is { } t) { tunnelSamples.Add(t); tunnelTick = t; }
+                if (live.GamePingMs is { } g) { gameSamples.Add(g); gameRunning = true; gameTick = g; }
 
                 // Faults only, never the grand total: that one is mostly link-local chatter the
                 // uplink filter is SUPPOSED to drop, and alarming on it fires on every healthy
@@ -622,6 +803,9 @@ public static class LagDiagnostics
                 droppedAtStart ??= live.PacketsDroppedFaults;
                 droppedAtEnd = live.PacketsDroppedFaults;
             }
+
+            tunnelTicks.Add(tunnelTick);
+            gameTicks.Add(gameTick);
 
             var remaining = TimeSpan.FromSeconds(1) - sweep.Elapsed;
             if (remaining > TimeSpan.Zero) await Task.Delay(remaining, ct).ConfigureAwait(false);
@@ -634,12 +818,18 @@ public static class LagDiagnostics
         {
             var stats = Summarise(target.Samples, target.Sent);
             rungs.Add(new Rung(target.Number, target.Key, target.Label, target.Address,
-                ViaFor(target.Address), stats, BadReason(stats), target.Samples));
+                ViaFor(target.Address), stats, BadReason(stats), target.Samples, target.Ticks));
+        }
+
+        if (InternationalRung(rungs.FirstOrDefault(r => r.Key == "isp-core"),
+                              rungs.FirstOrDefault(r => r.Key == "relay")) is { } international)
+        {
+            rungs.Add(international);
         }
 
         if (statusSeen == 0)
         {
-            notes.Add("The service pushed no status during the window, so rungs 5 and 6 are " +
+            notes.Add("The service pushed no status during the window, so rungs 6 and 7 are " +
                       "missing. Is the tunnel connected?");
         }
 
@@ -650,43 +840,30 @@ public static class LagDiagnostics
         if (tunnelSamples.Count > 0)
         {
             // The gap is merged into this rung's reasons rather than being a verdict of its own,
-            // so the ladder keeps deciding who the culprit is by the one rule it has. A rung 5
-            // that is slow while rung 4 is clean has nothing inside it to blame, so the ladder
+            // so the ladder keeps deciding who the culprit is by the one rule it has. A rung 6
+            // that is slow while rung 5 is clean has nothing inside it to blame, so the ladder
             // lands on relay-udp - which is the answer.
             var reasons = new[] { BadReason(tunnelStats), gap?.Reason }
                 .Where(r => r is not null);
             var merged = string.Join(", ", reasons);
 
-            rungs.Add(new Rung(5, "relay-udp", "relay process", relayEndpoint,
+            rungs.Add(new Rung(6, "relay-udp", "relay process", relayEndpoint,
                 relayIp is null ? null : ViaFor(relayIp),
-                tunnelStats, merged.Length == 0 ? null : merged, tunnelSamples));
+                tunnelStats, merged.Length == 0 ? null : merged, tunnelSamples, tunnelTicks,
+                StatusDerived: true));
         }
 
         var gameStats = Summarise(gameSamples, statusSeen);
         if (gameSamples.Count > 0)
         {
-            rungs.Add(new Rung(6, "game", "in game", null, null, gameStats, BadReason(gameStats), gameSamples));
+            rungs.Add(new Rung(7, "game", "in game", null, null, gameStats, BadReason(gameStats),
+                gameSamples, gameTicks, StatusDerived: true));
         }
 
-        // A fault propagates outward, so the culprit is the innermost rung that is bad AND stays
-        // bad all the way out. Anything bad with clean rungs beyond it is a router deprioritising
-        // pings to itself, not a fault on the path. Mute rungs are skipped entirely: a host that
-        // never answered has told us nothing, and guessing from silence is how a tool like this
-        // earns its reputation.
+        // Mute rungs are skipped entirely: a host that never answered has told us nothing, and
+        // guessing from silence is how a tool like this earns its reputation.
         var ladder = rungs.Where(r => r.Stats is { Received: > 0 }).OrderBy(r => r.Number).ToList();
-
-        var verdict = "clean";
-        for (var i = 0; i < ladder.Count; i++)
-        {
-            if (ladder[i].BadReason is null) continue;
-
-            var survives = true;
-            for (var j = i + 1; j < ladder.Count; j++)
-            {
-                if (!Inherits(ladder[i].Stats!, ladder[j].Stats)) { survives = false; break; }
-            }
-            if (survives) { verdict = ladder[i].Key; break; }
-        }
+        var verdict = Culprit(ladder);
 
         // ------------------------------------------------------------- this machine
 
@@ -725,8 +902,8 @@ public static class LagDiagnostics
         {
             notes.Add("The relay's own address is leaving by the tunnel instead of the physical " +
                       "adapter. The pinned route that keeps relay traffic out of the tunnel is " +
-                      "missing - that is a routing loop waiting to happen, and it makes rungs 4 " +
-                      "and 5 measure the same thing, so they can no longer tell the wire from the " +
+                      "missing - that is a routing loop waiting to happen, and it makes rungs 5 " +
+                      "and 6 measure the same thing, so they can no longer tell the wire from the " +
                       "relay.");
         }
 
@@ -737,7 +914,7 @@ public static class LagDiagnostics
         }
 
         return new Report(
-            SchemaVersion: 1,
+            SchemaVersion: 2,
             TakenUtc: started,
             Seconds: seconds,
             Verdict: verdict,
@@ -753,7 +930,7 @@ public static class LagDiagnostics
             PcUpMbps: upMbps,
             ServiceDropped: serviceDropped,
             RelayTunnelled: relayTunnelled,
-            Rungs: rungs,
+            Rungs: rungs.OrderBy(r => r.Number).ToList(),
             Trace: trace,
             Notes: notes);
     }
@@ -761,9 +938,9 @@ public static class LagDiagnostics
     /// <summary>
     /// The latency the RELAY PROCESS adds on top of the wire, when there is enough of it to say so.
     ///
-    /// This is the comparison rungs 4 and 5 exist for and the one the method description has
+    /// This is the comparison rungs 5 and 6 exist for and the one the method description has
     /// always promised: both numbers are a round trip to the same box over the same wire, so what
-    /// separates them is not the network. Rung 4 is answered by the far kernel, rung 5 by relayd
+    /// separates them is not the network. Rung 5 is answered by the far kernel, rung 6 by relayd
     /// in userspace, and on an idle relay that difference is well under a millisecond.
     ///
     /// It was not implemented until now - in either this or the PowerShell it came from - because
@@ -818,8 +995,14 @@ public static class LagDiagnostics
                             "network is clean, so this is the line into the building, not the house.",
             "isp-core" => $"The ISP's domestic network is the first bad rung{detail} - inside the " +
                           "country, before any international link.",
+            "international" => $"Everything inside the country is clean, and the leg out of it is " +
+                                $"not{detail}. That is the transit between your ISP and the relay's " +
+                                "region, or the relay's own uplink - neither is on your line and " +
+                                "neither is fixed from this end. If it keeps happening, a relay " +
+                                "reached by a different route is the thing to try.",
             "relay" => $"The path to the relay is the first bad rung{detail}, while everything " +
-                       "inside the country is clean. That is the international leg.",
+                       "inside the country is clean. The fault is past the border - on the way " +
+                       "out of the country, or at the relay's own front door.",
             "relay-udp" => $"The physical path to the relay is clean but the relay's own answers " +
                            $"are not{detail}. Both numbers are a round trip to the same machine " +
                            "over the same wire, so the difference is not the network - it is the " +
