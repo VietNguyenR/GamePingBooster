@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
+using GamePingBooster.Service.Native;
 
 namespace GamePingBooster.Service.Network;
 
@@ -119,7 +120,7 @@ internal sealed class RouteManager
     /// </summary>
     public void PinRelayRoute(IPAddress relayIp)
     {
-        var (physIndex, gateway) = GetDefaultRoute()
+        var (physIndex, gateway) = GetRouteTo(relayIp)
             ?? throw new InvalidOperationException(
                 "No network adapter with a default gateway was found - is the machine offline?");
 
@@ -275,14 +276,65 @@ internal sealed class RouteManager
         }
     }
 
-    /// <summary>Finds the interface index and gateway of the current route to the internet.</summary>
-    public static (uint InterfaceIndex, IPAddress Gateway)? GetDefaultRoute()
+    /// <summary>
+    /// The interface and gateway to reach <paramref name="destination"/> - Windows' own answer
+    /// where it will give one, the first adapter with a gateway where it will not.
+    ///
+    /// Asking is the whole point. The fallback below is what this method used to be on its own,
+    /// and it cannot rank adapters: NetworkInterface has no view of the routing table, so it
+    /// takes whichever adapter the enumeration happens to hand over first. One adapter, always
+    /// right. Two that are Up and carry a gateway - a VM host adapter, WSL, a VPN client, Wi-Fi
+    /// and Ethernet both live - and it is a coin toss. Losing it pins the relay through a door
+    /// that cannot reach it: the chosen relay goes silent within seconds while every other relay
+    /// still answers, the supervisor fails over, pins the next one the same way, and the session
+    /// rotates for ever without connecting. That is the 2026-09-12 report, and the customer's own
+    /// fix was to disable a virtual adapter.
+    ///
+    /// Per DESTINATION rather than "the default route", because they are not always the same
+    /// question and only the first one is the one being asked.
+    /// </summary>
+    public static (uint InterfaceIndex, IPAddress Gateway)? GetRouteTo(IPAddress destination)
     {
+        var candidates = GatewayCandidates();
+        if (candidates.Count == 0) return null;
+
+        // Windows' answer wins when this machine can act on it - which means an adapter that is
+        // actually up and has a gateway to name. GetBestInterfaceEx can legitimately return an
+        // interface with no gateway of its own (a point-to-point link, or a destination that is
+        // on-link), and `netsh add route` needs a nexthop, so those fall through rather than
+        // producing a route that cannot be installed.
+        if (IpHelperInterop.BestInterfaceFor(destination) is { } best)
+        {
+            foreach (var candidate in candidates)
+            {
+                if (candidate.InterfaceIndex == best) return candidate;
+            }
+        }
+
+        return candidates[0];
+    }
+
+    /// <summary>
+    /// Every adapter that could carry traffic off this machine: up, not loopback, not a tunnel of
+    /// ours, and naming an IPv4 gateway.
+    ///
+    /// Only OUR adapter is excluded by description, and deliberately so. An earlier version said
+    /// in a comment that it skipped VMware and Hyper-V while the code below it skipped neither,
+    /// and filtering them by name would have been the wrong fix anyway: a virtual adapter is
+    /// sometimes genuinely the way out - a VM host, a corporate VPN client - and a name is a poor
+    /// way to tell. Ranking them is <see cref="GetRouteTo"/>'s job, and it ranks them by asking
+    /// the routing table rather than by reading their descriptions.
+    ///
+    /// Our own adapter is different: it is excluded because pinning the relay through the tunnel
+    /// that carries the relay is a loop, whatever the routing table says about it.
+    /// </summary>
+    private static List<(uint InterfaceIndex, IPAddress Gateway)> GatewayCandidates()
+    {
+        var found = new List<(uint, IPAddress)>();
         foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
         {
             if (nic.OperationalStatus != OperationalStatus.Up) continue;
             if (nic.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
-            // Skip our own virtual adapter and other virtual ones (VMware, Hyper-V).
             if (nic.Description.Contains("Wintun", StringComparison.OrdinalIgnoreCase)) continue;
 
             var props = nic.GetIPProperties();
@@ -293,14 +345,14 @@ internal sealed class RouteManager
 
             try
             {
-                return ((uint)props.GetIPv4Properties().Index, gateway);
+                found.Add(((uint)props.GetIPv4Properties().Index, gateway));
             }
             catch (NetworkInformationException)
             {
                 // Adapter has no IPv4 - skip it.
             }
         }
-        return null;
+        return found;
     }
 
     /// <summary>

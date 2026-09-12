@@ -51,6 +51,17 @@ public static class GpbProtocol
     public const int TokenLen = 150;
     public const int NonceLen = 8;
 
+    /// <summary>
+    /// How far this machine's clock may sit from the relay's before a handshake is refused.
+    /// Mirrors HandshakeSkew in relay/internal/protocol/protocol.go; the two must agree.
+    ///
+    /// This side never checks it - the relay does, and it drops a skewed handshake in silence,
+    /// on every relay at once, which looks exactly like a blocked UDP port. The constant is here
+    /// so the app can measure its own clock against the licence server and say so BEFORE anybody
+    /// spends an afternoon on the network. See LicenceClient.ClockSkew.
+    /// </summary>
+    public static readonly TimeSpan HandshakeSkew = TimeSpan.FromSeconds(120);
+
     public const int DataHeaderLen = 9;
     public const int PingLen = 17;
     public const int DisconnectLen = 9;

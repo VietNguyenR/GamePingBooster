@@ -384,7 +384,7 @@ func (s *Server) loopUDP() error {
 func (s *Server) handleHandshake(pkt []byte, from netip.AddrPort) {
 	mode, err := protocol.HandshakeReqMode(pkt)
 	if err != nil {
-		s.log.Debug("handshake rejected", "from", from.String(), "err", err)
+		s.logRejection(from, err)
 		s.stats.dropped.Add(1)
 		return
 	}
@@ -401,11 +401,41 @@ func (s *Server) handleHandshake(pkt []byte, from netip.AddrPort) {
 	}
 }
 
+// logRejection records a refused handshake, and lifts the ONE cause that is not the client's
+// fault out of debug.
+//
+// Every refusal here is silent on the wire, so the log is the only place the reason exists - and
+// the client's own timeout message promises as much ("the relay refused the licence token, its
+// log says why"). At the default -log-level info that promise was false: every cause sat at
+// debug, so a relay that was refusing every handshake looked identical to one nobody was
+// reaching.
+//
+// Clock skew earns info while the rest stays at debug because it is the only one that is not a
+// scanner, a stale build or a mismatched key. It is a paying customer whose PC has the wrong
+// time, it takes out every relay at once, and from the client side it is indistinguishable from
+// a blocked UDP port - which is exactly how one cost a day on 2026-09-12 before the log was
+// asked. One line here is the whole difference. The others stay quiet on purpose: an open UDP
+// port gets scanned, and a bad signature per packet at info is a log nobody can read.
+//
+// Promoting it cannot be used to flood the log, and that is not luck - it is the verification
+// order in VerifyHandshakeReq and VerifyHandshakeReqToken, both of which check authentication
+// BEFORE the timestamp. Reaching this branch therefore costs the PSK, or a licence token plus
+// the device key it names. A stranger with neither only ever produces the debug line.
+func (s *Server) logRejection(from netip.AddrPort, err error) {
+	if errors.Is(err, protocol.ErrClockSkew) {
+		s.log.Info("handshake refused: the client's clock is out of range",
+			"from", from.String(), "skew_allowed", protocol.HandshakeSkew,
+			"hint", "the client must fix its system time; nothing on this relay will help")
+		return
+	}
+	s.log.Debug("handshake rejected", "from", from.String(), "err", err)
+}
+
 func (s *Server) handleHandshakePSK(pkt []byte, from netip.AddrPort) {
 	clientID, nonce, err := protocol.VerifyHandshakeReq(s.cfg.PSK, pkt, time.Now())
 	if err != nil {
 		// Stay silent: never answer a bad packet, so scanners cannot fingerprint us.
-		s.log.Debug("handshake rejected", "from", from.String(), "err", err)
+		s.logRejection(from, err)
 		s.stats.dropped.Add(1)
 		return
 	}
@@ -444,7 +474,7 @@ func (s *Server) handleHandshakeToken(pkt []byte, from netip.AddrPort) {
 		return
 	}
 	if err != nil {
-		s.log.Debug("handshake rejected", "from", from.String(), "err", err)
+		s.logRejection(from, err)
 		s.stats.dropped.Add(1)
 		return
 	}

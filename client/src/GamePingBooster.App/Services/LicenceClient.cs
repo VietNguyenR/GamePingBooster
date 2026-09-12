@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
+using GamePingBooster.Core.Protocol;
 
 namespace GamePingBooster.App.Services;
 
@@ -65,6 +66,45 @@ public sealed class LicenceClient : IDisposable
             // call is wrong for the exchange - see ExchangeTimeout.
             Timeout = System.Threading.Timeout.InfiniteTimeSpan,
         };
+    }
+
+    /// <summary>
+    /// How far this machine's clock ran ahead of the licence server's on the last call that got
+    /// an answer - negative when it runs behind, null when it could not be measured.
+    ///
+    /// Worth measuring because a wrong clock breaks the tunnel in the one way nothing points at.
+    /// The client signs the moment into every handshake and the relay refuses one further than
+    /// <see cref="GpbProtocol.HandshakeSkew"/> from its own clock, silently, on every relay at
+    /// once - which reads as "no relay answered, check the network" and sends whoever is helping
+    /// to tcpdump. A customer on 2026-09-12 ran 537 s fast and cost a day of it.
+    ///
+    /// Measured here rather than anywhere else because this is the only conversation the app has
+    /// with a machine whose clock is known to be right, and it already happens on every start.
+    /// </summary>
+    public TimeSpan? ClockSkew { get; private set; }
+
+    /// <summary>
+    /// The clock difference a response proves, as a LOWER BOUND, or null when the server sent no
+    /// usable Date.
+    ///
+    /// A bound rather than a number, because the response leg is inside any naive subtraction and
+    /// would show a slow link as a skewed clock. The server stamped Date at some instant between
+    /// this machine sending and receiving, so a Date inside that window proves nothing is wrong
+    /// however wide the window is - and a Date outside it is off by AT LEAST the distance to the
+    /// nearer edge, whatever the latency was. That makes a warning built on this incapable of
+    /// crying wolf over a slow connection, which is the property worth having: one false alarm
+    /// about the clock and nobody reads the next one.
+    ///
+    /// Date has one-second resolution, so this is never accurate to better than a second. It does
+    /// not need to be - what it guards is measured in minutes.
+    /// </summary>
+    internal static TimeSpan? SkewFrom(DateTimeOffset sentAt, DateTimeOffset receivedAt,
+        DateTimeOffset? serverDate)
+    {
+        if (serverDate is not { } server) return null;
+        if (server < sentAt) return sentAt - server;
+        if (server > receivedAt) return receivedAt - server;
+        return TimeSpan.Zero;
     }
 
     public void Dispose() => _http.Dispose();
@@ -140,6 +180,8 @@ public sealed class LicenceClient : IDisposable
         string deviceLabel, CancellationToken ct) =>
         WithDeadline(RequestTimeout, ct, async t =>
         {
+            // Bracketed so the response leg cannot be mistaken for a skewed clock - see SkewFrom.
+            var sentAt = DateTimeOffset.UtcNow;
             using var response = await _http.PostAsJsonAsync("auth/token",
                 new TokenRequest
                 {
@@ -148,6 +190,7 @@ public sealed class LicenceClient : IDisposable
                     DeviceLabel = deviceLabel,
                 },
                 LicenceJsonContext.Default.TokenRequest, t).ConfigureAwait(false);
+            ClockSkew = SkewFrom(sentAt, DateTimeOffset.UtcNow, response.Headers.Date);
 
             return await ReadAsync(response, LicenceJsonContext.Default.TokenResult, t).ConfigureAwait(false);
         });

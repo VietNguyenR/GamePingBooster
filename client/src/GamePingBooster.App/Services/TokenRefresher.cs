@@ -1,4 +1,5 @@
 using GamePingBooster.Core.Ipc;
+using GamePingBooster.Core.Protocol;
 
 namespace GamePingBooster.App.Services;
 
@@ -157,6 +158,34 @@ public sealed class TokenRefresher : IAsyncDisposable
     }
 
     /// <summary>
+    /// Says so when this machine's clock is far enough out that no relay will answer it.
+    ///
+    /// The threshold is the relay's own window rather than something smaller, and that is the
+    /// point: past it every handshake is refused, so the notice is a diagnosis and never a
+    /// guess. A softer "your clock looks a bit off" tier was considered and left out - the app
+    /// would be crying about a clock that still works, and the one warning that matters would be
+    /// read as more of the same.
+    ///
+    /// Nothing is done about it automatically. Setting the system clock needs administrator
+    /// rights this process does not have, and a booster that silently moves the clock is not
+    /// something anybody asked for. Naming the cause is the whole job; without it the symptom is
+    /// six unreachable relays and a message about the network.
+    /// </summary>
+    private void WarnIfClockIsWrong(TimeSpan? skew)
+    {
+        if (skew is not { } drift) return;
+        if (drift.Duration() <= GpbProtocol.HandshakeSkew) return;
+
+        var minutes = Math.Max(1, (int)Math.Round(drift.Duration().TotalMinutes));
+        var direction = drift > TimeSpan.Zero ? "ahead of" : "behind";
+        _report(
+            $"This PC's clock is about {minutes} minute{(minutes == 1 ? "" : "s")} {direction} the " +
+            "licence server. Relays refuse a handshake more than " +
+            $"{GpbProtocol.HandshakeSkew.TotalSeconds:F0} seconds out, so connecting will fail until " +
+            "the time is corrected - turn on Settings > Time & language > Set time automatically.");
+    }
+
+    /// <summary>
     /// The moment to refresh a token that runs out at <paramref name="expiry"/>: halfway through
     /// whatever life it has left right now.
     ///
@@ -227,6 +256,10 @@ public sealed class TokenRefresher : IAsyncDisposable
             _due = DueFor(renewed);
 
             _report($"Licence renewed, valid until {renewed.LocalDateTime:g}.");
+
+            // Said AFTER the renewal line, not before: the notice is one property and the last
+            // writer wins, and a broken clock is the more useful of the two to be looking at.
+            WarnIfClockIsWrong(client.ClockSkew);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
