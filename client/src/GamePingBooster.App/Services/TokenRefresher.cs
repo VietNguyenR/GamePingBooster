@@ -1,3 +1,4 @@
+using System.Net;
 using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Protocol;
 
@@ -290,7 +291,7 @@ public sealed class TokenRefresher : IAsyncDisposable
             // Only 402. A 401, a 429 or a device-limit 403 are all things that can be true this
             // minute and false the next, and throwing away a working licence over one of them
             // would sign the user out of a session they were entitled to.
-            if (ex.StatusCode == System.Net.HttpStatusCode.PaymentRequired)
+            if (ex.StatusCode == HttpStatusCode.PaymentRequired)
             {
                 try
                 {

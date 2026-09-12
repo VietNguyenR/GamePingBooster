@@ -1,4 +1,4 @@
-﻿using System.ServiceProcess;
+using System.ServiceProcess;
 using GamePingBooster.Service.Ipc;
 using GamePingBooster.Service.Tunnel;
 
@@ -79,7 +79,7 @@ public static class Program
             fileLog.Write(message);
         }
 
-        if (fileLog.Path is not null) Console.WriteLine($"Logging to {fileLog.Path}");
+        if (fileLog.LogFilePath is not null) Console.WriteLine($"Logging to {fileLog.LogFilePath}");
 
         try
         {
@@ -102,7 +102,7 @@ public static class Program
     internal static async Task RunAsync(Action<string> log, CancellationToken ct)
     {
         var config = ServiceConfig.Load();
-        log($"Configuration loaded. Default game: {config.DefaultGameId}, adapter: {config.AdapterName}");
+        log($"Configuration loaded. Default game: {config.DefaultGameId ?? "none"}, adapter: {config.AdapterName}");
 
         await using var engine = new TunnelEngine(config, log);
 

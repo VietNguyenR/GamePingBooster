@@ -1,12 +1,14 @@
-﻿using System.Buffers.Binary;
+using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Profiles;
 using GamePingBooster.Service.Native;
 using GamePingBooster.Service.Network;
-using System.Security.Cryptography;
 
 namespace GamePingBooster.Service.Tunnel;
 
@@ -72,6 +74,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
     private volatile string _profileSource = "none";
 
     private GameEntry? _game;
+    private string? _selectedGameId;
     private RelayEntry? _relay;
     private volatile TunnelState _state = TunnelState.Disconnected;
     private volatile string _detail = "Not connected";
@@ -144,40 +147,38 @@ internal sealed class TunnelEngine : IAsyncDisposable
             var plaintext = _device.OpenSealedProfile(envelope);
             try
             {
-                json = System.Text.Encoding.UTF8.GetString(plaintext);
+                json = Encoding.UTF8.GetString(plaintext);
             }
             finally
             {
                 CryptographicOperations.ZeroMemory(plaintext);
             }
         }
-        catch (CryptographicException ex)
+        catch (Exception ex)
         {
-            return ex.Message;
+            return $"Could not open the profile bundle: {ex.Message}";
         }
 
-        ProfileBundle? parsed;
+        ProfileBundle parsed;
         try
         {
-            parsed = JsonSerializer.Deserialize(json, ProfileJsonContext.Default.ProfileBundle);
+            parsed = JsonSerializer.Deserialize(json, ProfileJsonContext.Default.ProfileBundle)
+                ?? throw new InvalidOperationException("Profile parsed as null.");
         }
         catch (JsonException ex)
         {
-            return $"The sealed profile did not contain a valid one: {ex.Message}";
+            return $"The decrypted profile is not valid JSON: {ex.Message}";
         }
-        if (parsed is null || parsed.Games.Count == 0) return "That profile names no games.";
 
-        try
+        if (parsed.SchemaVersion != 1)
         {
-            Directory.CreateDirectory(ServiceConfig.DefaultDirectory);
-            var tmp = SealedProfilePath + ".tmp";
-            await File.WriteAllBytesAsync(tmp, envelope, ct).ConfigureAwait(false);
-            File.Move(tmp, SealedProfilePath, overwrite: true);
+            return $"Unsupported profile schema version {parsed.SchemaVersion} (expected 1).";
         }
-        catch (Exception ex)
-        {
-            return $"Could not store the profile: {ex.Message}";
-        }
+
+        Directory.CreateDirectory(ServiceConfig.DefaultDirectory);
+        var tmp = SealedProfilePath + ".tmp";
+        File.WriteAllBytes(tmp, envelope);
+        File.Move(tmp, SealedProfilePath, overwrite: true);
 
         try
         {
@@ -188,7 +189,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             return $"Stored, but could not load it: {ex.Message}";
         }
 
-        var cidrs = parsed.Games.Sum(g => g.Regions.Sum(r => r.Cidrs.Count));
+        var cidrs = parsed.Games.Sum((GameEntry g) => g.Regions.Sum((RegionEntry r) => r.Cidrs.Count));
         _log($"Profile updated from the licence server: {parsed.Games.Count} game(s), " +
              $"{cidrs} ranges, {parsed.Relays.Count} relay(s). It applies from the next connect.");
         StatusChanged?.Invoke(Snapshot());
@@ -245,74 +246,254 @@ internal sealed class TunnelEngine : IAsyncDisposable
     ///                                been pushed yet, so a fresh install still connects.
     ///   self-hosted               -> the local file, exactly as before. Nothing pushes.
     /// </summary>
-    public async Task LoadProfileAsync(CancellationToken ct)
+    private List<string> ResolveProfileFiles()
     {
-        // "Licensed" is having a licence server, full stop. There is no separate profile
-        // address to configure: the endpoints all hang off the one URL somebody typed, and
-        // asking for a second address for the same server was needless.
-        var licensed = !string.IsNullOrWhiteSpace(_config.LicenceUrl);
-
-        // Where the installer puts it, and what the default in ServiceConfig resolves to.
-        var shipped = Path.Combine(AppContext.BaseDirectory, "profiles", "pubg-vn.json");
-
-        var local = Path.IsPathRooted(_config.ProfilePath)
-            ? _config.ProfilePath
-            : Path.Combine(AppContext.BaseDirectory, _config.ProfilePath);
-
-        // A configured path that no longer exists is not a dead end. It usually means an
-        // absolute path written by hand on a developer's machine, or an install that moved -
-        // and in both cases the profile the installer shipped is sitting right there.
-        if (!File.Exists(local) && File.Exists(shipped))
+        var candidates = new List<string>();
+        if (_config.ProfilePaths is { Count: > 0 })
         {
-            _log($"No profile at {local}; falling back to the one installed at {shipped}.");
-            local = shipped;
+            candidates.AddRange(_config.ProfilePaths);
+        }
+        if (!string.IsNullOrWhiteSpace(_config.ProfilePath))
+        {
+            candidates.Add(_config.ProfilePath);
+            var parentDir = Path.GetDirectoryName(_config.ProfilePath);
+            if (!string.IsNullOrWhiteSpace(parentDir))
+            {
+                candidates.Add(parentDir);
+            }
         }
 
-        var sealedExists = File.Exists(SealedProfilePath);
-        string source;
-        string json;
+        candidates.Add("profiles");
+        candidates.Add(Path.Combine(AppContext.BaseDirectory, "profiles"));
 
-        if ((licensed || !File.Exists(local)) && sealedExists)
+        var commonData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        if (!string.IsNullOrWhiteSpace(commonData))
         {
-            // Opened in memory. The plaintext exists only for as long as it takes to parse.
+            candidates.Add(Path.Combine(commonData, "GamePingBooster", "profiles"));
+            candidates.Add(Path.Combine(commonData, "GamePingBooster", "profile.json"));
+        }
+
+        var progFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        if (!string.IsNullOrWhiteSpace(progFiles))
+        {
+            candidates.Add(Path.Combine(progFiles, "Game Ping Booster", "profiles"));
+        }
+
+        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var rawPath in candidates)
+        {
+            if (string.IsNullOrWhiteSpace(rawPath)) continue;
+
+            string? path = null;
+            if (Path.IsPathRooted(rawPath))
+            {
+                if (File.Exists(rawPath) || Directory.Exists(rawPath)) path = rawPath;
+            }
+            else
+            {
+                var candidate1 = Path.Combine(AppContext.BaseDirectory, rawPath);
+                if (File.Exists(candidate1) || Directory.Exists(candidate1))
+                {
+                    path = candidate1;
+                }
+                else
+                {
+                    var candidate2 = Path.Combine(Directory.GetCurrentDirectory(), rawPath);
+                    if (File.Exists(candidate2) || Directory.Exists(candidate2))
+                    {
+                        path = candidate2;
+                    }
+                    else
+                    {
+                        var candidate3 = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", rawPath));
+                        if (File.Exists(candidate3) || Directory.Exists(candidate3))
+                        {
+                            path = candidate3;
+                        }
+                    }
+                }
+            }
+
+            if (path is null) continue;
+
+            if (File.Exists(path))
+            {
+                files.Add(Path.GetFullPath(path));
+            }
+            else if (Directory.Exists(path))
+            {
+                try
+                {
+                    var dirFiles = Directory.GetFiles(path, "*.json", SearchOption.TopDirectoryOnly);
+                    var realFiles = new HashSet<string>(
+                        dirFiles.Where(f => !f.EndsWith(".example.json", StringComparison.OrdinalIgnoreCase))
+                                .Select(f => Path.GetFileNameWithoutExtension(f)),
+                        StringComparer.OrdinalIgnoreCase);
+
+                    foreach (var f in dirFiles)
+                    {
+                        var fileName = Path.GetFileName(f);
+                        if (fileName.EndsWith(".example.json", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var baseName = fileName[..^".example.json".Length];
+                            if (realFiles.Contains(baseName))
+                            {
+                                continue;
+                            }
+                        }
+                        files.Add(Path.GetFullPath(f));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _log($"Warning: could not scan profile directory {path}: {ex.Message}");
+                }
+            }
+        }
+
+        return [.. files];
+    }
+
+    public async Task LoadProfileAsync(CancellationToken ct)
+    {
+        var licensed = !string.IsNullOrWhiteSpace(_config.LicenceUrl);
+        var sealedExists = File.Exists(SealedProfilePath);
+        var profileFiles = ResolveProfileFiles();
+
+        string source;
+        ProfileBundle? profile = null;
+        var sourceDescription = "";
+
+        if ((licensed || profileFiles.Count == 0) && sealedExists)
+        {
             var envelope = await File.ReadAllBytesAsync(SealedProfilePath, ct).ConfigureAwait(false);
             var plaintext = _device.OpenSealedProfile(envelope);
             try
             {
-                json = System.Text.Encoding.UTF8.GetString(plaintext);
+                var json = Encoding.UTF8.GetString(plaintext);
+                profile = JsonSerializer.Deserialize(json, ProfileJsonContext.Default.ProfileBundle);
             }
             finally
             {
                 CryptographicOperations.ZeroMemory(plaintext);
             }
             source = licensed ? "pushed" : "cached";
+            sourceDescription = SealedProfilePath;
         }
-        else if (File.Exists(local))
+        else if (profileFiles.Count > 0)
         {
-            json = await File.ReadAllTextAsync(local, ct).ConfigureAwait(false);
-            source = "shipped";
+            ProfileBundle? combined = null;
+            var loadedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var file in profileFiles)
+            {
+                try
+                {
+                    var json = await File.ReadAllTextAsync(file, ct).ConfigureAwait(false);
+                    var bundle = JsonSerializer.Deserialize(json, ProfileJsonContext.Default.ProfileBundle);
+                    if (bundle is null || bundle.Games.Count == 0) continue;
+
+                    if (combined is null)
+                    {
+                        combined = bundle;
+                    }
+                    else
+                    {
+                        foreach (var g in bundle.Games)
+                        {
+                            var existingGame = combined.Games.FirstOrDefault(x => string.Equals(x.Id, g.Id, StringComparison.OrdinalIgnoreCase));
+                            if (existingGame is null)
+                            {
+                                combined.Games.Add(g);
+                            }
+                            else
+                            {
+                                foreach (var reg in g.Regions)
+                                {
+                                    if (!existingGame.Regions.Any(r => string.Equals(r.Id, reg.Id, StringComparison.OrdinalIgnoreCase)))
+                                    {
+                                        existingGame.Regions.Add(reg);
+                                    }
+                                }
+                                foreach (var proc in g.ProcessNames)
+                                {
+                                    if (!existingGame.ProcessNames.Contains(proc, StringComparer.OrdinalIgnoreCase))
+                                    {
+                                        existingGame.ProcessNames.Add(proc);
+                                    }
+                                }
+                                foreach (var addr in g.LobbyAddresses)
+                                {
+                                    if (!existingGame.LobbyAddresses.Contains(addr, StringComparer.OrdinalIgnoreCase))
+                                    {
+                                        existingGame.LobbyAddresses.Add(addr);
+                                    }
+                                }
+                            }
+                        }
+
+                        foreach (var r in bundle.Relays)
+                        {
+                            var existing = combined.Relays.FirstOrDefault(x => string.Equals(x.Endpoint, r.Endpoint, StringComparison.OrdinalIgnoreCase));
+                            if (existing is null)
+                            {
+                                if (!combined.Relays.Any(x => string.Equals(x.Id, r.Id, StringComparison.OrdinalIgnoreCase)))
+                                {
+                                    combined.Relays.Add(r);
+                                }
+                            }
+                            else if (existing.Id.StartsWith("relay-", StringComparison.OrdinalIgnoreCase) && !r.Id.StartsWith("relay-", StringComparison.OrdinalIgnoreCase))
+                            {
+                                // A named profile relay (e.g. "sg") takes precedence over a generic placeholder ("relay-1").
+                                existing.Id = r.Id;
+                                existing.Name = r.Name;
+                                existing.Location = r.Location;
+                            }
+                        }
+
+                        if (bundle.GeneratedUtc > combined.GeneratedUtc)
+                        {
+                            combined.GeneratedUtc = bundle.GeneratedUtc;
+                        }
+                    }
+                    loadedFiles.Add(Path.GetFileName(file));
+                }
+                catch (Exception ex)
+                {
+                    _log($"Warning: could not read profile file {file}: {ex.Message}");
+                }
+            }
+
+            if (combined is not null && combined.Games.Count > 0)
+            {
+                profile = combined;
+                source = "shipped";
+                sourceDescription = string.Join(", ", loadedFiles);
+            }
+            else
+            {
+                throw new FileNotFoundException(
+                    $"No valid profiles found at {_config.ProfilePath} or in profiles directory, and nothing from the licence server either.");
+            }
         }
         else
         {
             throw new FileNotFoundException(
-                $"No profile at {_config.ProfilePath} and nothing from the licence server either.");
+                $"No profiles found at {_config.ProfilePath} and nothing from the licence server either.");
         }
 
-        _profile = JsonSerializer.Deserialize(json, ProfileJsonContext.Default.ProfileBundle)
-                   ?? throw new InvalidOperationException("The profile is not valid.");
+        _profile = profile ?? throw new InvalidOperationException("The profile is not valid.");
         _profileSource = source;
-        var chosen = source == "shipped" ? local : SealedProfilePath;
 
         if (licensed && source != "pushed")
         {
-            // Loud, because it is the silent failure this whole path exists to avoid: the tunnel
-            // will work perfectly on ranges that may be months old.
-            _log($"Loaded the {source} profile from {chosen}. A licence server is configured but " +
-                 "nothing has been pushed yet - sign in so the app can fetch the current one.");
+            _log($"Loaded {source} profile from {sourceDescription} ({_profile.Games.Count} game(s): {string.Join(", ", _profile.Games.Select(g => g.Name))}). " +
+                 "A licence server is configured but nothing has been pushed yet - sign in so the app can fetch the current one.");
         }
         else
         {
-            _log($"Loaded the {source} profile from {chosen}");
+            _log($"Loaded {source} profile from {sourceDescription} ({_profile.Games.Count} game(s): {string.Join(", ", _profile.Games.Select(g => g.Name))}, {_profile.Relays.Count} relay(s))");
         }
         ApplySelfHostedRelay();
     }
@@ -355,8 +536,19 @@ internal sealed class TunnelEngine : IAsyncDisposable
                 _log($"Could not reload the profile ({ex.Message}) - continuing with the one already loaded.");
             }
 
-            _game = FindGame(gameId ?? _config.DefaultGameId);
-            var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
+            // Explicit game selection is required before bringing the tunnel up. Without one,
+            // the engine has no way of knowing which CIDR ranges to install.
+            _selectedGameId = string.IsNullOrWhiteSpace(gameId) ? _selectedGameId : gameId;
+            if (string.IsNullOrWhiteSpace(_selectedGameId))
+            {
+                throw new InvalidOperationException("No game selected. Please select a game before connecting.");
+            }
+
+            _game = FindGame(_selectedGameId);
+
+            var runningProc = FindRunningGameProcess();
+
+            var psk = Encoding.UTF8.GetBytes(_config.Psk);
 
             // Choose the relay before creating anything. Probing is pure UDP - no adapter, no
             // routes - so a relay that turns out to be unreachable costs nothing but a timeout.
@@ -376,7 +568,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             _routes = new RouteManager();
             _routes.PinRelayRoute(endpoint.Address);
 
-            _routes.ConfigureAdapter(_adapter.InterfaceIndex, session.ClientIp, prefixLength: 24, session.Mtu);
+            RouteManager.ConfigureAdapter(_adapter.InterfaceIndex, session.ClientIp, prefixLength: 24, session.Mtu);
             _tunnel.StartPumping(_adapter, token);
 
             // The lobby goes on the tunnel NOW, before the game exists, rather than with the game
@@ -386,23 +578,25 @@ internal sealed class TunnelEngine : IAsyncDisposable
             InstallLobbyRoutes();
 
             // Watch the game so routes come and go with it.
-            _watcher = new GameProcessWatcher(_game.ProcessNames);
+            _watcher = new GameProcessWatcher(GetAllProcessNames());
             _watcher.GameStateChanged += OnGameStateChanged;
             _watcher.Start();
-
-            if (_config.RouteWithoutGame)
-            {
-                _log("routeWithoutGame = true - installing routes now without waiting for the game (debug mode).");
-                InstallRoutes();
-            }
 
             StartSupervisor(token);
             StartGamePingProbe(token);
 
-            SetState(TunnelState.Connected,
-                _watcher.IsGameRunning
-                    ? $"Connected to {_relay.Name} - accelerating {_game.Name}"
-                    : $"Connected to {_relay.Name} - waiting for {_game.Name} to start");
+            if (runningProc is not null || _config.RouteWithoutGame)
+            {
+                _log($"Game process {runningProc ?? "forced"}.exe is already running - installing routes for {_game.Name}.");
+                InstallLobbyRoutes();
+                InstallRoutes();
+                SetState(TunnelState.Connected, $"Optimizing {_game.Name} through {_relay.Name}");
+            }
+            else
+            {
+                _log($"Connected to {_relay.Name}. Waiting for game to launch... Please open {_game.Name}.");
+                SetState(TunnelState.Connected, $"Waiting for game to launch... Please open {_game.Name}.");
+            }
         }
         catch (Exception ex)
         {
@@ -576,7 +770,11 @@ internal sealed class TunnelEngine : IAsyncDisposable
             {
                 var client = new TunnelClient(ParseEndpoint(pinned.Endpoint), AuthFor(pinned, psk), _clientId, _log);
                 await client.HandshakeAsync(attempts: 4, ct).ConfigureAwait(false);
-                await ReportBothLegsAsync(pinned, client, ct).ConfigureAwait(false);
+                _ = Task.Run(async () =>
+                {
+                    try { await ReportBothLegsAsync(pinned, client, CancellationToken.None).ConfigureAwait(false); }
+                    catch { }
+                }, CancellationToken.None);
                 return (pinned, client);
             }
             _log($"The profile has no relay '{preferredId}' - measuring all of them instead.");
@@ -587,7 +785,11 @@ internal sealed class TunnelEngine : IAsyncDisposable
             var only = candidates[0];
             var client = new TunnelClient(ParseEndpoint(only.Endpoint), AuthFor(only, psk), _clientId, _log);
             await client.HandshakeAsync(attempts: 4, ct).ConfigureAwait(false);
-            await ReportBothLegsAsync(only, client, ct).ConfigureAwait(false);
+            _ = Task.Run(async () =>
+            {
+                try { await ReportBothLegsAsync(only, client, CancellationToken.None).ConfigureAwait(false); }
+                catch { }
+            }, CancellationToken.None);
             return (only, client);
         }
 
@@ -1161,7 +1363,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
         if (previous is null || adapter is null || routes is null) return;
 
         var previousIp = _tunnel?.Session.ClientIp;
-        var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
+        var psk = Encoding.UTF8.GetBytes(_config.Psk);
 
         // Flush before the relay changes underneath it: a destinations line naming the wrong
         // relay is worse than no line, because the whole point is comparing one against another.
@@ -1262,7 +1464,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
                     else
                     {
                         _log($"Got a different inner IP ({session.ClientIp}) - reconfiguring the adapter.");
-                        routes.ConfigureAdapter(adapter.InterfaceIndex, session.ClientIp, prefixLength: 24, session.Mtu);
+                        RouteManager.ConfigureAdapter(adapter.InterfaceIndex, session.ClientIp, prefixLength: 24, session.Mtu);
                     }
 
                     InstallLobbyRoutes();
@@ -1348,18 +1550,24 @@ internal sealed class TunnelEngine : IAsyncDisposable
                     return;
                 }
 
-                _log($"Detected {processName}.exe running - installing routes.");
+                if (_game is null && !string.IsNullOrEmpty(_selectedGameId))
+                {
+                    _game = FindGame(_selectedGameId);
+                }
+
+                _log($"Detected {processName}.exe running - installing routes for {_game?.Name}.");
+                InstallLobbyRoutes();
                 InstallRoutes();
-                SetState(TunnelState.Connected, $"Accelerating {_game?.Name} through {_relay?.Name}");
+                SetState(TunnelState.Connected, $"Optimizing {_game?.Name} through {_relay?.Name}");
             }
             else
             {
                 _log("The game exited - removing routes, other traffic returns to the normal path.");
                 if (_adapter is not null) _routes?.RemoveGameRoutes(_adapter.InterfaceIndex);
-                // Do not claim Connected while a reconnect is still in progress.
                 if (_tunnel is not null)
                 {
-                    SetState(TunnelState.Connected, $"Connected to {_relay?.Name} - waiting for {_game?.Name} to start");
+                    var waitingTarget = _game?.Name ?? "the game";
+                    SetState(TunnelState.Connected, $"Waiting for game to launch... Please open {waitingTarget}.");
                 }
             }
         }
@@ -1368,6 +1576,111 @@ internal sealed class TunnelEngine : IAsyncDisposable
             _error = ex.Message;
             SetState(TunnelState.Faulted, "Failed to update the routing table");
             _log($"Error while adding or removing routes: {ex}");
+        }
+    }
+
+    private string? FindRunningGameProcess()
+    {
+        var names = GetAllProcessNames()
+            .Select(n => n.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? n[..^4] : n)
+            .Where(n => n.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var name in names)
+        {
+            try
+            {
+                var procs = Process.GetProcessesByName(name);
+                try
+                {
+                    if (procs.Length > 0) return name;
+                }
+                finally
+                {
+                    foreach (var p in procs) p.Dispose();
+                }
+            }
+            catch
+            {
+                // Ignore transient process enumeration errors
+            }
+        }
+        return null;
+    }
+
+    private List<string> GetAllProcessNames()
+    {
+        if (_profile is null || _profile.Games.Count == 0) return [];
+        if (!string.IsNullOrEmpty(_selectedGameId))
+        {
+            var specific = _profile.Games.FirstOrDefault(g => g.Id.Equals(_selectedGameId, StringComparison.OrdinalIgnoreCase));
+            if (specific is not null) return specific.ProcessNames;
+        }
+        return _game is not null ? _game.ProcessNames : [];
+    }
+
+    private GameEntry? FindGameForProcess(string? processName)
+    {
+        if (_profile is null || string.IsNullOrWhiteSpace(processName)) return _game;
+
+        if (!string.IsNullOrEmpty(_selectedGameId))
+        {
+            return _profile.Games.FirstOrDefault(g => g.Id.Equals(_selectedGameId, StringComparison.OrdinalIgnoreCase)) ?? _game;
+        }
+
+        var procNorm = processName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? processName[..^4] : processName;
+        return _profile.Games.FirstOrDefault(g => g.ProcessNames.Any(p =>
+        {
+            var pNorm = p.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? p[..^4] : p;
+            return string.Equals(pNorm, procNorm, StringComparison.OrdinalIgnoreCase);
+        })) ?? _game ?? _profile.Games.FirstOrDefault();
+    }
+
+    public void SetSelectedGame(string? gameId)
+    {
+        if (string.IsNullOrWhiteSpace(gameId))
+        {
+            return;
+        }
+
+        _selectedGameId = gameId;
+        _log($"Selected game changed to: {_selectedGameId}");
+
+        if (_profile is not null)
+        {
+            var specific = _profile.Games.FirstOrDefault(g => g.Id.Equals(_selectedGameId, StringComparison.OrdinalIgnoreCase));
+            if (specific is not null)
+            {
+                _game = specific;
+            }
+
+            if (_watcher is not null)
+            {
+                _watcher.GameStateChanged -= OnGameStateChanged;
+                _watcher.Dispose();
+                _watcher = new GameProcessWatcher(GetAllProcessNames());
+                _watcher.GameStateChanged += OnGameStateChanged;
+                _watcher.Start();
+
+                var runningProc = FindRunningGameProcess();
+                if (runningProc is null && _adapter is not null)
+                {
+                    _routes?.RemoveGameRoutes(_adapter.InterfaceIndex);
+                    if (_tunnel is not null)
+                    {
+                        var waitingTarget = _game?.Name ?? "the game";
+                        SetState(TunnelState.Connected, $"Waiting for game to launch... Please open {waitingTarget}.");
+                    }
+                }
+                else if (runningProc is not null)
+                {
+                    OnGameStateChanged(true, runningProc);
+                }
+            }
+            else
+            {
+                StatusChanged?.Invoke(Snapshot());
+            }
         }
     }
 
@@ -1566,6 +1879,9 @@ internal sealed class TunnelEngine : IAsyncDisposable
         // reading the property twice inside the initializer could catch the probe going stale
         // between the two - a status that says "measured" over an estimated number.
         var direct = DirectGamePingMs;
+        var runningProc = FindRunningGameProcess();
+        var isRunning = _watcher?.IsGameRunning ?? (runningProc is not null);
+        var currentGameName = _game?.Name ?? (runningProc is not null ? FindGameForProcess(runningProc)?.Name : null);
 
         return new StatusMessage
         {
@@ -1602,8 +1918,10 @@ internal sealed class TunnelEngine : IAsyncDisposable
             GamePingDirect = direct is not null,
             GameRegionName = _path?.RegionName,
             LossRatio = _tunnel?.LossRatio,
-            GameRunning = _watcher?.IsGameRunning ?? false,
+            GameRunning = isRunning,
             GameName = _game?.Name,
+            AvailableGames = _profile?.Games.Select(g => new GameInfoItem { Id = g.Id, Name = g.Name }).ToList() ?? [],
+            SelectedGameId = _selectedGameId,
             ActiveRoutes = _routes?.ActiveRouteCount ?? 0,
             PacketsSent = _tunnel?.PacketsSent ?? 0,
             PacketsReceived = _tunnel?.PacketsReceived ?? 0,
@@ -1630,7 +1948,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             // which the UI reads as "never" - correct on a machine that has never signed in.
             ProfileUpdatedAt = File.Exists(SealedProfilePath)
                 ? new DateTimeOffset(File.GetLastWriteTimeUtc(SealedProfilePath)).ToUnixTimeSeconds()
-                : null,
+                : (_profile?.GeneratedUtc != default ? _profile?.GeneratedUtc.ToUnixTimeSeconds() : null),
         };
     }
 
@@ -1760,7 +2078,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
         var previousRelayId = _config.DefaultRelayId;
 
         _config.RelayEndpoints = cleaned;
-        _config.Psk = psk;
+        _config.Psk = psk ?? "";
         if (licenceUrl is not null) _config.LicenceUrl = licenceUrl;
 
         // Clear the preferred relay id along with it.
@@ -1810,9 +2128,21 @@ internal sealed class TunnelEngine : IAsyncDisposable
         StatusChanged?.Invoke(Snapshot());
     }
 
-    private GameEntry FindGame(string id) =>
-        _profile!.Games.FirstOrDefault(g => g.Id.Equals(id, StringComparison.OrdinalIgnoreCase))
-        ?? throw new InvalidOperationException($"The profile has no game with id '{id}'.");
+    private GameEntry FindGame(string? id)
+    {
+        if (_profile is null || _profile.Games.Count == 0)
+            throw new InvalidOperationException("The profile declares no games.");
+
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            throw new InvalidOperationException("No game selected. Please select a game before connecting.");
+        }
+
+        var found = _profile.Games.FirstOrDefault(g => g.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
+        if (found is not null) return found;
+
+        throw new InvalidOperationException($"Game '{id}' not found in profile.");
+    }
 
     private RelayEntry FindRelay(string? id)
     {

@@ -686,7 +686,8 @@ switch ($Verb.ToLowerInvariant()) {
         # commercial use. See installer/GamePingBooster.iss.
         $iscc = @(
             "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+            "$env:LocalAppData\Programs\Inno Setup 6\ISCC.exe"
         ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 
         if (-not $iscc) {
@@ -723,12 +724,16 @@ switch ($Verb.ToLowerInvariant()) {
             # and an installer that shipped without it produced an app that crashed on launch
             # with a TypeInitializationException naming neither the file nor the installer.
             'libSkiaSharp' = Join-Path $client 'src\GamePingBooster.App\bin\Release\net9.0-windows\win-x64\publish\libSkiaSharp.dll'
-            'the profile'  = Join-Path $root 'profiles\pubg-vn.json'
         }
         foreach ($what in $required.Keys) {
             if (-not (Test-Path $required[$what])) {
                 throw "Cannot package: $what is missing at $($required[$what])"
             }
+        }
+
+        $prodProfiles = @(Get-ChildItem (Join-Path $root 'profiles') -Filter "*.json" | Where-Object { $_.Name -notlike "*.example.json" })
+        if ($prodProfiles.Count -eq 0) {
+            throw "Cannot package: no production profiles found in profiles/ (excluding *.example.json)"
         }
 
         Say "Building the installer"

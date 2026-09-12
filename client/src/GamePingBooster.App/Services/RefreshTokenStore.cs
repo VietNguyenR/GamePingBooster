@@ -1,4 +1,6 @@
+using System.IO;
 using System.Security.Cryptography;
+using System.Text;
 
 namespace GamePingBooster.App.Services;
 
@@ -29,11 +31,11 @@ public static class RefreshTokenStore
     /// <summary>See DeviceIdentity.Entropy: a domain separator, not a secret.</summary>
     private static readonly byte[] Entropy = "GamePingBooster.RefreshToken.v1"u8.ToArray();
 
-    private static string Directory =>
+    private static string DirectoryPath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "GamePingBooster");
 
-    private static string FilePath => Path.Combine(Directory, FileName);
+    private static string FilePath => Path.Combine(DirectoryPath, FileName);
 
     public static string? Load()
     {
@@ -42,7 +44,7 @@ public static class RefreshTokenStore
             if (!File.Exists(FilePath)) return null;
             var blob = File.ReadAllBytes(FilePath);
             var raw = ProtectedData.Unprotect(blob, Entropy, DataProtectionScope.CurrentUser);
-            var text = System.Text.Encoding.UTF8.GetString(raw);
+            var text = Encoding.UTF8.GetString(raw);
             return string.IsNullOrWhiteSpace(text) ? null : text;
         }
         catch (Exception)
@@ -56,8 +58,8 @@ public static class RefreshTokenStore
     {
         try
         {
-            System.IO.Directory.CreateDirectory(Directory);
-            var blob = ProtectedData.Protect(System.Text.Encoding.UTF8.GetBytes(refreshToken),
+            Directory.CreateDirectory(DirectoryPath);
+            var blob = ProtectedData.Protect(Encoding.UTF8.GetBytes(refreshToken),
                 Entropy, DataProtectionScope.CurrentUser);
 
             // Temporary file then replace, for the same reason the service does it: a half

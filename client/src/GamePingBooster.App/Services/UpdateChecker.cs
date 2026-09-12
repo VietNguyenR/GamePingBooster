@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -172,8 +173,8 @@ public sealed class UpdateChecker : IAsyncDisposable
         var numbers = new int[3];
         for (var i = 0; i < 3; i++)
         {
-            if (!int.TryParse(parts[i], System.Globalization.NumberStyles.None,
-                    System.Globalization.CultureInfo.InvariantCulture, out numbers[i]))
+            if (!int.TryParse(parts[i], NumberStyles.None,
+                    CultureInfo.InvariantCulture, out numbers[i]))
             {
                 return false;
             }

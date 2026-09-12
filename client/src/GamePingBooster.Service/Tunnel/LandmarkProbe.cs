@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.NetworkInformation;
 using GamePingBooster.Core.Profiles;
@@ -7,11 +8,12 @@ namespace GamePingBooster.Service.Tunnel;
 /// <summary>
 /// Which datacentre the game is going to put this player in, measured rather than assumed.
 ///
-/// PUBG decides that for itself: before a match it probes one endpoint per Azure region on UDP
-/// 8081 and picks the nearest. Those endpoints are stable across sessions - unlike gameplay
-/// servers, which are allocated per match and never repeat - so they can be written into the
-/// profile as a <see cref="RegionEntry.Landmarks"/> list and used as a stand-in for the region
-/// itself. They sit in the region they represent and they answer ICMP, which is all this needs.
+/// Online games decide that for themselves: before a match PUBG probes one endpoint per Azure
+/// region on UDP 8081, Valve SDR checks regional coordinator clusters, and they pick the nearest.
+/// Those endpoints are stable across sessions - unlike gameplay servers, which are allocated per match
+/// and never repeat - so they can be written into the profile as a <see cref="RegionEntry.Landmarks"/> list
+/// and used as a stand-in for the region itself. They sit in the region they represent and they answer
+/// ICMP, which is all this needs.
 ///
 /// Two things are measured with them, and the difference matters:
 ///
@@ -29,39 +31,39 @@ namespace GamePingBooster.Service.Tunnel;
 internal static class LandmarkProbe
 {
     /// <summary>How long a landmark may take to answer before it is treated as unreachable.</summary>
-    private const int TimeoutMs = 1500;
+    private const int TimeoutMs = 800;
 
     /// <summary>
-    /// Probes taken per landmark. Three, and the best is kept: ICMP is answered on the control
-    /// plane of whatever is at the far end and a single sample picks up its scheduling jitter,
-    /// while the minimum of three is a stable estimate of the path itself.
+    /// Probes taken per landmark. Best of two is kept to balance accuracy and speed.
     /// </summary>
-    private const int Attempts = 3;
+    private const int Attempts = 2;
 
     internal sealed record Result(string RegionId, string RegionName, IPAddress Landmark, double RttMs);
 
     /// <summary>
-    /// Measures every region that declares a landmark, over the physical path, best first.
+    /// Measures every region that declares a landmark, over the physical path in parallel, best first.
     /// Regions that declare none, or whose landmarks all stay silent, are not in the list.
     /// </summary>
     public static async Task<IReadOnlyList<Result>> RankRegionsAsync(
         IEnumerable<RegionEntry> regions, Action<string> log, CancellationToken ct)
     {
-        var results = new List<Result>();
-        foreach (var region in regions)
-        {
-            ct.ThrowIfCancellationRequested();
+        var list = regions.ToList();
+        if (list.Count == 0) return [];
 
+        var results = new ConcurrentBag<Result>();
+
+        await Parallel.ForEachAsync(list, new ParallelOptions
+        {
+            MaxDegreeOfParallelism = 16,
+            CancellationToken = ct
+        }, async (region, token) =>
+        {
             Result? best = null;
             foreach (var text in region.Landmarks)
             {
-                if (!IPAddress.TryParse(text, out var address))
-                {
-                    log($"  Ignoring landmark '{text}' in region '{region.Id}': not an IP address.");
-                    continue;
-                }
+                if (!IPAddress.TryParse(text, out var address)) continue;
 
-                var rtt = await MeasureAsync(address, ct).ConfigureAwait(false);
+                var rtt = await MeasureAsync(address, token).ConfigureAwait(false);
                 if (rtt is null) continue;
                 if (best is null || rtt < best.RttMs)
                 {
@@ -69,11 +71,21 @@ internal static class LandmarkProbe
                 }
             }
 
-            if (best is not null) results.Add(best);
+            if (best is not null)
+            {
+                results.Add(best);
+            }
+        }).ConfigureAwait(false);
+
+        var sorted = results.ToList();
+        sorted.Sort((a, b) => a.RttMs.CompareTo(b.RttMs));
+
+        foreach (var r in sorted)
+        {
+            log($"Landmark {r.RegionName} ({r.RegionId}) probed at {r.RttMs:F0} ms");
         }
 
-        results.Sort((a, b) => a.RttMs.CompareTo(b.RttMs));
-        return results;
+        return sorted;
     }
 
     /// <summary>Best of <see cref="Attempts"/> echoes over the physical path, or null if silent.</summary>

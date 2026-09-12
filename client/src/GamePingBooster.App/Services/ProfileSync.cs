@@ -1,4 +1,5 @@
-﻿using GamePingBooster.Core.Ipc;
+using System.Net;
+using GamePingBooster.Core.Ipc;
 
 namespace GamePingBooster.App.Services;
 
@@ -137,7 +138,7 @@ public sealed class ProfileSync
             // Everything else IS worth showing. "No active subscription" is actionable, and the
             // tunnel quietly running on months-old ranges is exactly the sort of thing that goes
             // unnoticed.
-            if (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests) return;
+            if (ex.StatusCode == HttpStatusCode.TooManyRequests) return;
 
             _report($"Could not update the game list: {ex.Message}");
         }

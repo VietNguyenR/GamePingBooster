@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.IO;
 using System.Text;
 
 namespace GamePingBooster.Service;
@@ -41,12 +43,12 @@ internal sealed class FileLog : IDisposable
     private bool _disposed;
 
     /// <summary>Where the log is being written, for the startup banner. Null if unavailable.</summary>
-    public string? Path { get; }
+    public string? LogFilePath { get; }
 
     public FileLog(string? directory = null)
     {
-        _directory = directory ?? System.IO.Path.Combine(ServiceConfig.DefaultDirectory, "logs");
-        _currentPath = System.IO.Path.Combine(_directory, "gpb-service.log");
+        _directory = directory ?? Path.Combine(ServiceConfig.DefaultDirectory, "logs");
+        _currentPath = Path.Combine(_directory, "gpb-service.log");
 
         try
         {
@@ -57,12 +59,12 @@ internal sealed class FileLog : IDisposable
             {
                 probe.Flush();
             }
-            Path = _currentPath;
+            LogFilePath = _currentPath;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // No log file available. The service still runs; it simply has nothing to write to.
-            return;
+            // Logging is disabled. Calls to Log will drop harmlessly onto the floor.
+            Trace.WriteLine($"FileLog could not initialise {_currentPath}: {ex.Message}");
         }
 
         _writer = new Thread(WriterLoop)
@@ -147,16 +149,16 @@ internal sealed class FileLog : IDisposable
             var info = new FileInfo(_currentPath);
             if (!info.Exists || info.Length < MaxFileBytes) return;
 
-            var oldest = System.IO.Path.Combine(_directory, $"gpb-service.{KeepFiles}.log");
+            var oldest = Path.Combine(_directory, $"gpb-service.{KeepFiles}.log");
             if (File.Exists(oldest)) File.Delete(oldest);
 
             for (var i = KeepFiles - 1; i >= 1; i--)
             {
-                var from = System.IO.Path.Combine(_directory, $"gpb-service.{i}.log");
-                var to = System.IO.Path.Combine(_directory, $"gpb-service.{i + 1}.log");
+                var from = Path.Combine(_directory, $"gpb-service.{i}.log");
+                var to = Path.Combine(_directory, $"gpb-service.{i + 1}.log");
                 if (File.Exists(from)) File.Move(from, to, overwrite: true);
             }
-            File.Move(_currentPath, System.IO.Path.Combine(_directory, "gpb-service.1.log"), overwrite: true);
+            File.Move(_currentPath, Path.Combine(_directory, "gpb-service.1.log"), overwrite: true);
         }
         catch (IOException)
         {

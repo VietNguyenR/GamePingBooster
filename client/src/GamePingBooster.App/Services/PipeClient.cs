@@ -85,8 +85,7 @@ public sealed class PipeClient : IAsyncDisposable
 
     public async Task SendAsync(CommandMessage command)
     {
-        var writer = _writer;
-        if (writer is null) throw new InvalidOperationException("Not connected to the background service.");
+        var writer = _writer ?? throw new InvalidOperationException("Not connected to the background service.");
 
         var json = JsonSerializer.Serialize(command, IpcJsonContext.Default.CommandMessage);
         await writer.WriteLineAsync(json).ConfigureAwait(false);
@@ -94,6 +93,9 @@ public sealed class PipeClient : IAsyncDisposable
 
     public Task ConnectTunnelAsync(string? relayId = null, string? gameId = null)
         => SendAsync(new CommandMessage { Verb = "connect", RelayId = relayId, GameId = gameId });
+
+    public Task SelectGameAsync(string gameId)
+        => SendAsync(new CommandMessage { Verb = "select-game", GameId = gameId });
 
     public Task DisconnectTunnelAsync() => SendAsync(new CommandMessage { Verb = "disconnect" });
 

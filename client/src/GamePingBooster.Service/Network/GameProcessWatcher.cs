@@ -10,13 +10,20 @@ namespace GamePingBooster.Service.Network;
 /// anything. That is a hard constraint of this project and the reason BattlEye has nothing to
 /// object to.
 ///
-/// Why watch at all: PUBG's IP ranges live on AWS/Azure alongside thousands of other services.
-/// Leaving the routes in place permanently would drag unrelated traffic through the relay.
+/// Why watch at all: Game server IP ranges (e.g. PUBG on AWS/Azure, Valve SDR relays) live
+/// alongside thousands of other services. Leaving the routes in place permanently would drag
+/// unrelated traffic through the relay.
 /// </summary>
-internal sealed class GameProcessWatcher : IDisposable
+internal sealed class GameProcessWatcher(IEnumerable<string> processNames, TimeSpan? interval = null) : IDisposable
 {
-    private readonly string[] _processNames;
-    private readonly TimeSpan _interval;
+    private readonly string[] _processNames =
+    [
+        .. processNames
+            .Select(n => n.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? n[..^4] : n)
+            .Where(n => n.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+    ];
+    private readonly TimeSpan _interval = interval ?? TimeSpan.FromSeconds(2);
     private readonly CancellationTokenSource _cts = new();
     private Task? _loop;
 
@@ -25,17 +32,6 @@ internal sealed class GameProcessWatcher : IDisposable
 
     public bool IsGameRunning { get; private set; }
     public string? RunningProcessName { get; private set; }
-
-    public GameProcessWatcher(IEnumerable<string> processNames, TimeSpan? interval = null)
-    {
-        // Process.GetProcessesByName expects names WITHOUT the .exe suffix.
-        _processNames = processNames
-            .Select(n => n.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? n[..^4] : n)
-            .Where(n => n.Length > 0)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        _interval = interval ?? TimeSpan.FromSeconds(2);
-    }
 
     public void Start()
     {
@@ -51,7 +47,7 @@ internal sealed class GameProcessWatcher : IDisposable
             {
                 var found = FindRunningGame();
                 var running = found is not null;
-                if (running != IsGameRunning)
+                if (running != IsGameRunning || (running && !string.Equals(found, RunningProcessName, StringComparison.OrdinalIgnoreCase)))
                 {
                     IsGameRunning = running;
                     RunningProcessName = found;

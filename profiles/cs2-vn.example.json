@@ -1,0 +1,61 @@
+﻿{
+  "schemaVersion":  1,
+  "generatedUtc":  "2026-09-12T12:13:47Z",
+  "note":  "CS2 COMPLETE server IPs - all 4 Valve SDR POPs from Steam API (https://api.steampowered.com/ISteamApps/GetSDRConfig/v1/?appid=730). Generated 2026-09-12.",
+  "games":  [
+    {
+      "id":  "cs2",
+      "name":  "Counter-Strike 2",
+      "processNames":  [
+        "cs2.exe"
+      ],
+      "lobbyAddresses":  [],
+      "regions":  [
+        {
+          "id":  "cs2-sgp",
+          "name":  "Singapore",
+          "source":  "steam-sdr:sgp",
+          "note":  "Valve SDR SGP relay cluster.",
+          "cidrs":  [
+            "103.10.124.0/24"
+          ]
+        },
+        {
+          "id":  "cs2-hkg",
+          "name":  "Hong Kong",
+          "source":  "steam-sdr:hkg",
+          "note":  "Valve SDR HKG relay cluster.",
+          "cidrs":  [
+            "103.28.54.0/24"
+          ]
+        },
+        {
+          "id":  "cs2-tyo",
+          "name":  "Tokyo Koto City (Japan)",
+          "source":  "steam-sdr:tyo",
+          "note":  "Valve SDR TYO relay cluster.",
+          "cidrs":  [
+            "45.121.184.0/24"
+          ]
+        },
+        {
+          "id":  "cs2-seo",
+          "name":  "Seoul (South Korea)",
+          "source":  "steam-sdr:seo",
+          "note":  "Valve SDR SEO relay cluster.",
+          "cidrs":  [
+            "146.66.152.0/24"
+          ]
+        }
+      ]
+    }
+  ],
+  "relays":  [
+    {
+      "id":  "relay-1",
+      "name":  "Your relay",
+      "location":  "Singapore",
+      "endpoint":  "203.0.113.10:51820"
+    }
+  ]
+}

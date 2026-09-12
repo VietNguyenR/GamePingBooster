@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 
 namespace GamePingBooster.Core.Native;
@@ -68,7 +69,7 @@ public static class IpHelperInterop
     /// </summary>
     public static uint? BestInterfaceFor(IPAddress destination)
     {
-        if (destination.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) return null;
+        if (destination.AddressFamily != AddressFamily.InterNetwork) return null;
 
         var bytes = destination.GetAddressBytes();
         var address = new SockAddrIn

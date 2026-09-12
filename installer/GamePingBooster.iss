@@ -102,10 +102,9 @@ Source: "{#AppPublish}\*";     DestDir: "{app}"; Excludes: "*.pdb,*.zip"; Flags:
 ; downloaded into the tree by hand.
 Source: "{#Root}\client\native\wintun\wintun.dll"; DestDir: "{app}"; Flags: ignoreversion
 
-; The profile is content: the game's address ranges. It is read relative to the install
-; directory, which is why ServiceConfig's profilePath default is a relative path and why nothing
-; here writes an absolute one - an absolute path only works on the machine it was written on.
-Source: "{#Root}\profiles\pubg-vn.json"; DestDir: "{app}\profiles"; Flags: ignoreversion
+; The profiles are content: the game address ranges. It is read relative to the install
+; directory. Automatically include all production profiles, excluding example/template files.
+Source: "{#Root}\profiles\*.json"; DestDir: "{app}\profiles"; Excludes: "*.example.json"; Flags: ignoreversion
 
 [Dirs]
 ; The service writes its configuration and logs here, as LocalSystem. Nothing is placed in it at

@@ -1,7 +1,9 @@
 # Game Ping Booster
 
-Latency reducer for PUBG on Windows, aimed at players in Vietnam. Gameplay traffic is diverted
-through a VPS abroad whose route to the game servers beats the one the local ISP picks by default.
+Low-latency network optimizer for Counter-Strike 2 (CS2) and PUBG on Windows, aimed at players in Vietnam and Southeast Asia. Gameplay traffic is diverted
+through a high-speed VPS abroad whose route to the game servers beats the one the local ISP picks by default.
+
+Supports game selection via the UI (Counter-Strike 2, PUBG: BATTLEGROUNDS) with bilingual localization (English & Vietnamese).
 
 No injection, no reading game memory, no DLL hooks. The whole mechanism is a virtual network
 adapter plus entries in the Windows routing table: destinations belonging to the game go through
@@ -33,19 +35,21 @@ Routing works on destination addresses, so the profile has to say which addresse
 game - and it has to be narrow. AWS and Azure publish the enclosing blocks as `/17`s and `/18`s;
 routing one of those would drag thousands of unrelated services through the relay.
 
-`tools/profile-builder/` solves that in two commands:
+`tools/profile-builder/` provides builders for both games:
 
 ```powershell
 cd tools\profile-builder
+
+# For CS2: fetch live Valve SDR POPs directly from the Steam API:
+.\Build-Cs2Profile.ps1
+
+# For PUBG: capture and build from observed sessions:
 .\Capture-GameTraffic.ps1     # leave running, play, Ctrl+C when done
 .\Build-PubgProfile.ps1       # no arguments
 ```
 
-The first watches for the game process, captures while it runs, attributes traffic to the process
-by joining captured source ports against the Windows UDP socket table, and appends the servers it
-saw. The second cross-checks every address against the official AWS and Azure range files, keeps
-each one narrow, sorts it into the right region, writes `profiles/pubg-vn.json` and validates the
-result.
+For CS2, all 41+ Valve Steam Datagram Relay (SDR) clusters are fetched directly from the official Steam Web API and mapped to dedicated /24 subnets.
+For PUBG, the tool watches the game process, attributes traffic from the socket table, cross-checks against Azure/AWS ranges, and writes `profiles/pubg-vn.json`.
 
 Addresses that belong to no published cloud range are never added automatically; they are set
 aside for review. In practice they turn out to be voice chat or a CDN.

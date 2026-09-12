@@ -1,4 +1,4 @@
-﻿using System.IO.Pipes;
+using System.IO.Pipes;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
@@ -152,6 +152,11 @@ internal sealed class PipeServer
                 break;
 
             case "status":
+                await PushAsync(_engine.Snapshot()).ConfigureAwait(false);
+                break;
+
+            case "select-game":
+                _engine.SetSelectedGame(cmd.GameId);
                 await PushAsync(_engine.Snapshot()).ConfigureAwait(false);
                 break;
 

@@ -1,9 +1,11 @@
-﻿using System.Net.Http;
+using System.Net;
+using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
+using System.Threading;
 using GamePingBooster.Core.Protocol;
 
 namespace GamePingBooster.App.Services;
@@ -64,7 +66,7 @@ public sealed class LicenceClient : IDisposable
             BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/"),
             // Off. Each call sets its own deadline in WithDeadline, because one number for every
             // call is wrong for the exchange - see ExchangeTimeout.
-            Timeout = System.Threading.Timeout.InfiniteTimeSpan,
+            Timeout = Timeout.InfiniteTimeSpan,
         };
     }
 
@@ -254,9 +256,9 @@ public sealed class LicenceClient : IDisposable
 
             throw await ErrorAsync(response, t, new()
             {
-                [System.Net.HttpStatusCode.Unauthorized] = "Sign in again to update the game list.",
-                [System.Net.HttpStatusCode.PaymentRequired] = "This account has no active subscription.",
-                [System.Net.HttpStatusCode.TooManyRequests] = "Asked for the game list too often. It will update later.",
+                [HttpStatusCode.Unauthorized] = "Sign in again to update the game list.",
+                [HttpStatusCode.PaymentRequired] = "This account has no active subscription.",
+                [HttpStatusCode.TooManyRequests] = "Asked for the game list too often. It will update later.",
             }).ConfigureAwait(false);
         });
 
@@ -278,18 +280,15 @@ public sealed class LicenceClient : IDisposable
 
             throw await ErrorAsync(response, t, new()
             {
-                [System.Net.HttpStatusCode.Unauthorized] = "This sign-in has expired. Sign in again.",
+                [HttpStatusCode.Unauthorized] = "This sign-in has expired. Sign in again.",
             }).ConfigureAwait(false);
         });
 
     /// <summary>
-    /// Ends the sign-in on the server.
-    ///
-    /// Best effort: signing out locally must succeed whether or not this does, because a person
-    /// who wants their credentials off a machine should not be blocked by a network that is
-    /// down. The credential is short-lived and revoking it is hygiene, not the mechanism.
+    /// Ends this device's sign-in on the licence server. Fire-and-forget: we discard the token
+    /// locally regardless, and an unreached server will let the token expire on its own.
     /// </summary>
-    public Task LogoutAsync(string refreshToken, CancellationToken ct) =>
+    public Task<bool> LogoutAsync(string refreshToken, CancellationToken ct) =>
         WithDeadline(RequestTimeout, ct, async t =>
         {
             using var request = new HttpRequestMessage(HttpMethod.Post, "auth/logout");
@@ -299,7 +298,7 @@ public sealed class LicenceClient : IDisposable
         });
 
     private static async Task<LicenceException> ErrorAsync(HttpResponseMessage response,
-        CancellationToken ct, Dictionary<System.Net.HttpStatusCode, string> known)
+        CancellationToken ct, Dictionary<HttpStatusCode, string> known)
     {
         string? serverMessage = null;
         try
@@ -356,9 +355,9 @@ public sealed class LicenceClient : IDisposable
         {
             // No password is ever sent from here, so a 401 can only mean the sign-in itself is no
             // longer accepted - an expired or revoked refresh token, or a one-time code already spent.
-            System.Net.HttpStatusCode.Unauthorized => "That sign-in is no longer valid. Sign in again.",
-            System.Net.HttpStatusCode.Forbidden => "This account is not allowed to add another device.",
-            System.Net.HttpStatusCode.NotFound => "The licence server does not recognise this request. Check the address in settings.",
+            HttpStatusCode.Unauthorized => "That sign-in is no longer valid. Sign in again.",
+            HttpStatusCode.Forbidden => "This account is not allowed to add another device.",
+            HttpStatusCode.NotFound => "The licence server does not recognise this request. Check the address in settings.",
             _ => $"The licence server answered {(int)response.StatusCode}.",
         }, response.StatusCode);
     }
@@ -372,11 +371,11 @@ public sealed class LicenceClient : IDisposable
 /// retrying, and "this account has no subscription", which is not and which should drop the
 /// licence rather than keep presenting it. Every other caller still reads only Message.
 /// </summary>
-public sealed class LicenceException(string message, System.Net.HttpStatusCode? status = null)
+public sealed class LicenceException(string message, HttpStatusCode? status = null)
     : Exception(message)
 {
     /// <summary>The HTTP status behind it, or null when the request never got an answer.</summary>
-    public System.Net.HttpStatusCode? StatusCode { get; } = status;
+    public HttpStatusCode? StatusCode { get; } = status;
 }
 
 /// <summary>

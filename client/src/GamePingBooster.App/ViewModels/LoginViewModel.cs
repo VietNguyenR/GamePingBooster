@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using GamePingBooster.App.Services;
 
@@ -194,6 +194,9 @@ public sealed class LoginViewModel : INotifyPropertyChanged
         {
             // force: true, so the age of whatever profile is already stored is irrelevant and
             // there is nothing to pass for it.
+            await _profileSync
+                .SyncAsync(_licenceUrl, _devicePublicKey, "cs2", force: true, profileUpdatedAt: null, ct: ct)
+                .ConfigureAwait(true);
             await _profileSync
                 .SyncAsync(_licenceUrl, _devicePublicKey, "pubg", force: true, profileUpdatedAt: null, ct: ct)
                 .ConfigureAwait(true);

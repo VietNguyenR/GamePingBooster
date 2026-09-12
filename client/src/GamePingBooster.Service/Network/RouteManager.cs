@@ -56,7 +56,7 @@ internal sealed class RouteManager
     /// Assigns the inner IP and MTU to the virtual adapter. Call this after the relay has
     /// handed out an address during the handshake.
     /// </summary>
-    public void ConfigureAdapter(uint tunInterfaceIndex, IPAddress innerIp, int prefixLength, int mtu)
+    public static void ConfigureAdapter(uint tunInterfaceIndex, IPAddress innerIp, int prefixLength, int mtu)
     {
         var mask = PrefixLengthToMask(prefixLength);
 
@@ -179,15 +179,15 @@ internal sealed class RouteManager
         // Same reasoning as PinRelayRoute: clear any leftover entry first so `add` cannot fail
         // on a duplicate. Two netsh invocations for the whole batch, not two per route.
         RunNetshScript(
-            fresh.Select(cidr =>
-                $"interface ipv4 delete route prefix={cidr} interface={tunInterfaceIndex} store=active").ToList(),
+            [.. fresh.Select(cidr =>
+                $"interface ipv4 delete route prefix={cidr} interface={tunInterfaceIndex} store=active")],
             ignoreErrors: true);
 
         // Record them before the adds run, not after: if one fails partway some routes are
         // already in the table, and teardown must still know to remove them.
         _installedPrefixes.AddRange(fresh);
 
-        // One process per route so each exit code is attributable. A real PUBG profile is a few
+        // One process per route so each exit code is attributable. A game profile is typically a few
         // dozen prefixes, so this costs a second or two - once, when the game starts. Worth it:
         // a route that silently fails to install looks exactly like a relay that is down.
         foreach (var cidr in fresh)
@@ -202,9 +202,8 @@ internal sealed class RouteManager
         if (_installedPrefixes.Count == 0) return;
 
         var commands = _installedPrefixes
-            .Select(cidr => $"interface ipv4 delete route prefix={cidr} interface={tunInterfaceIndex} store=active")
-            .ToList();
-        RunNetshScript(commands, ignoreErrors: true);
+            .Select(cidr => $"interface ipv4 delete route prefix={cidr} interface={tunInterfaceIndex} store=active");
+        RunNetshScript([.. commands], ignoreErrors: true);
         _installedPrefixes.Clear();
     }
 
@@ -239,8 +238,8 @@ internal sealed class RouteManager
         if (fresh.Count == 0) return;
 
         RunNetshScript(
-            fresh.Select(prefix =>
-                $"interface ipv4 delete route prefix={prefix} interface={tunInterfaceIndex} store=active").ToList(),
+            [.. fresh.Select(prefix =>
+                $"interface ipv4 delete route prefix={prefix} interface={tunInterfaceIndex} store=active")],
             ignoreErrors: true);
 
         _lobbyPrefixes.AddRange(fresh);
@@ -400,7 +399,7 @@ internal sealed class RouteManager
     /// an earlier failure is invisible here. Only use this where failures are expected and
     /// ignored, or where a separate read-back confirms the result.
     /// </summary>
-    private static void RunNetshScript(IReadOnlyCollection<string> commands, bool ignoreErrors = false)
+    private static void RunNetshScript(List<string> commands, bool ignoreErrors = false)
     {
         if (commands.Count == 0) return;
 
@@ -420,7 +419,7 @@ internal sealed class RouteManager
     }
 
     private static void RunNetshCore(
-        string fileName, string arguments, IReadOnlyCollection<string> commands, bool ignoreErrors)
+        string fileName, string arguments, List<string> commands, bool ignoreErrors)
     {
         using var proc = Process.Start(new ProcessStartInfo
         {

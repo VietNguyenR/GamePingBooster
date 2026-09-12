@@ -1,8 +1,9 @@
-﻿using System.Buffers.Binary;
+using System.Buffers.Binary;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using GamePingBooster.Core.Profiles;
 using GamePingBooster.Core.Protocol;
 
 namespace GamePingBooster.ProtocolCheck;
@@ -116,16 +117,25 @@ internal static class Program
             {"schemaVersion":1,"games":[{"id":"pubg","name":"PUBG","processNames":["TslGame"],"regions":[]}],"relays":[]}
             """;
 
-        var parsed = System.Text.Json.JsonSerializer.Deserialize(withField,
-            GamePingBooster.Core.Profiles.ProfileJsonContext.Default.ProfileBundle)!;
+        var parsed = JsonSerializer.Deserialize(withField,
+            ProfileJsonContext.Default.ProfileBundle)!;
         Check("profile: lobbyAddresses is read under that exact name",
             parsed.Games[0].LobbyAddresses.Count == 2,
             $"got {parsed.Games[0].LobbyAddresses.Count} address(es) - the JSON name and GameEntry disagree");
 
-        var old = System.Text.Json.JsonSerializer.Deserialize(withoutField,
-            GamePingBooster.Core.Profiles.ProfileJsonContext.Default.ProfileBundle)!;
+        var old = JsonSerializer.Deserialize(withoutField,
+            ProfileJsonContext.Default.ProfileBundle)!;
         Check("profile: a profile without lobbyAddresses gives an empty list, not null",
             old.Games[0].LobbyAddresses is { Count: 0 }, "the licence server does not send the field yet");
+
+        const string cs2Sample = """
+            {"schemaVersion":1,"games":[{"id":"cs2","name":"Counter-Strike 2","processNames":["cs2.exe"],"regions":[]}],"relays":[]}
+            """;
+        var cs2Parsed = JsonSerializer.Deserialize(cs2Sample,
+            ProfileJsonContext.Default.ProfileBundle)!;
+        Check("profile: CS2 game profile parses with processNames",
+            cs2Parsed.Games.Count == 1 && cs2Parsed.Games[0].Id == "cs2" && cs2Parsed.Games[0].ProcessNames.Contains("cs2.exe"),
+            "CS2 profile schema parsing failed");
 
         var relays = new[] { "203.0.113.10:51820" };
         var landmarks = new[] { "20.43.187.66" };
@@ -273,7 +283,7 @@ internal static class Program
             pkt.Length == GpbProtocol.HandshakeRespV2Len,
             $"got {pkt.Length}, want {GpbProtocol.HandshakeRespV2Len}");
 
-        if (!GpbProtocol.TryParseHandshakeResp(psk, pkt, ReadOnlySpan<byte>.Empty, out var result))
+        if (!GpbProtocol.TryParseHandshakeResp(psk, pkt, [], out var result))
         {
             Fail("version-mismatch answer", "the client cannot parse it, so it would report a timeout instead");
             return;
@@ -509,7 +519,7 @@ internal static class Program
     private const int ReqTokenSigOffset = ReqTokenOffset + GpbProtocol.TokenLen;
 
     private static ulong ReadUInt64BE(ReadOnlySpan<byte> b, int offset) =>
-        System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(b.Slice(offset, 8));
+        BinaryPrimitives.ReadUInt64BigEndian(b.Slice(offset, 8));
 
     /// <summary>
     /// Emits a token-mode HandshakeReq for the Go side to verify.

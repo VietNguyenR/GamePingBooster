@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace GamePingBooster.Service;
@@ -13,8 +13,11 @@ public sealed class ServiceConfig
     /// <summary>URL to fetch the profile (game IP ranges plus relay list). Empty = local file only.</summary>
     [JsonPropertyName("profileUrl")] public string? ProfileUrl { get; set; }
 
-    /// <summary>Path to the local profile file, used offline or when the fetch fails.</summary>
-    [JsonPropertyName("profilePath")] public string ProfilePath { get; set; } = "profiles/pubg-vn.json";
+    /// <summary>Path to the local profile file or directory containing profiles, used offline or when the fetch fails.</summary>
+    [JsonPropertyName("profilePath")] public string ProfilePath { get; set; } = "profiles";
+
+    /// <summary>Optional list of profile file paths to load and merge.</summary>
+    [JsonPropertyName("profilePaths")] public List<string> ProfilePaths { get; set; } = [];
 
     /// <summary>Pre-shared key; must match /etc/gpb/psk on the relay.</summary>
     [JsonPropertyName("psk")] public string Psk { get; set; } = "";
@@ -60,8 +63,8 @@ public sealed class ServiceConfig
     [JsonIgnore]
     public bool HasKey => !string.IsNullOrWhiteSpace(Psk);
 
-    /// <summary>Default game id.</summary>
-    [JsonPropertyName("defaultGameId")] public string DefaultGameId { get; set; } = "pubg";
+    /// <summary>Optional default game id.</summary>
+    [JsonPropertyName("defaultGameId")] public string? DefaultGameId { get; set; }
 
     /// <summary>Virtual adapter name as shown in Network Connections.</summary>
     [JsonPropertyName("adapterName")] public string AdapterName { get; set; } = "Game Ping Booster";

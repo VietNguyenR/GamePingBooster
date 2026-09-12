@@ -4,8 +4,8 @@ namespace GamePingBooster.Core.Profiles;
 
 /// <summary>
 /// The profile is the data that decides which IP ranges get routed, for which game, through
-/// which relay. It is fetched from a server (profiles/pubg-vn.json) rather than hard-coded, so
-/// when PUBG changes IP ranges only a JSON file needs updating - no new client release.
+/// which relay. It is fetched from a server or loaded locally (profiles/*.json) rather than hard-coded, so
+/// when games change IP ranges only a JSON file needs updating - no new client release.
 /// </summary>
 public sealed class ProfileBundle
 {
@@ -24,8 +24,8 @@ public sealed class GameEntry
     [JsonPropertyName("name")] public string Name { get; set; } = "";
 
     /// <summary>
-    /// Process names used to detect that the game is running. For PUBG that is TslGame.exe
-    /// (the actual game process) plus PUBG.exe / TslGame_BE.exe (launcher, BattlEye shim).
+    /// Process names used to detect that the game is running. Examples: cs2.exe for CS2;
+    /// TslGame.exe plus PUBG.exe / TslGame_BE.exe for PUBG.
     /// This only enumerates processes the way Task Manager does - it never opens the game,
     /// reads its memory, or touches its files.
     /// </summary>
@@ -49,8 +49,7 @@ public sealed class GameEntry
     ///
     /// Single addresses only, as "a.b.c.d" or "a.b.c.d/32". Anything wider is refused by
     /// <see cref="LobbyRoutes"/>, because these stay routed while the game is closed and a range
-    /// would pull other programs' traffic through the relay all day. For PUBG these are the static
-    /// anycast pair of its AWS Global Accelerator, which belong to that accelerator alone.
+    /// would pull other programs' traffic through the relay all day.
     ///
     /// Absent from a profile means no lobby routes, and an older client simply ignores the field.
     /// The licence server does not send it yet: its profile is assembled from the database, not
@@ -66,18 +65,17 @@ public sealed class RegionEntry
 
     /// <summary>
     /// Destination ranges routed through the tunnel, in CIDR form. This list must stay NARROW -
-    /// see docs/pubg-ip-ranges.md: routing all of AWS ap-southeast-1 would drag thousands of
-    /// unrelated services through the relay.
+    /// routing entire cloud provider regions would drag thousands of unrelated services through the relay.
     /// </summary>
     [JsonPropertyName("cidrs")] public List<string> Cidrs { get; set; } = [];
 
     /// <summary>
     /// Stable addresses that stand in for this region when its latency has to be measured.
     ///
-    /// For PUBG these are the endpoints the game itself probes on UDP 8081 to choose a
-    /// datacentre. They are the right stand-in for three reasons:
-    /// they are inside the region, they recur across sessions (gameplay servers do not), and
-    /// they answer ICMP, so measuring them needs no cooperation from anyone.
+    /// These are endpoints the game or coordinator probes to choose a datacentre.
+    /// They are the right stand-in for three reasons: they are inside the region, they recur
+    /// across sessions (gameplay servers do not), and they answer ICMP, so measuring them
+    /// needs no cooperation from anyone.
     ///
     /// Deliberately NOT covered by <see cref="Cidrs"/>. A landmark that went through the tunnel
     /// would make the game measure some regions through the relay and the rest over the player's

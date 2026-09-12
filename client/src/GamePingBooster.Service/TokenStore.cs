@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.IO;
 using System.Security.Cryptography;
 using GamePingBooster.Core.Protocol;
 
@@ -30,12 +31,12 @@ internal static class TokenStore
     /// <summary>See the note on DeviceIdentity.Entropy: a domain separator, not a secret.</summary>
     private static readonly byte[] Entropy = "GamePingBooster.LicenceToken.v1"u8.ToArray();
 
-    private static string Path => System.IO.Path.Combine(ServiceConfig.DefaultDirectory, FileName);
+    private static string FilePath => Path.Combine(ServiceConfig.DefaultDirectory, FileName);
 
     /// <summary>The stored token, or null when there is none or it could not be read.</summary>
     public static byte[]? Load(Action<string> log)
     {
-        var path = Path;
+        var path = FilePath;
         if (!File.Exists(path)) return null;
 
         try
@@ -79,9 +80,9 @@ internal static class TokenStore
 
             // Temporary file then replace, as everything else here does: a half-written token is
             // a client that cannot connect until it signs in again.
-            var tmp = Path + ".tmp";
+            var tmp = FilePath + ".tmp";
             File.WriteAllBytes(tmp, blob);
-            File.Move(tmp, Path, overwrite: true);
+            File.Move(tmp, FilePath, overwrite: true);
             return true;
         }
         catch (Exception ex)
@@ -95,7 +96,7 @@ internal static class TokenStore
     {
         try
         {
-            if (File.Exists(Path)) File.Delete(Path);
+            if (File.Exists(FilePath)) File.Delete(FilePath);
         }
         catch (Exception ex)
         {
