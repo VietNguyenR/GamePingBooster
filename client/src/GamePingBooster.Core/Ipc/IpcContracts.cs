@@ -130,8 +130,26 @@ public sealed class StatusMessage
     /// <summary>
     /// The configured relay endpoints, so the settings screen can show what is set without the
     /// UI needing to read a file it has no permission to read. The key is never included.
+    ///
+    /// SELF-HOSTED ONLY: these are the addresses somebody typed into Settings. A licensed
+    /// installation takes its relays from the pushed profile instead and leaves this EMPTY, so it
+    /// is the wrong field to ask "which relay are we on" - see <see cref="RelayAddress"/>, which
+    /// exists because reading this one for that gave an empty answer on every paying customer.
     /// </summary>
     [JsonPropertyName("relayEndpoints")] public List<string> RelayEndpoints { get; set; } = [];
+
+    /// <summary>
+    /// host:port of the relay this session is actually on, or null when not connected.
+    ///
+    /// The profile is sealed to the service and the UI cannot open it, so without this the UI can
+    /// name the relay it is using but cannot address it - which is what left the lag report with
+    /// no traceroute and three empty rungs.
+    ///
+    /// Not a secret being given away: this machine is sending packets to that address right now
+    /// and The requested operation requires elevation. prints it. What the sealed profile protects is the captured IP RANGES,
+    /// and those stay where they are.
+    /// </summary>
+    [JsonPropertyName("relayAddress")] public string? RelayAddress { get; set; }
 
     /// <summary>False until a relay and a key have been configured. Drives the first-run prompt.</summary>
     [JsonPropertyName("configured")] public bool Configured { get; set; }
@@ -214,6 +232,17 @@ public sealed class StatusMessage
     /// is worth looking there at all.
     /// </summary>
     [JsonPropertyName("packetsDropped")] public long PacketsDropped { get; set; }
+
+    /// <summary>
+    /// Drops that mean something is WRONG - the total above minus the link-local chatter Windows
+    /// pushes into every adapter and the uplink filter correctly throws away.
+    ///
+    /// Two counters rather than one because they answer different questions and only this one may
+    /// be alarmed on. The total is a diagnostic figure and is dominated by noise on a perfectly
+    /// healthy machine; anything that says "packets are being lost inside this PC" has to read
+    /// this instead, or it says so about everybody.
+    /// </summary>
+    [JsonPropertyName("packetsDroppedFaults")] public long PacketsDroppedFaults { get; set; }
 
     /// <summary>
     /// This machine's device public key, 65 bytes as lowercase hex, or null on a service too old

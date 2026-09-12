@@ -83,6 +83,7 @@
                       IsVisible="{Binding ShowLicence}" />
             <MenuItem Header="Settings" Click="OnSettingsClick" />
             <Separator Background="#242424" />
+            <MenuItem Header="Report lag" Click="OnReportLagClick" />
             <MenuItem Header="Open logs folder" Click="OnLogsClick" />
             <MenuItem Header="About" Click="OnAboutClick" />
             <!-- Only there when UpdateChecker has found a newer release. -->

@@ -107,6 +107,34 @@ public sealed class LicenceClient : IDisposable
         return TimeSpan.Zero;
     }
 
+    /// <summary>
+    /// Uploads one lag report.
+    ///
+    /// Called only from the consent dialog, never on a timer - there is no background telemetry
+    /// in this app and this method must not become the start of one. See ReportLagWindow.
+    /// </summary>
+    public Task<DiagnosticResult> SendDiagnosticAsync(string refreshToken,
+        LagDiagnostics.Report report, string? comment, string? devicePublicKey, CancellationToken ct) =>
+        WithDeadline(RequestTimeout, ct, async t =>
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, "diagnostics")
+            {
+                Content = JsonContent.Create(new DiagnosticRequest
+                {
+                    Report = report,
+                    Verdict = report.Verdict,
+                    RelayCode = report.RelayName,
+                    Comment = comment,
+                    AppVersion = UpdateChecker.CurrentVersion(),
+                    DevicePublicKey = devicePublicKey,
+                }, LicenceJsonContext.Default.DiagnosticRequest),
+            };
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshToken);
+
+            using var response = await _http.SendAsync(request, t).ConfigureAwait(false);
+            return await ReadAsync(response, LicenceJsonContext.Default.DiagnosticResult, t).ConfigureAwait(false);
+        });
+
     public void Dispose() => _http.Dispose();
 
     /// <summary>
@@ -437,6 +465,25 @@ public sealed class ErrorResponse
     [JsonPropertyName("error")] public string? Error { get; set; }
 }
 
+/// <summary>
+/// One lag report on its way up. Everything but <c>Report</c> is a copy of something inside it,
+/// lifted out so the server can index and group without reading the JSON column.
+/// </summary>
+public sealed class DiagnosticRequest
+{
+    [JsonPropertyName("report")] public LagDiagnostics.Report? Report { get; set; }
+    [JsonPropertyName("verdict")] public string Verdict { get; set; } = "";
+    [JsonPropertyName("relayCode")] public string? RelayCode { get; set; }
+    [JsonPropertyName("comment")] public string? Comment { get; set; }
+    [JsonPropertyName("appVersion")] public string? AppVersion { get; set; }
+    [JsonPropertyName("devicePublicKey")] public string? DevicePublicKey { get; set; }
+}
+
+public sealed class DiagnosticResult
+{
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
+}
+
 /// <summary>Source-generated JSON: the App is published with Native AOT, like the service.</summary>
 [JsonSourceGenerationOptions(DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(ExchangeRequest))]
@@ -446,4 +493,6 @@ public sealed class ErrorResponse
 [JsonSerializable(typeof(SealedProfileResult))]
 [JsonSerializable(typeof(AccountResult))]
 [JsonSerializable(typeof(ErrorResponse))]
+[JsonSerializable(typeof(DiagnosticRequest))]
+[JsonSerializable(typeof(DiagnosticResult))]
 public partial class LicenceJsonContext : JsonSerializerContext;

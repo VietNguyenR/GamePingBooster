@@ -1,0 +1,123 @@
+<views:SurfaceWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="using:GamePingBooster.App.Views"
+        x:Class="GamePingBooster.App.Views.ReportLagWindow"
+        Title="Report lag"
+        Width="520" SizeToContent="Height"
+        MinWidth="520"
+        WindowStartupLocation="CenterOwner"
+        CanResize="False">
+
+  <views:SurfaceWindow.Styles>
+    <Style Selector="TextBlock.label">
+      <Setter Property="Foreground" Value="#94A3B8" />
+      <Setter Property="FontSize" Value="11" />
+    </Style>
+    <Style Selector="TextBlock.body">
+      <Setter Property="Foreground" Value="#CBD5E1" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style Selector="TextBlock.item">
+      <Setter Property="Foreground" Value="#CBD5E1" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style Selector="Button">
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="16,8" />
+    </Style>
+  </views:SurfaceWindow.Styles>
+
+  <Grid RowDefinitions="Auto,Auto">
+
+    <Border Grid.Row="0" Height="34" Background="Transparent"
+            PointerPressed="OnTitleBarPressed" />
+
+    <StackPanel Grid.Row="1" Margin="24,4,24,24" Spacing="16">
+
+      <StackPanel Spacing="4">
+        <TextBlock Text="Report lag" Foreground="#F8FAFC" FontSize="18" FontWeight="Bold" />
+        <TextBlock Classes="label"
+                   Text="Run this WHILE the problem is happening. It has nothing to look at afterwards." />
+      </StackPanel>
+
+      <!-- ============================================================ consent -->
+      <StackPanel Name="ConsentPanel" Spacing="14">
+
+        <TextBlock Classes="body"
+                   Text="This measures every part of the connection at the same moment, then sends the result to support so the fault can be located. It takes about 20 seconds." />
+
+        <Border Background="#1E293B" CornerRadius="8" Padding="14">
+          <StackPanel Spacing="8">
+            <TextBlock Classes="label" Text="WHAT IS MEASURED AND SENT" />
+            <TextBlock Classes="item" Text="• Response time, jitter and packet loss to your home router, your internet provider's network, and the relay." />
+            <TextBlock Classes="item" Text="• The network path to the relay, which includes your router's local address and your provider's router addresses." />
+            <TextBlock Classes="item" Text="• Your public IP address, the relay in use, the app version, and whether the game is running." />
+            <TextBlock Classes="item" Text="• The ping and packet loss figures the app is already showing you." />
+          </StackPanel>
+        </Border>
+
+        <Border Background="#1E293B" CornerRadius="8" Padding="14">
+          <StackPanel Spacing="8">
+            <TextBlock Classes="label" Text="WHAT IS NOT SENT" />
+            <TextBlock Classes="item" Text="• Nothing about what you do online — no browsing, no file names, no message or game content." />
+            <TextBlock Classes="item" Text="• No password, no licence key, no payment detail." />
+            <TextBlock Classes="item" Text="Your connection stays up throughout. Nothing is disconnected and no setting is changed." />
+          </StackPanel>
+        </Border>
+
+        <StackPanel Spacing="4">
+          <TextBlock Classes="label" Text="ANYTHING YOU WANT TO ADD (OPTIONAL)" />
+          <TextBox Name="CommentBox" MaxLength="2000" Height="60"
+                   AcceptsReturn="True" TextWrapping="Wrap"
+                   Watermark="e.g. it spikes every few minutes during a match"
+                   Background="#0F172A" Foreground="#E2E8F0" BorderBrush="#334155" />
+        </StackPanel>
+
+        <CheckBox Name="ConsentCheck" IsCheckedChanged="OnConsentChanged"
+                  Foreground="#E2E8F0">
+          <TextBlock Classes="body"
+                     Text="I understand what is measured and sent, and I agree to send it." />
+        </CheckBox>
+
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+          <Button Content="Cancel" Click="OnCancelClick"
+                  Background="#334155" Foreground="#E2E8F0" />
+          <Button Name="StartButton" Content="Measure and send" Click="OnStartClick"
+                  IsEnabled="False"
+                  Background="#2563EB" Foreground="#F8FAFC" />
+        </StackPanel>
+
+      </StackPanel>
+
+      <!-- ============================================================ running -->
+      <StackPanel Name="RunningPanel" Spacing="14" IsVisible="False">
+        <TextBlock Classes="body"
+                   Text="Measuring. Keep playing — the point is to catch the problem as it happens." />
+        <ProgressBar Name="Progress" IsIndeterminate="True" Height="4"
+                     Foreground="#2563EB" Background="#1E293B" />
+        <TextBlock Name="ProgressText" Classes="label" Text="Starting..." />
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+          <Button Content="Cancel" Click="OnCancelClick"
+                  Background="#334155" Foreground="#E2E8F0" />
+        </StackPanel>
+      </StackPanel>
+
+      <!-- ============================================================= result -->
+      <StackPanel Name="ResultPanel" Spacing="14" IsVisible="False">
+        <Border Background="#1E293B" CornerRadius="8" Padding="14">
+          <StackPanel Spacing="6">
+            <TextBlock Name="ResultTitle" Foreground="#F8FAFC" FontSize="13" FontWeight="Bold" />
+            <TextBlock Name="ResultText" Classes="body" />
+          </StackPanel>
+        </Border>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+          <Button Content="Close" Click="OnCancelClick"
+                  Background="#334155" Foreground="#E2E8F0" />
+        </StackPanel>
+      </StackPanel>
+
+    </StackPanel>
+  </Grid>
+</views:SurfaceWindow>

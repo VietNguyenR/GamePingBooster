@@ -1574,6 +1574,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             Error = _error,
             RelayId = _relay?.Id,
             RelayName = _relay?.Name,
+            RelayAddress = _relay?.Endpoint,
             // What is CONFIGURED, not what is connected, so the settings screen can show the current
             // value before anything has been tried. The key is deliberately absent - see the
             // set-relay comment in PipeServer.
@@ -1607,6 +1608,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             PacketsSent = _tunnel?.PacketsSent ?? 0,
             PacketsReceived = _tunnel?.PacketsReceived ?? 0,
             PacketsDropped = _tunnel?.PacketsDropped ?? 0,
+            PacketsDroppedFaults = _tunnel?.PacketsDroppedFaults ?? 0,
             // The PUBLIC half only. It is not a secret - it is the device's name, and the UI has to
             // send it to the licence server to register this machine, so it has to be readable here.
             // The private half never crosses the pipe in any form; see the set-relay note about the

@@ -3,7 +3,7 @@ using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
-using GamePingBooster.Service.Native;
+using GamePingBooster.Core.Native;
 
 namespace GamePingBooster.Service.Network;
 

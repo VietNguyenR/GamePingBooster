@@ -91,6 +91,18 @@ public partial class MainWindow : SurfaceWindow
     /// notice to travel with the software and somebody who installed a .exe has no LICENSE file
     /// in front of them.
     /// </summary>
+    /// <summary>
+    /// Opens the lag report dialog. Nothing is measured or sent until the person consents there -
+    /// this only opens a window.
+    /// </summary>
+    private async void OnReportLagClick(object? sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainViewModel vm) return;
+
+        await new ReportLagWindow(() => vm.LastStatus, vm.LicenceUrl, vm.DevicePublicKey)
+            .ShowDialog(this);
+    }
+
     private async void OnAboutClick(object? sender, RoutedEventArgs e)
     {
         await new AboutWindow().ShowDialog(this);

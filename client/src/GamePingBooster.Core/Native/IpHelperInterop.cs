@@ -1,11 +1,16 @@
 using System.Net;
 using System.Runtime.InteropServices;
 
-namespace GamePingBooster.Service.Native;
+namespace GamePingBooster.Core.Native;
 
 /// <summary>
 /// P/Invoke into iphlpapi.dll, for the one question the managed API cannot answer: which
 /// interface would Windows use to reach a particular address.
+///
+/// In Core rather than in the service because BOTH halves need the same answer, for related
+/// reasons: the service pins the relay to the interface this names, and the lag report says which
+/// interface each rung is leaving by - and a report that disagreed with the pin would be worse
+/// than no report at all.
 ///
 /// NetworkInterface can enumerate adapters and their gateways, but it cannot rank them - it has
 /// no view of the routing table, so "which of these adapters is the way out" has to be guessed
@@ -16,7 +21,7 @@ namespace GamePingBooster.Service.Native;
 /// failure was diagnosed on 2026-09-12: the chosen relay went silent while the other five
 /// answered normally, which is the signature of a pin through the wrong door.
 /// </summary>
-internal static partial class IpHelperInterop
+public static class IpHelperInterop
 {
     private const string Dll = "iphlpapi.dll";
 
@@ -43,8 +48,13 @@ internal static partial class IpHelperInterop
         public long Zero;
     }
 
-    [LibraryImport(Dll, EntryPoint = "GetBestInterfaceEx")]
-    private static partial int GetBestInterfaceEx(ref SockAddrIn destination, out uint bestIfIndex);
+    // DllImport rather than LibraryImport, which is what the Wintun interop next door uses.
+    // LibraryImport's source generator emits unsafe code and so requires AllowUnsafeBlocks on the
+    // whole assembly; Core is otherwise entirely safe and is not worth loosening for one call.
+    // Nothing is lost here - both arguments are blittable, so the marshalling this generates is
+    // the same, and it is equally fine under Native AOT.
+    [DllImport(Dll, EntryPoint = "GetBestInterfaceEx", ExactSpelling = true)]
+    private static extern int GetBestInterfaceEx(ref SockAddrIn destination, out uint bestIfIndex);
 
     /// <summary>
     /// The interface index Windows would send a packet to <paramref name="destination"/> through,
@@ -56,7 +66,7 @@ internal static partial class IpHelperInterop
     /// Null rather than an exception on failure: the caller has a workable fallback, and a
     /// routing question that cannot be answered is not a reason to refuse to connect.
     /// </summary>
-    internal static uint? BestInterfaceFor(IPAddress destination)
+    public static uint? BestInterfaceFor(IPAddress destination)
     {
         if (destination.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) return null;
 

@@ -528,8 +528,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     // ------------------------------------------------------- updates from the service
 
+    /// <summary>
+    /// The last status the service pushed, whole and unprocessed.
+    ///
+    /// Kept because the lag report samples it once a second for twenty seconds: rungs 5 and 6 are
+    /// the service's own live keepalive RTT and game ping, and the point is to watch them MOVE.
+    /// The bound properties on this view model each hold one field, formatted for display, which
+    /// is the wrong shape for that. Volatile: written on the UI thread, read from the diagnostic
+    /// run, and a stale read costs one sample out of twenty.
+    /// </summary>
+    public StatusMessage? LastStatus { get; private set; }
+
     private void OnStatus(StatusMessage status) => Dispatcher.UIThread.Post(() =>
     {
+        LastStatus = status;
         State = status.State;
 
         // Whoever is closing the app can stop waiting. Faulted counts: the tunnel is not up, and

@@ -127,6 +127,26 @@ internal sealed class TunnelClient : IDisposable
         Interlocked.Read(ref _dropUplinkSendFailed) +
         Interlocked.Read(ref _dropDownlinkForeign) +
         Interlocked.Read(ref _dropDownlinkRingFull);
+    /// <summary>
+    /// The same total WITHOUT local noise - i.e. only the drops that mean something is wrong.
+    ///
+    /// Local noise is mDNS, SSDP, NetBIOS, IGMP and IPv6 that Windows pushes into every adapter
+    /// whatever the routing table says. Filtering it is correct and constant: a healthy idle
+    /// tunnel produced 155 of them in ten seconds. Counting that as a fault is how a diagnostic
+    /// ends up reporting a problem on every machine it is ever pointed at - which it did, on the
+    /// first report taken with the counter wired up.
+    ///
+    /// What is left is the set worth waking somebody for: a packet too big for the tunnel, one
+    /// over the path MTU, a send that failed, a reply for a session we do not have, an adapter
+    /// ring that overflowed.
+    /// </summary>
+    public long PacketsDroppedFaults =>
+        Interlocked.Read(ref _dropUplinkOversize) +
+        Interlocked.Read(ref _dropUplinkPathMtu) +
+        Interlocked.Read(ref _dropUplinkSendFailed) +
+        Interlocked.Read(ref _dropDownlinkForeign) +
+        Interlocked.Read(ref _dropDownlinkRingFull);
+
     public double? LastRttMs => _lastRttMs < 0 ? null : _lastRttMs;
 
     /// <summary>Fraction of pings that went unanswered - a rough packet loss estimate.</summary>
