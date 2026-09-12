@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Resources>
+  <!-- Trạng thái kết nối -->
+  <String Key="Status.Disconnected">Chưa kết nối</String>
+  <String Key="Status.Connecting">Đang kết nối...</String>
+  <String Key="Status.Connected">Đã kết nối</String>
+  <String Key="Status.ConnectedWaitingGame">Đã kết nối (Chờ game)</String>
+  <String Key="Status.Reconnecting">Đang kết nối lại...</String>
+  <String Key="Status.Error">Lỗi</String>
+  <String Key="Status.Unknown">Không xác định</String>
+
+  <!-- Nút thao tác -->
+  <String Key="Action.Connect">Kết nối</String>
+  <String Key="Action.Disconnect">Ngắt kết nối</String>
+
+  <!-- Tiêu đề và nhãn -->
+  <String Key="Label.PingInGame">Ping trong game</String>
+  <String Key="Label.PingToRelay">Ping tới Relay</String>
+  <String Key="Label.PacketLoss">Packet loss</String>
+  <String Key="Label.RelayServer">MÁY CHỦ RELAY</String>
+  <String Key="Label.Game">GAME</String>
+  <String Key="Label.Routing">ĐỊNH TUYẾN</String>
+  <String Key="Label.Packets">GÓI TIN</String>
+  <String Key="Selector.Placeholder">Chọn game của bạn</String>
+  <String Key="Banner.NoRelay">Chưa cấu hình máy chủ Relay. Hãy mở Cài đặt và nhập địa chỉ cùng khoá của Relay.</String>
+
+  <!-- Menu góc phải -->
+  <String Key="Menu.Account">Tài khoản</String>
+  <String Key="Menu.SignIn">Đăng nhập</String>
+  <String Key="Menu.Settings">Cài đặt</String>
+  <String Key="Menu.Language">Ngôn ngữ</String>
+  <String Key="Menu.LanguageVi">Tiếng Việt</String>
+  <String Key="Menu.LanguageEn">English</String>
+  <String Key="Menu.ReportLag">Báo cáo lag</String>
+  <String Key="Menu.Logs">Mở thư mục logs</String>
+  <String Key="Menu.About">Giới thiệu</String>
+  <String Key="Menu.Update">Cập nhật bản mới nhất (v{0})</String>
+
+  <!-- Khay hệ thống -->
+  <String Key="Tray.Show">Mở Game Ping Booster</String>
+  <String Key="Tray.Exit">Thoát</String>
+
+  <!-- Thông báo game -->
+  <String Key="Game.NoSelected">Chưa chọn game</String>
+  <String Key="Game.Running">{0} đang chạy</String>
+  <String Key="Game.WaitingToLaunch">Đang chờ mở {0}...</String>
+  <String Key="Game.NotOpen">{0} chưa mở</String>
+  <String Key="Warning.SelectGame">Vui lòng chọn game trước.</String>
+  <String Key="Detail.SelectGame">Chọn game của bạn từ danh sách trước khi kết nối.</String>
+
+  <!-- Trạng thái bản quyền -->
+  <String Key="Licence.NotSignedIn">Chưa đăng nhập</String>
+  <String Key="Licence.SignedIn">Đã đăng nhập</String>
+  <String Key="Licence.UsingInstalledProfile">Đã đăng nhập - đang dùng danh sách game từ bản cài đặt</String>
+  <String Key="Licence.Expired">Bản quyền đã hết hạn - vui lòng đăng nhập lại</String>
+  <String Key="Licence.ExpiresSoon">Bản quyền hết hạn sau {0} phút</String>
+  <String Key="Licence.ValidUntil">Đã đăng nhập, bản quyền hợp lệ đến {0}</String>
+
+  <!-- Chi tiết trạng thái -->
+  <String Key="Detail.StartingUp">Đang khởi động...</String>
+  <String Key="Detail.Disconnected">Đã ngắt kết nối.</String>
+  <String Key="Detail.Disconnecting">Đang ngắt kết nối...</String>
+  <String Key="Detail.ResolvingRelay">Đang phân giải địa chỉ relay...</String>
+  <String Key="Detail.ConfiguringAdapter">Đang cấu hình card mạng...</String>
+  <String Key="Detail.ConnectingToRelay">Đang kết nối tới relay...</String>
+  <String Key="Detail.WaitingForGame">Đã kết nối tới Relay. Vui lòng mở {0} để bắt đầu tối ưu...</String>
+  <String Key="Detail.Optimizing">Đang tối ưu {0} qua {1}</String>
+  <String Key="Detail.GettingServerList">Đang tải danh sách máy chủ mới nhất...</String>
+  <String Key="Detail.SendingRequest">Đang gửi yêu cầu tới dịch vụ hệ thống...</String>
+
+  <!-- Thông số -->
+  <String Key="Metrics.Direct">Trực tiếp</String>
+  <String Key="Metrics.Ranges">{0} dải IP</String>
+  <String Key="Metrics.Packets">{0} gửi / {1} nhận</String>
+  <String Key="Metrics.ToRegion">{0} ms tới {1}</String>
+</Resources>

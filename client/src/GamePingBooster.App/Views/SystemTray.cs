@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using Avalonia.Controls;
 using Avalonia.Platform;
+using GamePingBooster.App.Services;
 using GamePingBooster.App.ViewModels;
 
 namespace GamePingBooster.App.Views;
@@ -26,6 +27,7 @@ public sealed class SystemTray : IDisposable
     private readonly TrayIcon _icon;
     private readonly MainWindow _window;
     private readonly MainViewModel _vm;
+    private readonly Action _languageHandler;
 
     /// <param name="exit">
     /// The app's full exit: tunnel down first, then shutdown. Not desktop.Shutdown(), which is a
@@ -45,10 +47,10 @@ public sealed class SystemTray : IDisposable
             ToolTipText = ToolTipText(),
         };
 
-        var show = new NativeMenuItem("Show Game Ping Booster");
+        var show = new NativeMenuItem(Localization.T("Tray.Show"));
         show.Click += (_, _) => _window.RestoreFromTray();
 
-        var quit = new NativeMenuItem("Exit");
+        var quit = new NativeMenuItem(Localization.T("Tray.Exit"));
         quit.Click += (_, _) =>
         {
             // Gone the moment it is pressed. Teardown takes seconds on a bad day and there is no
@@ -57,10 +59,20 @@ public sealed class SystemTray : IDisposable
             exit();
         };
 
-        var menu = new NativeMenu();
-        menu.Add(show);
-        menu.Add(new NativeMenuItemSeparator());
-        menu.Add(quit);
+        _languageHandler = () =>
+        {
+            show.Header = Localization.T("Tray.Show");
+            quit.Header = Localization.T("Tray.Exit");
+            _icon.ToolTipText = ToolTipText();
+        };
+        Localization.LanguageChanged += _languageHandler;
+
+        var menu = new NativeMenu
+        {
+            show,
+            new NativeMenuItemSeparator(),
+            quit
+        };
         _icon.Menu = menu;
 
         // Left click: what every other icon in the notification area answers to. Restores rather
@@ -109,6 +121,7 @@ public sealed class SystemTray : IDisposable
     public void Dispose()
     {
         _vm.PropertyChanged -= OnViewModelChanged;
+        Localization.LanguageChanged -= _languageHandler;
         _icon.IsVisible = false;
         _icon.Dispose();
     }

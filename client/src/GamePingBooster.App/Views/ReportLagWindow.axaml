@@ -51,18 +51,18 @@
         <Border Background="#1E293B" CornerRadius="8" Padding="14">
           <StackPanel Spacing="8">
             <TextBlock Classes="label" Text="WHAT IS MEASURED AND SENT" />
-            <TextBlock Classes="item" Text="• Response time, jitter and packet loss to your home router, your internet provider's network, and the relay." />
-            <TextBlock Classes="item" Text="• The network path to the relay, which includes your router's local address and your provider's router addresses." />
-            <TextBlock Classes="item" Text="• Your public IP address, the relay in use, the app version, and whether the game is running." />
-            <TextBlock Classes="item" Text="• The ping and packet loss figures the app is already showing you." />
+            <TextBlock Classes="item" Text="- Response time, jitter and packet loss to your home router, your internet provider's network, and the relay." />
+            <TextBlock Classes="item" Text="- The network path to the relay, which includes your router's local address and your provider's router addresses." />
+            <TextBlock Classes="item" Text="- Your public IP address, the relay in use, the app version, and whether the game is running." />
+            <TextBlock Classes="item" Text="- The ping and packet loss figures the app is already showing you." />
           </StackPanel>
         </Border>
 
         <Border Background="#1E293B" CornerRadius="8" Padding="14">
           <StackPanel Spacing="8">
             <TextBlock Classes="label" Text="WHAT IS NOT SENT" />
-            <TextBlock Classes="item" Text="• Nothing about what you do online — no browsing, no file names, no message or game content." />
-            <TextBlock Classes="item" Text="• No password, no licence key, no payment detail." />
+            <TextBlock Classes="item" Text="- Nothing about what you do online: no browsing, no file names, no message or game content." />
+            <TextBlock Classes="item" Text="- No password, no licence key, no payment detail." />
             <TextBlock Classes="item" Text="Your connection stays up throughout. Nothing is disconnected and no setting is changed." />
           </StackPanel>
         </Border>
@@ -71,7 +71,7 @@
           <TextBlock Classes="label" Text="ANYTHING YOU WANT TO ADD (OPTIONAL)" />
           <TextBox Name="CommentBox" MaxLength="2000" Height="60"
                    AcceptsReturn="True" TextWrapping="Wrap"
-                   Watermark="e.g. it spikes every few minutes during a match"
+                   PlaceholderText="e.g. it spikes every few minutes during a match"
                    Background="#0F172A" Foreground="#E2E8F0" BorderBrush="#334155" />
         </StackPanel>
 

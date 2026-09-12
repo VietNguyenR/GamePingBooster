@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
@@ -40,6 +40,14 @@ public partial class MainWindow : SurfaceWindow
         };
         dialog.Attach(_pipe);
         await dialog.ShowDialog(this);
+    }
+
+    // Language is encoded in the Tag of the menu item so this single handler covers all options.
+    private void OnLanguageClick(object? sender, RoutedEventArgs e)
+    {
+        var tag = (sender as MenuItem)?.Tag as string;
+        var language = tag == "en" ? AppLanguage.English : AppLanguage.Vietnamese;
+        Localization.SetLanguage(language);
     }
 
     /// <summary>

@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Resources>
+  <!-- Connection state -->
+  <String Key="Status.Disconnected">Not connected</String>
+  <String Key="Status.Connecting">Connecting...</String>
+  <String Key="Status.Connected">Connected</String>
+  <String Key="Status.ConnectedWaitingGame">Connected (Waiting for game)</String>
+  <String Key="Status.Reconnecting">Reconnecting...</String>
+  <String Key="Status.Error">Error</String>
+  <String Key="Status.Unknown">Unknown</String>
+
+  <!-- Action button -->
+  <String Key="Action.Connect">Connect</String>
+  <String Key="Action.Disconnect">Disconnect</String>
+
+  <!-- Labels -->
+  <String Key="Label.PingInGame">Ping in game</String>
+  <String Key="Label.PingToRelay">Ping to relay</String>
+  <String Key="Label.PacketLoss">Packet loss</String>
+  <String Key="Label.RelayServer">RELAY SERVER</String>
+  <String Key="Label.Game">GAME</String>
+  <String Key="Label.Routing">ROUTING</String>
+  <String Key="Label.Packets">PACKETS</String>
+  <String Key="Selector.Placeholder">Select your game</String>
+  <String Key="Banner.NoRelay">No relay configured yet. Open Settings and enter your relay's address and key.</String>
+
+  <!-- Menu -->
+  <String Key="Menu.Account">Account</String>
+  <String Key="Menu.SignIn">Sign in</String>
+  <String Key="Menu.Settings">Settings</String>
+  <String Key="Menu.Language">Language</String>
+  <String Key="Menu.LanguageVi">Tiếng Việt</String>
+  <String Key="Menu.LanguageEn">English</String>
+  <String Key="Menu.ReportLag">Report lag</String>
+  <String Key="Menu.Logs">Open logs folder</String>
+  <String Key="Menu.About">About</String>
+  <String Key="Menu.Update">Update to latest version (v{0})</String>
+
+  <!-- System Tray -->
+  <String Key="Tray.Show">Show Game Ping Booster</String>
+  <String Key="Tray.Exit">Exit</String>
+
+  <!-- Game notices -->
+  <String Key="Game.NoSelected">No game selected</String>
+  <String Key="Game.Running">{0} is running</String>
+  <String Key="Game.WaitingToLaunch">Waiting for {0} to launch...</String>
+  <String Key="Game.NotOpen">{0} is not open</String>
+  <String Key="Warning.SelectGame">Please select a game first.</String>
+  <String Key="Detail.SelectGame">Choose your game from the dropdown above before connecting.</String>
+
+  <!-- Licence status -->
+  <String Key="Licence.NotSignedIn">Not signed in</String>
+  <String Key="Licence.SignedIn">Signed in</String>
+  <String Key="Licence.UsingInstalledProfile">Signed in - using the installed game list, not the current one</String>
+  <String Key="Licence.Expired">Licence expired - sign in again</String>
+  <String Key="Licence.ExpiresSoon">Licence expires in {0} min</String>
+  <String Key="Licence.ValidUntil">Signed in, licence valid until {0}</String>
+
+  <!-- Detail messages -->
+  <String Key="Detail.StartingUp">Starting up...</String>
+  <String Key="Detail.Disconnected">Disconnected.</String>
+  <String Key="Detail.Disconnecting">Disconnecting...</String>
+  <String Key="Detail.ResolvingRelay">Resolving relay address...</String>
+  <String Key="Detail.ConfiguringAdapter">Configuring network adapter...</String>
+  <String Key="Detail.ConnectingToRelay">Connecting to relay...</String>
+  <String Key="Detail.WaitingForGame">Connected to Relay. Please open {0} to start optimizing...</String>
+  <String Key="Detail.Optimizing">Optimizing {0} through {1}</String>
+  <String Key="Detail.GettingServerList">Getting the latest server list...</String>
+  <String Key="Detail.SendingRequest">Sending the request to the background service...</String>
+
+  <!-- Metrics -->
+  <String Key="Metrics.Direct">Direct</String>
+  <String Key="Metrics.Ranges">{0} ranges</String>
+  <String Key="Metrics.Packets">{0} up / {1} down</String>
+  <String Key="Metrics.ToRegion">{0} ms to {1}</String>
+</Resources>

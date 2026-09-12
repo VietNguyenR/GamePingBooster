@@ -1,4 +1,4 @@
-﻿<views:SurfaceWindow xmlns="https://github.com/avaloniaui"
+<views:SurfaceWindow xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:GamePingBooster.App.ViewModels"
         xmlns:views="using:GamePingBooster.App.Views"
@@ -66,11 +66,28 @@
 
     <!-- Header -->
     <Grid Grid.Row="0" ColumnDefinitions="*,Auto">
+      <!-- Game selector -->
+      <ComboBox Grid.Column="0"
+                ItemsSource="{Binding AvailableGames}"
+                SelectedItem="{Binding SelectedGame}"
+                PlaceholderText="{Binding SelectGamePlaceholder}"
+                HorizontalAlignment="Left" VerticalAlignment="Center"
+                MinWidth="180" MaxWidth="280" Height="36"
+                Background="#242424" Foreground="#E0E0E0"
+                BorderThickness="0" CornerRadius="8"
+                ToolTip.Tip="{Binding SelectGamePlaceholder}">
+        <ComboBox.ItemTemplate>
+          <DataTemplate x:DataType="vm:GameOptionItem">
+            <TextBlock Text="{Binding DisplayName}" VerticalAlignment="Center" />
+          </DataTemplate>
+        </ComboBox.ItemTemplate>
+      </ComboBox>
+
       <!--
         Everything that is not Connect lives here. There were three buttons competing with the
         one that matters; now there is one primary action and a menu.
       -->
-      <Button Grid.Column="1" VerticalAlignment="Top"
+      <Button Grid.Column="1" VerticalAlignment="Center"
               Padding="10"
               Background="Transparent" BorderThickness="0"
               ToolTip.Tip="Menu">
@@ -81,11 +98,15 @@
           <MenuFlyout Placement="BottomEdgeAlignedRight" FlyoutPresenterClasses="custom-bg">
             <MenuItem Header="{Binding AccountMenuText}" Click="OnAccountClick"
                       IsVisible="{Binding ShowLicence}" />
-            <MenuItem Header="Settings" Click="OnSettingsClick" />
+            <MenuItem Header="{Binding MenuSettingsText}" Click="OnSettingsClick" />
+            <MenuItem Header="{Binding MenuLanguageText}">
+              <MenuItem Header="{Binding MenuLanguageViText}" Tag="vi" Click="OnLanguageClick" />
+              <MenuItem Header="{Binding MenuLanguageEnText}" Tag="en" Click="OnLanguageClick" />
+            </MenuItem>
             <Separator Background="#242424" />
-            <MenuItem Header="Report lag" Click="OnReportLagClick" />
-            <MenuItem Header="Open logs folder" Click="OnLogsClick" />
-            <MenuItem Header="About" Click="OnAboutClick" />
+            <MenuItem Header="{Binding MenuReportLagText}" Click="OnReportLagClick" />
+            <MenuItem Header="{Binding MenuLogsText}" Click="OnLogsClick" />
+            <MenuItem Header="{Binding MenuAboutText}" Click="OnAboutClick" />
             <!-- Only there when UpdateChecker has found a newer release. -->
             <Separator Background="#242424" IsVisible="{Binding HasUpdate}" />
             <MenuItem Classes="update" Header="{Binding UpdateMenuText}" Click="OnUpdateClick"
@@ -97,23 +118,27 @@
 
     <!-- Primary status -->
     <Border Grid.Row="1" Classes="card" Margin="0,20,0,0">
-      <StackPanel Spacing="8" HorizontalAlignment="Center">
-        <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Center">
-          <Ellipse Width="12" Height="12" VerticalAlignment="Center"
-                   Fill="{Binding StatusBrush}" />
-          <TextBlock Text="{Binding StatusText}"
-                     Foreground="{Binding StatusBrush}"
-                     FontSize="22" FontWeight="Bold" />
+      <!-- Grid lets the progress bar sit at the bottom as an overlay without adding to the card
+           height - a StackPanel would push the details panel down and clip "Ping in game". -->
+      <Grid RowDefinitions="*,Auto">
+        <StackPanel Grid.Row="0" Spacing="8" HorizontalAlignment="Center">
+          <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Center">
+            <Ellipse Width="12" Height="12" VerticalAlignment="Center"
+                     Fill="{Binding StatusBrush}" />
+            <TextBlock Text="{Binding StatusText}"
+                       Foreground="{Binding StatusBrush}"
+                       FontSize="22" FontWeight="Bold" />
+          </StackPanel>
+
+          <TextBlock Text="{Binding Detail}"
+                     Foreground="#ababab" FontSize="12"
+                     TextWrapping="Wrap" TextAlignment="Center"
+                     MaxWidth="320" />
         </StackPanel>
 
-        <TextBlock Text="{Binding Detail}"
-                   Foreground="#ababab" FontSize="12"
-                   TextWrapping="Wrap" TextAlignment="Center"
-                   MaxWidth="320" />
-
-        <ProgressBar IsIndeterminate="True" Height="3" Margin="0,4,0,0"
+        <ProgressBar Grid.Row="1" IsIndeterminate="True" Height="3" Margin="0,8,0,0"
                      IsVisible="{Binding IsBusy}" />
-      </StackPanel>
+      </Grid>
     </Border>
 
     <!-- Details -->
@@ -123,25 +148,25 @@
              figure is the one a tester read as his game ping, saw 23 ms, and then played at
              70-80 - it is half the path and it must not sit at the top wearing that meaning. -->
         <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" >
-          <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="Ping in game" />
+          <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="{Binding LabelPingInGame}" />
           <TextBlock Grid.Row="0" Grid.Column="1" Classes="value" Text="{Binding GamePingText}" />
 
-          <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="Ping to relay" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="{Binding LabelPingToRelay}" Margin="0,10,0,0" />
           <TextBlock Grid.Row="1" Grid.Column="1" Classes="value" Text="{Binding PingText}" Margin="0,10,0,0" />
 
-          <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="Packet loss" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="{Binding LabelPacketLoss}" Margin="0,10,0,0" />
           <TextBlock Grid.Row="2" Grid.Column="1" Classes="value" Text="{Binding LossText}" Margin="0,10,0,0" />
 
-          <TextBlock Grid.Row="3" Grid.Column="0" Classes="label" Text="Relay server" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="3" Grid.Column="0" Classes="label" Text="{Binding LabelRelayServer}" Margin="0,10,0,0" />
           <TextBlock Grid.Row="3" Grid.Column="1" Classes="value" Text="{Binding RelayText}" Margin="0,10,0,0" />
 
-          <TextBlock Grid.Row="4" Grid.Column="0" Classes="label" Text="Game" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="4" Grid.Column="0" Classes="label" Text="{Binding LabelGame}" Margin="0,10,0,0" />
           <TextBlock Grid.Row="4" Grid.Column="1" Classes="value" Text="{Binding GameText}" Margin="0,10,0,0" />
 
-          <TextBlock Grid.Row="5" Grid.Column="0" Classes="label" Text="Routing" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="5" Grid.Column="0" Classes="label" Text="{Binding LabelRouting}" Margin="0,10,0,0" />
           <TextBlock Grid.Row="5" Grid.Column="1" Classes="value" Text="{Binding RouteText}" Margin="0,10,0,0" />
 
-          <TextBlock Grid.Row="6" Grid.Column="0" Classes="label" Text="Packets" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="6" Grid.Column="0" Classes="label" Text="{Binding LabelPackets}" Margin="0,10,0,0" />
           <TextBlock Grid.Row="6" Grid.Column="1" Classes="value" Text="{Binding PacketsText}" Margin="0,10,0,0" />
         </Grid>
       </Border>
@@ -163,7 +188,7 @@
               Background="#20252b" CornerRadius="8" Padding="12" Margin="0,0,0,12"
               IsVisible="{Binding NeedsSetup}">
         <TextBlock Foreground="#869bb3" FontSize="12" TextWrapping="Wrap"
-                   Text="No relay configured yet. Open Settings and enter your relay's address and key." />
+                   Text="{Binding NoRelayBannerText}" />
       </Border>
 
       <Button Grid.Row="1" Grid.ColumnSpan="2"

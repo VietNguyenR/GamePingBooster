@@ -1,4 +1,5 @@
-﻿using System.ComponentModel;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using Avalonia.Media;
 using Avalonia.Threading;
@@ -21,6 +22,36 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _pipe = pipe;
         _pipe.StatusReceived += OnStatus;
         _pipe.Disconnected += OnDisconnected;
+        Localization.LanguageChanged += OnLanguageChanged;
+    }
+
+    private void OnLanguageChanged()
+    {
+        Raise(nameof(StatusText));
+        Raise(nameof(ActionButtonText));
+        Raise(nameof(Detail));
+        Raise(nameof(GameText));
+        Raise(nameof(RouteText));
+        Raise(nameof(PacketsText));
+        Raise(nameof(GamePingText));
+        Raise(nameof(AccountMenuText));
+        Raise(nameof(UpdateMenuText));
+        Raise(nameof(LabelPingInGame));
+        Raise(nameof(LabelPingToRelay));
+        Raise(nameof(LabelPacketLoss));
+        Raise(nameof(LabelRelayServer));
+        Raise(nameof(LabelGame));
+        Raise(nameof(LabelRouting));
+        Raise(nameof(LabelPackets));
+        Raise(nameof(SelectGamePlaceholder));
+        Raise(nameof(NoRelayBannerText));
+        Raise(nameof(MenuSettingsText));
+        Raise(nameof(MenuLanguageText));
+        Raise(nameof(MenuLanguageViText));
+        Raise(nameof(MenuLanguageEnText));
+        Raise(nameof(MenuReportLagText));
+        Raise(nameof(MenuLogsText));
+        Raise(nameof(MenuAboutText));
     }
 
     // ------------------------------------------------------------ licence
@@ -113,7 +144,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool ShowLicence => !string.IsNullOrWhiteSpace(LicenceUrl);
 
     /// <summary>What the menu item says. One entry, two states, no dead end either way.</summary>
-    public string AccountMenuText => HasToken ? "Account" : "Sign in";
+    public string AccountMenuText => HasToken
+        ? Localization.T("Menu.Account")
+        : Localization.T("Menu.SignIn");
 
     // ------------------------------------------------------------ updates
 
@@ -134,7 +167,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool HasUpdate => Update is not null;
 
     /// <summary>The last line of the menu, and only there when a newer release exists.</summary>
-    public string UpdateMenuText => Update is null ? "" : $"Update to latest version (v{Update.Version})";
+    public string UpdateMenuText => Update is null ? "" : Localization.T("Menu.Update", Update.Version);
 
     /// <summary>
     /// The last thing the renewer had to say, if anything.
@@ -159,23 +192,23 @@ public sealed class MainViewModel : INotifyPropertyChanged
             // work is worse than no line at all.
             if (LicenceBlocked) return LicenceRefusal!;
             if (!string.IsNullOrEmpty(LicenceNotice)) return LicenceNotice!;
-            if (!HasToken) return "Not signed in";
+            if (!HasToken) return Localization.T("Licence.NotSignedIn");
 
             // A licence server that is set but has never sent a game list means the ranges are
             // whatever the installer carried. The tunnel works, so nothing else would say so.
             if (!string.IsNullOrWhiteSpace(LicenceUrl) && ProfileSource == "shipped")
             {
-                return "Signed in - using the installed game list, not the current one";
+                return Localization.T("Licence.UsingInstalledProfile");
             }
-            if (TokenExpiresAt is not { } expiry) return "Signed in";
+            if (TokenExpiresAt is not { } expiry) return Localization.T("Licence.SignedIn");
 
             // Renewal happens on its own at half of remaining life, so an expiry hours away is
             // normal and not something to alarm anybody about. Only say something when it is
             // close enough that the renewal has evidently not been happening.
             var left = expiry - DateTimeOffset.UtcNow;
-            if (left <= TimeSpan.Zero) return "Licence expired - sign in again";
-            if (left < TimeSpan.FromHours(2)) return $"Licence expires in {left.TotalMinutes:F0} min";
-            return $"Signed in, licence valid until {expiry.LocalDateTime:g}";
+            if (left <= TimeSpan.Zero) return Localization.T("Licence.Expired");
+            if (left < TimeSpan.FromHours(2)) return Localization.T("Licence.ExpiresSoon", $"{left.TotalMinutes:F0}");
+            return Localization.T("Licence.ValidUntil", expiry.LocalDateTime.ToString("g"));
         }
     }
 
@@ -193,11 +226,23 @@ public sealed class MainViewModel : INotifyPropertyChanged
             Raise(nameof(ActionButtonText));
             Raise(nameof(IsBusy));
             Raise(nameof(CanPressAction));
+            Raise(nameof(GameText));
         }
     }
 
-    private string _detail = "Starting up...";
-    public string Detail { get => _detail; private set => Set(ref _detail, value); }
+    private string _rawDetail = "Starting up...";
+    public string Detail
+    {
+        get => Localization.LocalizeDetail(_rawDetail, SelectedGame?.DisplayName ?? GameName, RelayName);
+        private set
+        {
+            if (_rawDetail != value)
+            {
+                _rawDetail = value;
+                Raise(nameof(Detail));
+            }
+        }
+    }
 
     // ------------------------------------------------------- configuration state
     //
@@ -290,7 +335,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         get => _gameRunning;
         private set
         {
-            if (Set(ref _gameRunning, value)) Raise(nameof(GameText));
+            if (Set(ref _gameRunning, value))
+            {
+                Raise(nameof(GameText));
+                Raise(nameof(StatusText));
+            }
         }
     }
 
@@ -304,13 +353,55 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// Games the user can choose to optimize. Shipped with the standard titles so the dropdown
+    /// is populated immediately; the service expands it when it reads custom profiles from disk.
+    /// </summary>
+    public ObservableCollection<GameOptionItem> AvailableGames { get; } = [
+        new GameOptionItem("cs2", "Counter-Strike 2"),
+        new GameOptionItem("pubg", "PUBG: BATTLEGROUNDS")
+    ];
+
+    private GameOptionItem? _selectedGame;
+
+    /// <summary>
+    /// The game chosen for this session. Null until picked by the user from the dropdown.
+    /// </summary>
+    public GameOptionItem? SelectedGame
+    {
+        get => _selectedGame;
+        set
+        {
+            if (Set(ref _selectedGame, value))
+            {
+                // Clear the validation prompt the instant the user picks a game.
+                if (value is not null && Error == Localization.T("Warning.SelectGame"))
+                {
+                    Error = null;
+                }
+                Raise(nameof(GameText));
+                Raise(nameof(StatusText));
+                Raise(nameof(Detail));
+                Raise(nameof(CanPressAction));
+                if (value is not null)
+                {
+                    _ = _pipe.SelectGameAsync(value.Id);
+                }
+            }
+        }
+    }
+
     private string? _relayName;
     public string? RelayName
     {
         get => _relayName;
         private set
         {
-            if (Set(ref _relayName, value)) Raise(nameof(RelayText));
+            if (Set(ref _relayName, value))
+            {
+                Raise(nameof(RelayText));
+                Raise(nameof(Detail));
+            }
         }
     }
 
@@ -348,12 +439,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public string StatusText => State switch
     {
-        TunnelState.Disconnected => "Not connected",
-        TunnelState.Connecting => "Connecting...",
-        TunnelState.Connected => "Connected",
-        TunnelState.Reconnecting => "Reconnecting...",
-        TunnelState.Faulted => "Error",
-        _ => "Unknown",
+        TunnelState.Disconnected => Localization.T("Status.Disconnected"),
+        TunnelState.Connecting => Localization.T("Status.Connecting"),
+        TunnelState.Connected => (SelectedGame is not null && !GameRunning)
+            ? Localization.T("Status.ConnectedWaitingGame")
+            : Localization.T("Status.Connected"),
+        TunnelState.Reconnecting => Localization.T("Status.Reconnecting"),
+        TunnelState.Faulted => Localization.T("Status.Error"),
+        _ => Localization.T("Status.Unknown"),
     };
 
     /// <summary>
@@ -369,8 +462,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     };
 
     public string ActionButtonText => State is TunnelState.Connected or TunnelState.Connecting
-        ? "Disconnect"
-        : "Connect";
+        ? Localization.T("Action.Disconnect")
+        : Localization.T("Action.Connect");
 
     public bool IsBusy => State is TunnelState.Connecting or TunnelState.Reconnecting;
     // Nothing to connect to until a relay and a key exist, so the button is dead until then and
@@ -399,24 +492,59 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </summary>
     public string GamePingText => GamePingMs is { } g
         ? (GamePingDirect ? "" : "~") +
-          (GameRegionName is { } region ? $"{g:F0} ms to {region}" : $"{g:F0} ms")
+          (GameRegionName is { } region ? Localization.T("Metrics.ToRegion", $"{g:F0}", region) : $"{g:F0} ms")
         : "-";
 
     public string PingText => PingMs is { } p ? $"{p:F0} ms" : "-";
     public string LossText => LossRatio is { } l ? $"{l * 100:F1}%" : "-";
     public string RelayText => RelayName ?? "-";
-    public string RouteText => ActiveRoutes > 0 ? $"{ActiveRoutes} ranges" : "-";
+    public string RouteText => ActiveRoutes > 0 ? Localization.T("Metrics.Ranges", ActiveRoutes) : "-";
 
-    public string GameText => GameName is null
-        ? "-"
-        : GameRunning ? $"{GameName} is running" : $"{GameName} is not open";
+    public string GameText
+    {
+        get
+        {
+            if (SelectedGame is null) return Localization.T("Game.NoSelected");
+
+            var targetName = SelectedGame.DisplayName;
+            if (GameRunning && (string.IsNullOrEmpty(GameName) || string.Equals(GameName, targetName, StringComparison.OrdinalIgnoreCase)))
+            {
+                return Localization.T("Game.Running", targetName);
+            }
+
+            return State == TunnelState.Connected
+                ? Localization.T("Game.WaitingToLaunch", targetName)
+                : Localization.T("Game.NotOpen", targetName);
+        }
+    }
 
     /// <summary>
     /// Packet counters. Not cosmetic: when the tunnel connects but traffic does not flow, the
     /// first question is always whether the client is sending at all, and this answers it
     /// without attaching a packet capture.
     /// </summary>
-    public string PacketsText => $"{PacketsSent} up / {PacketsReceived} down";
+    public string PacketsText => Localization.T("Metrics.Packets", PacketsSent, PacketsReceived);
+
+    // Localized UI Labels (Instance properties required for XAML data binding)
+#pragma warning disable CA1822
+    public string LabelPingInGame => Localization.T("Label.PingInGame");
+    public string LabelPingToRelay => Localization.T("Label.PingToRelay");
+    public string LabelPacketLoss => Localization.T("Label.PacketLoss");
+    public string LabelRelayServer => Localization.T("Label.RelayServer");
+    public string LabelGame => Localization.T("Label.Game");
+    public string LabelRouting => Localization.T("Label.Routing");
+    public string LabelPackets => Localization.T("Label.Packets");
+    public string SelectGamePlaceholder => Localization.T("Selector.Placeholder");
+    public string NoRelayBannerText => Localization.T("Banner.NoRelay");
+    public string MenuSettingsText => Localization.T("Menu.Settings");
+    public string MenuLanguageText => Localization.T("Menu.Language");
+    public string MenuLanguageViText => Localization.T("Menu.LanguageVi");
+    public string MenuLanguageEnText => Localization.T("Menu.LanguageEn");
+    public string MenuReportLagText => Localization.T("Menu.ReportLag");
+    public string MenuLogsText => Localization.T("Menu.Logs");
+    public string MenuAboutText => Localization.T("Menu.About");
+#pragma warning restore CA1822
+
 
     // ------------------------------------------------------------------- actions
 
@@ -448,7 +576,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _teardown = wait;
         try
         {
-            Detail = "Disconnecting...";
+            Detail = Localization.T("Detail.Disconnecting");
             await _pipe.DisconnectTunnelAsync().ConfigureAwait(true);
             await Task.WhenAny(wait.Task, Task.Delay(timeout)).ConfigureAwait(true);
         }
@@ -497,22 +625,32 @@ public sealed class MainViewModel : INotifyPropertyChanged
             }
             else
             {
+                // Refuse to connect without a target game. Without one the service would either
+                // have to guess from running processes or wait indefinitely without knowing which
+                // routes to install.
+                if (SelectedGame is null)
+                {
+                    Error = Localization.T("Warning.SelectGame");
+                    Detail = Localization.T("Detail.SelectGame");
+                    return;
+                }
+
                 _connectInFlight = true;
                 State = TunnelState.Connecting;
 
                 if (profileSync is not null && !string.IsNullOrWhiteSpace(LicenceUrl))
                 {
-                    Detail = "Getting the latest server list...";
+                    Detail = Localization.T("Detail.GettingServerList");
                     // ConfigureAwait(true): this is called from a click on the UI thread, and the
                     // next line raises PropertyChanged - off the UI thread that breaks Avalonia's
                     // bindings in ways that surface later and somewhere else.
                     await profileSync
-                        .SyncAsync(LicenceUrl, DevicePublicKey, "pubg", force: true)
+                        .SyncAsync(LicenceUrl, DevicePublicKey, SelectedGame.Id, force: true)
                         .ConfigureAwait(true);
                 }
 
-                Detail = "Sending the request to the background service...";
-                await _pipe.ConnectTunnelAsync().ConfigureAwait(true);
+                Detail = Localization.T("Detail.SendingRequest");
+                await _pipe.ConnectTunnelAsync(gameId: SelectedGame.Id).ConfigureAwait(true);
             }
         }
         catch (Exception ex)
@@ -542,6 +680,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private void OnStatus(StatusMessage status) => Dispatcher.UIThread.Post(() =>
     {
         LastStatus = status;
+        var previousState = _state;
         State = status.State;
 
         // Whoever is closing the app can stop waiting. Faulted counts: the tunnel is not up, and
@@ -552,7 +691,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
             _teardown?.TrySetResult();
         }
         Detail = status.Detail;
-        Error = status.Error;
+
+        // A service heartbeat with no error must not wipe a warning the UI just set
+        // (e.g. "please select a game"). Only adopt a null from the service when the
+        // tunnel state has changed - that invalidates any UI-originated message anyway -
+        // or when the service is reporting an actual error string.
+        if (status.Error is not null || status.State != previousState)
+        {
+            Error = status.Error;
+        }
         PingMs = status.TunnelPingMs;
         GamePingMs = status.GamePingMs;
         GamePingDirect = status.GamePingDirect;
@@ -560,6 +707,33 @@ public sealed class MainViewModel : INotifyPropertyChanged
         LossRatio = status.LossRatio;
         GameRunning = status.GameRunning;
         GameName = status.GameName;
+
+        // Append newly discovered profiles without clearing the collection. Calling Clear() resets
+        // the ComboBox's SelectedItem binding in Avalonia and drops what the user just clicked.
+        if (status.AvailableGames.Count > 0)
+        {
+            foreach (var g in status.AvailableGames)
+            {
+                if (!AvailableGames.Any(x => string.Equals(x.Id, g.Id, StringComparison.OrdinalIgnoreCase)))
+                {
+                    AvailableGames.Add(new GameOptionItem(g.Id, g.Name));
+                }
+            }
+        }
+
+        // Only adopt the service's selection if the user hasn't made one yet (e.g. on first launch).
+        // Once the user picks a game, the UI is authoritative.
+        if (_selectedGame is null && !string.IsNullOrEmpty(status.SelectedGameId))
+        {
+            var current = AvailableGames.FirstOrDefault(g => g.Id.Equals(status.SelectedGameId, StringComparison.OrdinalIgnoreCase));
+            if (current is not null)
+            {
+                _selectedGame = current;
+                Raise(nameof(SelectedGame));
+                Raise(nameof(GameText));
+            }
+        }
+
         RelayName = status.RelayName;
         RelayEndpoints = status.RelayEndpoints;
         Configured = status.Configured;
@@ -607,4 +781,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     private void Raise(string? name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+}
+
+/// <summary>
+/// A selectable game option in the UI dropdown.
+/// </summary>
+public sealed class GameOptionItem(string id, string displayName)
+{
+    public string Id { get; } = id;
+    public string DisplayName { get; } = displayName;
+
+    public override string ToString() => DisplayName;
+
+    public override bool Equals(object? obj) =>
+        obj is GameOptionItem other && string.Equals(Id, other.Id, StringComparison.OrdinalIgnoreCase);
+
+    public override int GetHashCode() => StringComparer.OrdinalIgnoreCase.GetHashCode(Id);
 }

@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -34,6 +34,7 @@
          next to it. ApplicationIcon above is separate - that one is the icon Explorer draws on
          the .exe and is baked in by the linker. -->
     <AvaloniaResource Include="favicon.ico" />
+    <AvaloniaResource Include="Resources\Languages\*.xml" />
   </ItemGroup>
 
   <ItemGroup>
