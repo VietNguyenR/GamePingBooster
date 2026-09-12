@@ -50,6 +50,7 @@ profiles/*.local.json
 # Ngu canh lam viec, khong public
 HANDOFF.md
 profiles/pubg-vn.json
+profiles/cs2-vn.json
 .gitignore
 
 # Local machine settings for ./gpb and gpb.ps1 (relay host aliases and the like)

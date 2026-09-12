@@ -1,0 +1,560 @@
+{
+  "note": "CS2 COMPLETE server IPs - all 41 Valve SDR POPs from Steam API (https://api.steampowered.com/ISteamApps/GetSDRConfig/v1/?appid=730). Each region maps to one /24 subnet per datacenter. Frankfurt uses 2 subnets (155.133.226.x + 162.254.197.x). Shanghai Telecom uses 2 subnets. Regenerate by querying the API. Generated 2026-09-12.",
+  "schemaVersion": 1,
+  "games": [
+    {
+      "regions": [
+        {
+          "cidrs": [
+            "103.10.124.0/24"
+          ],
+          "name": "Singapore",
+          "note": "Valve SGP - PRIMARY for VN players. CS2 SEA matchmaking hub.",
+          "id": "asia-sg",
+          "landmarks": [
+            "103.10.124.116",
+            "103.10.124.117"
+          ],
+          "source": "steam-sdr:sgp"
+        },
+        {
+          "cidrs": [
+            "103.28.54.0/24"
+          ],
+          "name": "Hong Kong",
+          "note": "Valve HKG - common overflow for VN players when SGP is full.",
+          "id": "asia-hk",
+          "landmarks": [
+            "103.28.54.163",
+            "103.28.54.164"
+          ],
+          "source": "steam-sdr:hkg"
+        },
+        {
+          "cidrs": [
+            "45.121.184.0/24"
+          ],
+          "name": "Japan (Tokyo)",
+          "note": "Valve TYO - sometimes assigned by SEA matchmaking.",
+          "id": "asia-jp",
+          "landmarks": [
+            "45.121.184.5",
+            "45.121.184.6"
+          ],
+          "source": "steam-sdr:tyo"
+        },
+        {
+          "cidrs": [
+            "146.66.152.0/24"
+          ],
+          "name": "Korea (Seoul)",
+          "note": "Valve SEO.",
+          "id": "asia-kr",
+          "landmarks": [
+            "146.66.152.36",
+            "146.66.152.37"
+          ],
+          "source": "steam-sdr:seo"
+        },
+        {
+          "cidrs": [
+            "155.133.224.0/24"
+          ],
+          "name": "India (Mumbai)",
+          "note": "Valve Mumbai.",
+          "id": "asia-in-bom",
+          "landmarks": [
+            "155.133.224.20",
+            "155.133.224.21"
+          ],
+          "source": "steam-sdr:bom2"
+        },
+        {
+          "cidrs": [
+            "155.133.225.0/24"
+          ],
+          "name": "India (Chennai)",
+          "note": "Valve Chennai - Ambattur.",
+          "id": "asia-in-maa",
+          "landmarks": [
+            "155.133.225.18",
+            "155.133.225.19"
+          ],
+          "source": "steam-sdr:maa2"
+        },
+        {
+          "cidrs": [
+            "103.10.125.0/24"
+          ],
+          "name": "Australia (Sydney)",
+          "note": "Valve SYD.",
+          "id": "aus-syd",
+          "landmarks": [
+            "103.10.125.20",
+            "103.10.125.21"
+          ],
+          "source": "steam-sdr:syd"
+        },
+        {
+          "cidrs": [
+            "185.25.180.0/24"
+          ],
+          "name": "Guam",
+          "note": "Valve Guam.",
+          "id": "pacific-guam",
+          "landmarks": [
+            "185.25.180.18",
+            "185.25.180.19"
+          ],
+          "source": "steam-sdr:gum"
+        },
+        {
+          "cidrs": [
+            "185.25.183.0/24"
+          ],
+          "name": "Dubai (UAE)",
+          "note": "Valve Dubai.",
+          "id": "me-dxb",
+          "landmarks": [
+            "185.25.183.163",
+            "185.25.183.179"
+          ],
+          "source": "steam-sdr:dxb"
+        },
+        {
+          "cidrs": [
+            "112.45.45.0/24"
+          ],
+          "name": "China Chengdu (Mobile)",
+          "note": "Alibaba Cloud CTU Mobile.",
+          "id": "cn-ctum",
+          "landmarks": [
+            "112.45.45.129",
+            "112.45.45.130"
+          ],
+          "source": "steam-sdr:ctum"
+        },
+        {
+          "cidrs": [
+            "118.123.224.0/24"
+          ],
+          "name": "China Chengdu (Telecom)",
+          "note": "Alibaba Cloud CTU Telecom.",
+          "id": "cn-ctut",
+          "landmarks": [
+            "118.123.224.192",
+            "118.123.224.193"
+          ],
+          "source": "steam-sdr:ctut"
+        },
+        {
+          "cidrs": [
+            "101.206.160.0/24"
+          ],
+          "name": "China Chengdu (Unicom)",
+          "note": "Alibaba Cloud CTU Unicom.",
+          "id": "cn-ctuu",
+          "landmarks": [
+            "101.206.160.192",
+            "101.206.160.193"
+          ],
+          "source": "steam-sdr:ctuu"
+        },
+        {
+          "cidrs": [
+            "39.156.182.0/24"
+          ],
+          "name": "China Beijing (Mobile)",
+          "note": "Alibaba Cloud PEK Mobile.",
+          "id": "cn-pekm",
+          "landmarks": [
+            "39.156.182.1",
+            "39.156.182.2"
+          ],
+          "source": "steam-sdr:pekm"
+        },
+        {
+          "cidrs": [
+            "114.113.213.0/24"
+          ],
+          "name": "China Beijing (Telecom)",
+          "note": "Alibaba Cloud PEK Telecom.",
+          "id": "cn-pekt",
+          "landmarks": [
+            "114.113.213.1",
+            "114.113.213.2"
+          ],
+          "source": "steam-sdr:pekt"
+        },
+        {
+          "cidrs": [
+            "111.206.90.0/24"
+          ],
+          "name": "China Beijing (Unicom)",
+          "note": "Alibaba Cloud PEK Unicom.",
+          "id": "cn-peku",
+          "landmarks": [
+            "111.206.90.1",
+            "111.206.90.2"
+          ],
+          "source": "steam-sdr:peku"
+        },
+        {
+          "cidrs": [
+            "117.185.19.0/24"
+          ],
+          "name": "China Shanghai (Mobile)",
+          "note": "Alibaba Cloud PVG Mobile.",
+          "id": "cn-pvgm",
+          "landmarks": [
+            "117.185.19.1",
+            "117.185.19.2"
+          ],
+          "source": "steam-sdr:pvgm"
+        },
+        {
+          "cidrs": [
+            "61.152.104.0/24",
+            "180.163.126.0/24"
+          ],
+          "name": "China Shanghai (Telecom)",
+          "note": "Alibaba Cloud PVG Telecom. Two /24 subnets.",
+          "id": "cn-pvgt",
+          "landmarks": [
+            "61.152.104.1",
+            "61.152.104.2"
+          ],
+          "source": "steam-sdr:pvgt"
+        },
+        {
+          "cidrs": [
+            "140.206.227.0/24"
+          ],
+          "name": "China Shanghai (Unicom)",
+          "note": "Alibaba Cloud PVG Unicom.",
+          "id": "cn-pvgu",
+          "landmarks": [
+            "140.206.227.129",
+            "140.206.227.130"
+          ],
+          "source": "steam-sdr:pvgu"
+        },
+        {
+          "cidrs": [
+            "120.233.106.0/24"
+          ],
+          "name": "China Guangzhou (Mobile)",
+          "note": "Tencent TGD Mobile.",
+          "id": "cn-tgdm",
+          "landmarks": [
+            "120.233.106.112",
+            "120.233.106.113"
+          ],
+          "source": "steam-sdr:tgdm"
+        },
+        {
+          "cidrs": [
+            "183.60.122.0/24"
+          ],
+          "name": "China Guangzhou (Telecom)",
+          "note": "Tencent TGD Telecom.",
+          "id": "cn-tgdt",
+          "landmarks": [
+            "183.60.122.2",
+            "183.60.122.3"
+          ],
+          "source": "steam-sdr:tgdt"
+        },
+        {
+          "cidrs": [
+            "58.254.163.0/24"
+          ],
+          "name": "China Guangzhou (Unicom)",
+          "note": "Tencent TGD Unicom.",
+          "id": "cn-tgdu",
+          "landmarks": [
+            "58.254.163.32",
+            "58.254.163.33"
+          ],
+          "source": "steam-sdr:tgdu"
+        },
+        {
+          "cidrs": [
+            "155.133.226.0/24",
+            "162.254.197.0/24"
+          ],
+          "name": "Frankfurt (Germany)",
+          "note": "Valve FRA. Two /24 subnets: 155.133.226.x and 162.254.197.x",
+          "id": "eu-fra",
+          "landmarks": [
+            "155.133.226.68",
+            "155.133.226.70"
+          ],
+          "source": "steam-sdr:fra"
+        },
+        {
+          "cidrs": [
+            "155.133.248.0/24"
+          ],
+          "name": "Amsterdam (Netherlands)",
+          "note": "Valve AMS.",
+          "id": "eu-ams",
+          "landmarks": [
+            "155.133.248.36",
+            "155.133.248.37"
+          ],
+          "source": "steam-sdr:ams"
+        },
+        {
+          "cidrs": [
+            "162.254.196.0/24"
+          ],
+          "name": "London (England)",
+          "note": "Valve LHR.",
+          "id": "eu-lhr",
+          "landmarks": [
+            "162.254.196.66",
+            "162.254.196.70"
+          ],
+          "source": "steam-sdr:lhr"
+        },
+        {
+          "cidrs": [
+            "185.25.182.0/24"
+          ],
+          "name": "Paris (France)",
+          "note": "Valve PAR.",
+          "id": "eu-par",
+          "landmarks": [
+            "185.25.182.18",
+            "185.25.182.19"
+          ],
+          "source": "steam-sdr:par"
+        },
+        {
+          "cidrs": [
+            "155.133.246.0/24"
+          ],
+          "name": "Madrid (Spain)",
+          "note": "Valve MAD.",
+          "id": "eu-mad",
+          "landmarks": [
+            "155.133.246.34",
+            "155.133.246.39"
+          ],
+          "source": "steam-sdr:mad"
+        },
+        {
+          "cidrs": [
+            "146.66.155.0/24"
+          ],
+          "name": "Vienna (Austria)",
+          "note": "Valve VIE.",
+          "id": "eu-vie",
+          "landmarks": [
+            "146.66.155.66",
+            "146.66.155.67"
+          ],
+          "source": "steam-sdr:vie"
+        },
+        {
+          "cidrs": [
+            "162.254.198.0/24"
+          ],
+          "name": "Stockholm Kista (Sweden)",
+          "note": "Valve STO Kista.",
+          "id": "eu-sto",
+          "landmarks": [
+            "162.254.198.41",
+            "162.254.198.42"
+          ],
+          "source": "steam-sdr:sto"
+        },
+        {
+          "cidrs": [
+            "155.133.252.0/24"
+          ],
+          "name": "Stockholm Bromma (Sweden)",
+          "note": "Valve STO2 Bromma.",
+          "id": "eu-sto2",
+          "landmarks": [
+            "155.133.252.37",
+            "155.133.252.38"
+          ],
+          "source": "steam-sdr:sto2"
+        },
+        {
+          "cidrs": [
+            "155.133.230.0/24"
+          ],
+          "name": "Warsaw (Poland)",
+          "note": "Valve WAW.",
+          "id": "eu-waw",
+          "landmarks": [
+            "155.133.230.98",
+            "155.133.230.99"
+          ],
+          "source": "steam-sdr:waw"
+        },
+        {
+          "cidrs": [
+            "162.254.192.0/24"
+          ],
+          "name": "Sterling VA (US East)",
+          "note": "Valve IAD.",
+          "id": "na-iad",
+          "landmarks": [
+            "162.254.192.88",
+            "162.254.192.89"
+          ],
+          "source": "steam-sdr:iad"
+        },
+        {
+          "cidrs": [
+            "162.254.193.0/24"
+          ],
+          "name": "Chicago IL",
+          "note": "Valve ORD.",
+          "id": "na-ord",
+          "landmarks": [
+            "162.254.193.71",
+            "162.254.193.73"
+          ],
+          "source": "steam-sdr:ord"
+        },
+        {
+          "cidrs": [
+            "162.254.199.0/24"
+          ],
+          "name": "Atlanta GA",
+          "note": "Valve ATL.",
+          "id": "na-atl",
+          "landmarks": [
+            "162.254.199.170",
+            "162.254.199.173"
+          ],
+          "source": "steam-sdr:atl"
+        },
+        {
+          "cidrs": [
+            "162.254.194.0/24"
+          ],
+          "name": "Dallas TX",
+          "note": "Valve DFW.",
+          "id": "na-dfw",
+          "landmarks": [
+            "162.254.194.37",
+            "162.254.194.38"
+          ],
+          "source": "steam-sdr:dfw"
+        },
+        {
+          "cidrs": [
+            "162.254.195.0/24"
+          ],
+          "name": "Los Angeles CA",
+          "note": "Valve LAX.",
+          "id": "na-lax",
+          "landmarks": [
+            "162.254.195.52",
+            "162.254.195.53"
+          ],
+          "source": "steam-sdr:lax"
+        },
+        {
+          "cidrs": [
+            "205.196.6.0/24"
+          ],
+          "name": "Seattle WA",
+          "note": "Valve SEA.",
+          "id": "na-sea",
+          "landmarks": [
+            "205.196.6.135",
+            "205.196.6.149"
+          ],
+          "source": "steam-sdr:sea"
+        },
+        {
+          "cidrs": [
+            "155.133.227.0/24"
+          ],
+          "name": "Sao Paulo (Brazil)",
+          "note": "Valve GRU.",
+          "id": "sa-gru",
+          "landmarks": [
+            "155.133.227.35",
+            "155.133.227.40"
+          ],
+          "source": "steam-sdr:gru"
+        },
+        {
+          "cidrs": [
+            "155.133.255.0/24"
+          ],
+          "name": "Buenos Aires (Argentina)",
+          "note": "Valve EZE.",
+          "id": "sa-eze",
+          "landmarks": [
+            "155.133.255.98",
+            "155.133.255.99"
+          ],
+          "source": "steam-sdr:eze"
+        },
+        {
+          "cidrs": [
+            "155.133.249.0/24"
+          ],
+          "name": "Santiago (Chile)",
+          "note": "Valve SCL.",
+          "id": "sa-scl",
+          "landmarks": [
+            "155.133.249.163",
+            "155.133.249.179"
+          ],
+          "source": "steam-sdr:scl"
+        },
+        {
+          "cidrs": [
+            "155.133.244.0/24"
+          ],
+          "name": "Lima (Peru)",
+          "note": "Valve LIM.",
+          "id": "sa-lim",
+          "landmarks": [
+            "155.133.244.35",
+            "155.133.244.36"
+          ],
+          "source": "steam-sdr:lim"
+        },
+        {
+          "cidrs": [
+            "155.133.238.0/24"
+          ],
+          "name": "Johannesburg (South Africa)",
+          "note": "Valve JNB.",
+          "id": "af-jnb",
+          "landmarks": [
+            "155.133.238.178",
+            "155.133.238.194"
+          ],
+          "source": "steam-sdr:jnb"
+        }
+      ],
+      "lobbyAddresses": [],
+      "id": "cs2",
+      "name": "Counter-Strike 2",
+      "processNames": [
+        "cs2.exe"
+      ]
+    }
+  ],
+  "generatedUtc": "2026-09-12T03:20:03Z",
+  "relays": [
+    {
+      "id": "relay-1",
+      "name": "Your relay",
+      "location": "Singapore",
+      "endpoint": "203.0.113.10:51820"
+    }
+  ]
+}
