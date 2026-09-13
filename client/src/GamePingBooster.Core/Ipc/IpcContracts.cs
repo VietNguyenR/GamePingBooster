@@ -3,6 +3,7 @@
 namespace GamePingBooster.Core.Ipc;
 
 /// <summary>
+/// Trigger
 /// Contract between the UI (runs as a normal user) and the Windows Service (LocalSystem).
 /// Carried over a named pipe; every message is one line of JSON terminated by '\n'.
 /// </summary>
