@@ -17,6 +17,8 @@
         .\gpb.ps1 profile [game]      rebuild that game's profile from what was captured
         .\gpb.ps1 check               is the game actually going through the relay right now
         .\gpb.ps1 lag [seconds]       run this DURING the lag: which segment is at fault
+        .\gpb.ps1 probe               which provider's Singapore network this line reaches best,
+                                      and whether a relay there would beat the line's own route
         .\gpb.ps1 logs                follow the service log
         .\gpb.ps1 status              read the tunnel's live counters
         .\gpb.ps1 test                every test on both sides
@@ -546,6 +548,18 @@ switch ($Verb.ToLowerInvariant()) {
         & (Join-Path $tools 'Diagnose-Lag.ps1') -Seconds $seconds
     }
 
+    'probe' {
+        # The same file a player is sent on its own, so it cannot read gpb.conf itself: the relays
+        # are handed to it from here. That keeps their addresses out of the repository, which is
+        # the reason gpb.conf exists.
+        $relays = @()
+        foreach ($n in @(Get-GpbRelayNames -RepoRoot $root)) {
+            $r = Get-GpbRelay -Name $n -RepoRoot $root
+            if ($r.Endpoint) { $relays += ('{0}={1}' -f $n.ToLowerInvariant(), ($r.Endpoint -split ':')[0]) }
+        }
+        & (Join-Path $tools 'Probe-Providers.ps1') -Relays $relays
+    }
+
     'logs' {
         $log = Join-Path $programData 'logs\gpb-service.log'
         if (-not (Test-Path $log)) { throw "No log at $log - has the service ever run?" }
@@ -605,6 +619,10 @@ switch ($Verb.ToLowerInvariant()) {
         Say "Lag diagnosis: the verdict rules"
         & (Join-Path $tools 'Test-DiagnoseLag.ps1')
         if ($LASTEXITCODE -ne 0) { throw "the lag diagnosis tests failed" }
+
+        Say "Provider probe: city names and the verdict"
+        & (Join-Path $tools 'Test-ProbeProviders.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "the provider probe tests failed" }
 
         Say "C#: build and wire-format check"
         & dotnet build (Join-Path $client 'GamePingBooster.sln') --nologo -v quiet
