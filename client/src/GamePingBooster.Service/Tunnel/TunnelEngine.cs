@@ -983,6 +983,50 @@ internal sealed class TunnelEngine : IAsyncDisposable
     /// </summary>
     private static readonly TimeSpan SilenceBeforeDead = TimeSpan.FromSeconds(15);
 
+    /// <summary>
+    /// How long a tunnel may stay up with no game open before it is dropped.
+    ///
+    /// A relay holds a session - and an address from its pool of 253 - for every client connected
+    /// to it, and keepalives stop it ever expiring on its own. An app left connected overnight, or
+    /// connected at start-up by somebody who then never plays, holds a slot a player could use. An
+    /// hour is long enough to cover a break between matches and short enough that a forgotten
+    /// connection does not last the day.
+    /// </summary>
+    private static readonly TimeSpan IdleDisconnectAfter = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// When the tunnel last became idle - connected, no game running - as Environment.TickCount64,
+    /// or 0 while a game runs. Written and read only by the supervisor loop.
+    /// </summary>
+    private long _idleSinceTick;
+
+    /// <summary>
+    /// Whether the tunnel has had no game open for <see cref="IdleDisconnectAfter"/>.
+    ///
+    /// Asks the watcher on every tick rather than being told by game start and exit events. The
+    /// watcher is started just before the first tick and may report a game that was already open a
+    /// moment after connect; a counter set at connect would race it and could drop a player mid-match
+    /// an hour later. TickCount64 keeps counting while the machine sleeps, so a laptop that wakes
+    /// after a night still connected is dropped on the first tick, which is the point.
+    /// </summary>
+    private bool IdleForTooLong()
+    {
+        // Debug mode routes without a game on purpose; there is nothing idle about it.
+        if (_config.RouteWithoutGame || (_watcher?.IsGameRunning ?? false))
+        {
+            _idleSinceTick = 0;
+            return false;
+        }
+
+        var now = Environment.TickCount64;
+        if (_idleSinceTick == 0)
+        {
+            _idleSinceTick = now;
+            return false;
+        }
+        return now - _idleSinceTick >= IdleDisconnectAfter.TotalMilliseconds;
+    }
+
     private void StartSupervisor(CancellationToken ct) => _supervisor = Task.Run(() => SuperviseAsync(ct), ct);
 
     /// <summary>
@@ -992,6 +1036,10 @@ internal sealed class TunnelEngine : IAsyncDisposable
     /// </summary>
     private async Task SuperviseAsync(CancellationToken ct)
     {
+        // A fresh count per connect. Left over from the last session, a tick from hours ago would
+        // drop this one on its first pass.
+        _idleSinceTick = 0;
+
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
         try
         {
@@ -1003,6 +1051,19 @@ internal sealed class TunnelEngine : IAsyncDisposable
                 if (tunnel is null) continue;
 
                 LogThroughput(tunnel);
+
+                if (IdleForTooLong())
+                {
+                    _log($"No game has been open for {IdleDisconnectAfter.TotalMinutes:F0} minutes - disconnecting, " +
+                         "so this relay slot goes to somebody who is playing.");
+
+                    // Not awaited. Disconnecting cancels this loop and waits for it to finish, which from
+                    // inside the loop would wait forever.
+                    _ = Task.Run(() => DisconnectAsync(
+                        $"Disconnected automatically - no game was open for {IdleDisconnectAfter.TotalMinutes:F0} minutes. " +
+                        "Press Connect before you play."));
+                    return;
+                }
 
                 var silence = tunnel.SinceLastPong;
                 if (silence < SilenceBeforeDead) continue;
@@ -1644,12 +1705,16 @@ internal sealed class TunnelEngine : IAsyncDisposable
 
     // ----------------------------------------------------------- disconnect
 
-    public async Task DisconnectAsync()
+    /// <param name="reason">
+    /// What the player reads once it is done, when the disconnect was not their own click - the
+    /// idle timeout says why the tunnel went down, so nobody mistakes it for a fault.
+    /// </param>
+    public async Task DisconnectAsync(string? reason = null)
     {
         if (_state == TunnelState.Disconnected) return;
         SetState(TunnelState.Disconnected, "Disconnecting...");
         await TeardownAsync().ConfigureAwait(false);
-        SetState(TunnelState.Disconnected, "Not connected");
+        SetState(TunnelState.Disconnected, reason ?? "Not connected");
     }
 
     /// <summary>Tears everything down in reverse order. Must never throw.</summary>
