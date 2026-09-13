@@ -231,7 +231,7 @@ public sealed class LicenceClient : IDisposable
     /// through. The ranges therefore never exist in the UI's memory, never cross the IPC pipe in
     /// readable form, and never reach the disk unsealed.
     /// </summary>
-    public Task<string> FetchProfileAsync(string refreshToken, string devicePublicKey,
+    public Task<SealedProfileResult> FetchProfileAsync(string refreshToken, string devicePublicKey,
         string gameId, CancellationToken ct) =>
         WithDeadline(RequestTimeout, ct, async t =>
         {
@@ -249,7 +249,7 @@ public sealed class LicenceClient : IDisposable
                 {
                     throw new LicenceException("The licence server sent an empty game list.");
                 }
-                return body.Envelope;
+                return body;
             }
 
             throw await ErrorAsync(response, t, new()
@@ -445,6 +445,13 @@ public sealed class SealedProfileResult
 
     /// <summary>The sealed envelope as hex. Opaque here - only the service can open it.</summary>
     [JsonPropertyName("envelope")] public string Envelope { get; set; } = "";
+
+    /// <summary>
+    /// Every game the server has a profile for, e.g. ["cs2", "pubg"]. Outside the envelope because
+    /// this process cannot open it and still has to know what else to ask for. Null from a server
+    /// older than the field, which means only the game that was asked for.
+    /// </summary>
+    [JsonPropertyName("availableGames")] public List<string>? AvailableGames { get; set; }
 }
 
 public sealed class AccountResult

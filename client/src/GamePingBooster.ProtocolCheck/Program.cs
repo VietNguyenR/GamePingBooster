@@ -83,6 +83,7 @@ internal static class Program
         CheckHandshakeReqToken(root.GetProperty("handshakeReqToken"));
         CheckProfileEnvelope(root);
         CheckLobbyRoutes();
+        CheckProfileMerge();
 
         Console.WriteLine();
         if (_failures == 0)
@@ -157,6 +158,52 @@ internal static class Program
             Refused("1", "10.1", "35.71.163.061") == 3, "\"1\" parses as 0.0.0.1 and must not become a route");
         Check("lobby: garbage is refused, not thrown", Refused("", "pubg.com", "35.71.163.61/abc") == 3,
             "an unparseable entry must be reported, not crash route installation");
+    }
+
+    /// <summary>
+    /// Several games' profiles merged into one, and a running process matched to its game: what lets
+    /// the client accelerate whichever game is open without anybody choosing it.
+    /// </summary>
+    private static void CheckProfileMerge()
+    {
+        const string pubg = """
+            {"schemaVersion":1,"games":[{"id":"pubg","name":"PUBG","processNames":["TslGame.exe","TslGame_BE.exe"],"regions":[]}],
+             "relays":[{"id":"sg-1","name":"SG","endpoint":"203.0.113.10:51820"}]}
+            """;
+        const string cs2 = """
+            {"schemaVersion":1,"games":[{"id":"cs2","name":"Counter-Strike 2","processNames":["cs2.exe"],"landmarksRouted":true,
+             "regions":[{"id":"sgp","name":"Singapore","cidrs":["103.10.124.116/32"],"landmarks":["103.10.124.116"]}]}],
+             "relays":[{"id":"hk-1","name":"HK","endpoint":"198.51.100.20:51820"}]}
+            """;
+
+        static GamePingBooster.Core.Profiles.ProfileBundle Parse(string json) =>
+            System.Text.Json.JsonSerializer.Deserialize(json,
+                GamePingBooster.Core.Profiles.ProfileJsonContext.Default.ProfileBundle)!;
+
+        var p = Parse(pubg);
+        var c = Parse(cs2);
+        Check("profile: landmarksRouted is read under that exact name", c.Games[0].LandmarksRouted,
+            "the JSON name and GameEntry disagree - CS2 would warn about its own relays on every match");
+        Check("profile: a profile without landmarksRouted reads false", !p.Games[0].LandmarksRouted,
+            "PUBG's routed-landmark warning would go quiet");
+
+        var merged = GamePingBooster.Core.Profiles.ProfileMerge.Merge([c, p]);
+        Check("merge: every game is kept, primary first", merged.Games.Select(g => g.Id).SequenceEqual(["cs2", "pubg"]),
+            string.Join(", ", merged.Games.Select(g => g.Id)));
+        Check("merge: the relays are the primary's alone, not a union",
+            merged.Relays.Count == 1 && merged.Relays[0].Id == "hk-1",
+            "a relay removed on the server would live on through an older profile");
+
+        var duplicate = GamePingBooster.Core.Profiles.ProfileMerge.Merge([p, Parse(pubg.Replace("\"PUBG\"", "\"PUBG old\""))]);
+        Check("merge: the first copy of a game wins", duplicate.Games.Count == 1 && duplicate.Games[0].Name == "PUBG",
+            $"got {duplicate.Games.Count} game(s), first named {duplicate.Games.FirstOrDefault()?.Name}");
+
+        static string? Owner(GamePingBooster.Core.Profiles.ProfileBundle bundle, string process) =>
+            GamePingBooster.Core.Profiles.ProfileMerge.FindByProcess(bundle.Games, process)?.Id;
+        Check("process: 'CS2' finds Counter-Strike 2 whatever the case", Owner(merged, "CS2") == "cs2",
+            "profiles write cs2.exe, the process list reports cs2");
+        Check("process: 'TslGame_BE' finds PUBG", Owner(merged, "TslGame_BE") == "pubg", "the BattlEye shim starts first");
+        Check("process: an unrelated process finds nothing", Owner(merged, "chrome") is null, "routes for no game");
     }
 
     /// <summary>

@@ -68,6 +68,33 @@ public sealed class ProfileSync
     /// </summary>
     private DateTimeOffset _lastFetch = DateTimeOffset.MinValue;
 
+    /// <summary>
+    /// The game named in the first request of a sync. Any game the server has would do - its answer
+    /// lists the rest - and PUBG is the one every licence server has had from the start.
+    /// </summary>
+    private const string FirstGame = "pubg";
+
+    /// <summary>
+    /// The games still to fetch after the first, from the server's list: shaped like a game code,
+    /// each once, and a handful at most - the list arrives over the network, and every entry is one
+    /// more request against the account's hourly allowance.
+    /// </summary>
+    private static IEnumerable<string> OtherGames(IEnumerable<string>? available) =>
+        (available ?? [])
+            .Select(code => code.Trim().ToLowerInvariant())
+            .Where(code => code.Length is > 0 and <= 32 &&
+                           code.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_'))
+            .Where(code => code != FirstGame)
+            .Distinct()
+            .Take(8);
+
+    /// <summary>
+    /// Hands one sealed profile to the service. Passed straight through: this process cannot open it
+    /// and does not try - the envelope is encrypted to the device key, which lives in the service.
+    /// </summary>
+    private Task PushAsync(string sealedHex) =>
+        _pipe.SendAsync(new CommandMessage { Verb = "set-profile", Profile = sealedHex });
+
     public ProfileSync(PipeClient pipe, Action<string> report)
     {
         _pipe = pipe;
@@ -81,7 +108,7 @@ public sealed class ProfileSync
     /// null if it never has. <paramref name="force"/> skips both age checks: used right after a
     /// sign-in, where the person is watching and expects something to happen.
     /// </summary>
-    public async Task SyncAsync(string? licenceUrl, string? devicePublicKey, string gameId,
+    public async Task SyncAsync(string? licenceUrl, string? devicePublicKey,
         bool force, DateTimeOffset? profileUpdatedAt = null, CancellationToken ct = default)
     {
         // Both are needed: the licence server seals the profile to this machine's device key, so
@@ -103,19 +130,27 @@ public sealed class ProfileSync
         try
         {
             using var client = new LicenceClient(licenceUrl);
-            var sealedHex = await client
-                .FetchProfileAsync(refreshToken, devicePublicKey,
-                    string.IsNullOrWhiteSpace(gameId) ? "pubg" : gameId, ct)
+
+            // One request per game: the server seals, and the service stores, each game's profile on
+            // its own. The first request has to name a game; its answer lists every game the server
+            // has, so a game added there reaches this client without a new release.
+            var first = await client
+                .FetchProfileAsync(refreshToken, devicePublicKey, FirstGame, ct)
                 .ConfigureAwait(false);
 
             // Recorded before the push, not after: a push that fails in the service is not a
             // reason to hammer the server again in a second.
             _lastFetch = DateTimeOffset.UtcNow;
 
-            // Passed straight through. This process cannot open it and does not try: the
-            // envelope is encrypted to the device key, which lives in the service.
-            await _pipe.SendAsync(new CommandMessage { Verb = "set-profile", Profile = sealedHex })
-                .ConfigureAwait(false);
+            await PushAsync(first.Envelope).ConfigureAwait(false);
+
+            foreach (var game in OtherGames(first.AvailableGames))
+            {
+                var next = await client
+                    .FetchProfileAsync(refreshToken, devicePublicKey, game, ct)
+                    .ConfigureAwait(false);
+                await PushAsync(next.Envelope).ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

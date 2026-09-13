@@ -74,7 +74,7 @@ public partial class App : Application
                 var written = status.ProfileUpdatedAt is { } unix
                     ? DateTimeOffset.FromUnixTimeSeconds(unix)
                     : (DateTimeOffset?)null;
-                _ = _profileSync.SyncAsync(status.LicenceUrl, status.DevicePublicKey, "pubg", false, written);
+                _ = _profileSync.SyncAsync(status.LicenceUrl, status.DevicePublicKey, false, written);
             }
 
             // The catch-all: closing the main window is handled in MainWindow.OnClosing,

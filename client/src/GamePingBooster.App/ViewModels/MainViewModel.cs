@@ -507,7 +507,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     // next line raises PropertyChanged - off the UI thread that breaks Avalonia's
                     // bindings in ways that surface later and somewhere else.
                     await profileSync
-                        .SyncAsync(LicenceUrl, DevicePublicKey, "pubg", force: true)
+                        .SyncAsync(LicenceUrl, DevicePublicKey, force: true)
                         .ConfigureAwait(true);
                 }
 

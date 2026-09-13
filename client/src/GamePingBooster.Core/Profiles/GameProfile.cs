@@ -57,6 +57,23 @@ public sealed class GameEntry
     /// from this file (web-service/app/lib/profile.server.ts).
     /// </summary>
     [JsonPropertyName("lobbyAddresses")] public List<string> LobbyAddresses { get; set; } = [];
+
+    /// <summary>
+    /// True when this game's landmarks sit inside its own routed ranges ON PURPOSE.
+    ///
+    /// Counter-Strike 2 carries gameplay over Steam Datagram Relay: the game talks UDP to a Valve
+    /// relay, and the latency probe it sends before a match goes to the SAME address and port the
+    /// match then uses - 103.28.54.179:27050 was a 12-packet probe in one capture on 2026-09-13 and
+    /// carried a 7,020-packet match in the next. A route cannot tell the two apart, so the rule that
+    /// keeps PUBG's probes on the player's own connection cannot hold. What holds instead is routing
+    /// every relay of every PoP the player may enter, so probe and match always take the same path -
+    /// and then the relay is its own landmark: it answers ICMP, it is where the game's packets go,
+    /// and it is inside a routed /32 by design.
+    ///
+    /// All it changes on this side is that the routed-landmark warning stays quiet for such a game.
+    /// Absent means false, which is right for every profile written before the field existed.
+    /// </summary>
+    [JsonPropertyName("landmarksRouted")] public bool LandmarksRouted { get; set; }
 }
 
 public sealed class RegionEntry

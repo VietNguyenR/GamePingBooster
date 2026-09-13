@@ -1,9 +1,11 @@
 using System.Diagnostics;
+using GamePingBooster.Core.Profiles;
 
 namespace GamePingBooster.Service.Network;
 
 /// <summary>
-/// Watches whether the game process is running, so routes go in and come out at the right time.
+/// Watches which game is running, so routes go in and come out at the right time - and for the
+/// right game.
 ///
 /// How: it enumerates running processes - exactly what Task Manager does, through a public
 /// Windows API. It does NOT open a handle into the game, read its memory, hook it, or inject
@@ -12,6 +14,9 @@ namespace GamePingBooster.Service.Network;
 ///
 /// Why watch at all: PUBG's IP ranges live on AWS/Azure alongside thousands of other services.
 /// Leaving the routes in place permanently would drag unrelated traffic through the relay.
+///
+/// It watches every game in the profile at once. There is no game selector in the client: the
+/// process that is open decides which game's routes are installed.
 /// </summary>
 internal sealed class GameProcessWatcher : IDisposable
 {
@@ -20,7 +25,10 @@ internal sealed class GameProcessWatcher : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private Task? _loop;
 
-    /// <summary>Raised on change: true when the game just started, false when it just exited.</summary>
+    /// <summary>
+    /// Raised on change: (true, process) when a game started or a different game's process took
+    /// over, (false, null) when the last one exited.
+    /// </summary>
     public event Action<bool, string?>? GameStateChanged;
 
     public bool IsGameRunning { get; private set; }
@@ -28,12 +36,7 @@ internal sealed class GameProcessWatcher : IDisposable
 
     public GameProcessWatcher(IEnumerable<string> processNames, TimeSpan? interval = null)
     {
-        // Process.GetProcessesByName expects names WITHOUT the .exe suffix.
-        _processNames = processNames
-            .Select(n => n.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? n[..^4] : n)
-            .Where(n => n.Length > 0)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        _processNames = Normalise(processNames);
         _interval = interval ?? TimeSpan.FromSeconds(2);
     }
 
@@ -49,13 +52,16 @@ internal sealed class GameProcessWatcher : IDisposable
         {
             try
             {
-                var found = FindRunningGame();
-                var running = found is not null;
-                if (running != IsGameRunning)
+                var found = FindRunning(_processNames);
+
+                // Compared by NAME, not only running-or-not. Closing one game and opening another
+                // within a single poll would otherwise look like no change at all, and the first
+                // game's routes would stay in while the second game played.
+                if (!string.Equals(found, RunningProcessName, StringComparison.OrdinalIgnoreCase))
                 {
-                    IsGameRunning = running;
+                    IsGameRunning = found is not null;
                     RunningProcessName = found;
-                    GameStateChanged?.Invoke(running, found);
+                    GameStateChanged?.Invoke(IsGameRunning, found);
                 }
                 await timer.WaitForNextTickAsync(ct).ConfigureAwait(false);
             }
@@ -72,9 +78,13 @@ internal sealed class GameProcessWatcher : IDisposable
         }
     }
 
-    private string? FindRunningGame()
+    /// <summary>
+    /// The first of <paramref name="processNames"/> that is running, or null. Also used once at
+    /// connect, before a watcher exists, to measure relays for a game that is already open.
+    /// </summary>
+    public static string? FindRunning(IEnumerable<string> processNames)
     {
-        foreach (var name in _processNames)
+        foreach (var name in Normalise(processNames))
         {
             var procs = Process.GetProcessesByName(name);
             try
@@ -88,6 +98,14 @@ internal sealed class GameProcessWatcher : IDisposable
         }
         return null;
     }
+
+    /// <summary>Process.GetProcessesByName expects names WITHOUT the .exe suffix.</summary>
+    private static string[] Normalise(IEnumerable<string> processNames) =>
+        processNames
+            .Select(ProfileMerge.StripExe)
+            .Where(n => n.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
     public void Dispose()
     {

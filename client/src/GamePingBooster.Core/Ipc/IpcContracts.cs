@@ -69,7 +69,11 @@ public sealed class CommandMessage
     /// <summary>Relay id to use, e.g. "sg-1". Empty means let the service pick by ping.</summary>
     [JsonPropertyName("relayId")] public string? RelayId { get; set; }
 
-    /// <summary>Id of the game to accelerate, e.g. "pubg".</summary>
+    /// <summary>
+    /// Id of the game to measure relays for, e.g. "pubg". Null - which is what the UI sends - lets
+    /// the service decide: the game already open, else the last one it saw. Which game's routes are
+    /// installed is never decided here; the running process decides that.
+    /// </summary>
     [JsonPropertyName("gameId")] public string? GameId { get; set; }
 
     // ------------------------------------------------------------------ set-token

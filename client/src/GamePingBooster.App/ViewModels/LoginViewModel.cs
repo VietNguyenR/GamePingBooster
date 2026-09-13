@@ -195,7 +195,7 @@ public sealed class LoginViewModel : INotifyPropertyChanged
             // force: true, so the age of whatever profile is already stored is irrelevant and
             // there is nothing to pass for it.
             await _profileSync
-                .SyncAsync(_licenceUrl, _devicePublicKey, "pubg", force: true, profileUpdatedAt: null, ct: ct)
+                .SyncAsync(_licenceUrl, _devicePublicKey, force: true, profileUpdatedAt: null, ct: ct)
                 .ConfigureAwait(true);
         }
     }

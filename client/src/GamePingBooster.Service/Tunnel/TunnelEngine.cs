@@ -167,17 +167,30 @@ internal sealed class TunnelEngine : IAsyncDisposable
         }
         if (parsed is null || parsed.Games.Count == 0) return "That profile names no games.";
 
+        // Stored per game, under the game's own id. The licence server seals one game per profile,
+        // and a single shared file meant fetching Counter-Strike 2 overwrote PUBG. The id becomes a
+        // file name and this pipe is open to BuiltinUsers, so it is held to a shape that can only
+        // ever name a file inside the one directory.
+        var game = parsed.Games[0];
+        if (!IsStorableGameId(game.Id))
+        {
+            return $"That profile's game id cannot be stored: '{game.Id}'.";
+        }
+
         try
         {
-            Directory.CreateDirectory(ServiceConfig.DefaultDirectory);
-            var tmp = SealedProfilePath + ".tmp";
+            Directory.CreateDirectory(SealedProfileDirectory);
+            var path = SealedProfilePathFor(game.Id);
+            var tmp = path + ".tmp";
             await File.WriteAllBytesAsync(tmp, envelope, ct).ConfigureAwait(false);
-            File.Move(tmp, SealedProfilePath, overwrite: true);
+            File.Move(tmp, path, overwrite: true);
         }
         catch (Exception ex)
         {
             return $"Could not store the profile: {ex.Message}";
         }
+
+        RetireLegacySealedProfile();
 
         try
         {
@@ -189,8 +202,8 @@ internal sealed class TunnelEngine : IAsyncDisposable
         }
 
         var cidrs = parsed.Games.Sum(g => g.Regions.Sum(r => r.Cidrs.Count));
-        _log($"Profile updated from the licence server: {parsed.Games.Count} game(s), " +
-             $"{cidrs} ranges, {parsed.Relays.Count} relay(s). It applies from the next connect.");
+        _log($"Profile for {game.Name} updated from the licence server: {cidrs} ranges, " +
+             $"{parsed.Relays.Count} relay(s). It applies from the next connect.");
         StatusChanged?.Invoke(Snapshot());
         return null;
     }
@@ -215,16 +228,96 @@ internal sealed class TunnelEngine : IAsyncDisposable
     // -------------------------------------------------------------- profile
 
     /// <summary>
-    /// Where the profile the licence server sent is kept.
+    /// Where the profiles the licence server sent are kept: one file per game, profiles\pubg.sealed
+    /// and profiles\cs2.sealed.
     ///
-    /// It holds the SEALED envelope, not the profile. Nothing readable is ever written: opening
-    /// it needs the device key, which is itself DPAPI machine-scoped, so a copy of this file on
+    /// Each holds the SEALED envelope, not the profile. Nothing readable is ever written: opening
+    /// it needs the device key, which is itself DPAPI machine-scoped, so a copy of these files on
     /// any other machine - or in a backup, or in a support bundle - is inert. It used to be
     /// plaintext JSON with every captured range in it, which is exactly what this product is
     /// meant not to hand out.
     /// </summary>
-    internal static string SealedProfilePath =>
+    internal static string SealedProfileDirectory =>
+        Path.Combine(ServiceConfig.DefaultDirectory, "profiles");
+
+    private static string SealedProfilePathFor(string gameId) =>
+        Path.Combine(SealedProfileDirectory, gameId.ToLowerInvariant() + ".sealed");
+
+    /// <summary>
+    /// The one file every game shared before profiles were stored per game. Still read - after
+    /// every per-game file, so it never wins - so an upgraded installation keeps its profile until
+    /// the first fetch replaces it, and deleted once every game it held has a file of its own.
+    /// </summary>
+    private static string LegacySealedProfilePath =>
         Path.Combine(ServiceConfig.DefaultDirectory, "profile.sealed");
+
+    /// <summary>Every stored sealed profile, newest first, with the legacy file last.</summary>
+    private static List<string> SealedProfileFiles()
+    {
+        var files = Directory.Exists(SealedProfileDirectory)
+            ? Directory.GetFiles(SealedProfileDirectory, "*.sealed")
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .ToList()
+            : [];
+        if (File.Exists(LegacySealedProfilePath)) files.Add(LegacySealedProfilePath);
+        return files;
+    }
+
+    /// <summary>
+    /// When the OLDEST stored profile was written, or null when none is.
+    ///
+    /// The oldest, because the UI reads this to decide whether a fetch is due, and one game's fresh
+    /// profile must not hide that another's is stale.
+    /// </summary>
+    private static DateTimeOffset? OldestSealedProfileWrite()
+    {
+        var files = SealedProfileFiles();
+        if (files.Count == 0) return null;
+        return new DateTimeOffset(files.Min(File.GetLastWriteTimeUtc));
+    }
+
+    /// <summary>A game id that is safe as a file name: letters, digits, '-' and '_', at most 32.</summary>
+    private static bool IsStorableGameId(string id) =>
+        id.Length is > 0 and <= 32 &&
+        id.All(c => c is (>= 'a' and <= 'z') or (>= 'A' and <= 'Z') or (>= '0' and <= '9') or '-' or '_');
+
+    /// <summary>Opens one sealed envelope in memory. The plaintext exists only as long as parsing takes.</summary>
+    private ProfileBundle OpenSealed(byte[] envelope)
+    {
+        var plaintext = _device.OpenSealedProfile(envelope);
+        string json;
+        try
+        {
+            json = System.Text.Encoding.UTF8.GetString(plaintext);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(plaintext);
+        }
+        return JsonSerializer.Deserialize(json, ProfileJsonContext.Default.ProfileBundle)
+               ?? throw new InvalidOperationException("The sealed profile is not valid.");
+    }
+
+    /// <summary>
+    /// Deletes the pre-per-game profile file once nothing in it is still needed. Failures only
+    /// leave it in place, where it is read last and harms nothing.
+    /// </summary>
+    private void RetireLegacySealedProfile()
+    {
+        if (!File.Exists(LegacySealedProfilePath)) return;
+        try
+        {
+            var legacy = OpenSealed(File.ReadAllBytes(LegacySealedProfilePath));
+            if (legacy.Games.Any(g => !IsStorableGameId(g.Id) || !File.Exists(SealedProfilePathFor(g.Id)))) return;
+
+            File.Delete(LegacySealedProfilePath);
+            _log("Removed the old shared profile file - every game it held now has a file of its own.");
+        }
+        catch (Exception ex)
+        {
+            _log($"Left the old shared profile file in place: {ex.Message}");
+        }
+    }
 
     /// <summary>
     /// Loads the profile.
@@ -268,29 +361,60 @@ internal sealed class TunnelEngine : IAsyncDisposable
             local = shipped;
         }
 
-        var sealedExists = File.Exists(SealedProfilePath);
+        var sealedFiles = SealedProfileFiles();
+        var bundles = new List<ProfileBundle>();
         string source;
-        string json;
+        string chosen;
 
-        if ((licensed || !File.Exists(local)) && sealedExists)
+        if ((licensed || !File.Exists(local)) && sealedFiles.Count > 0)
         {
-            // Opened in memory. The plaintext exists only for as long as it takes to parse.
-            var envelope = await File.ReadAllBytesAsync(SealedProfilePath, ct).ConfigureAwait(false);
-            var plaintext = _device.OpenSealedProfile(envelope);
-            try
+            // Every game's profile, newest first, so the newest decides the relay list - see
+            // ProfileMerge. One that cannot be opened is skipped rather than failing the rest: a
+            // damaged Counter-Strike 2 file is no reason to stop accelerating PUBG.
+            foreach (var file in sealedFiles)
             {
-                json = System.Text.Encoding.UTF8.GetString(plaintext);
+                try
+                {
+                    var envelope = await File.ReadAllBytesAsync(file, ct).ConfigureAwait(false);
+                    bundles.Add(OpenSealed(envelope));
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _log($"Skipping the stored profile {Path.GetFileName(file)}: {ex.Message}");
+                }
             }
-            finally
+            if (bundles.Count == 0)
             {
-                CryptographicOperations.ZeroMemory(plaintext);
+                throw new InvalidOperationException("None of the stored profiles could be opened.");
             }
             source = licensed ? "pushed" : "cached";
+            chosen = SealedProfileDirectory;
         }
         else if (File.Exists(local))
         {
-            json = await File.ReadAllTextAsync(local, ct).ConfigureAwait(false);
+            // The configured file is the primary, and its relays are the ones used. Every other
+            // profile beside it adds its games - one file per game is how the installer ships them -
+            // but never its relays. Example files are templates, not profiles.
+            bundles.Add(ParseProfile(await File.ReadAllTextAsync(local, ct).ConfigureAwait(false), local));
+
+            var fullLocal = Path.GetFullPath(local);
+            var siblings = Directory.GetFiles(Path.GetDirectoryName(fullLocal)!, "*.json")
+                .Where(f => !Path.GetFullPath(f).Equals(fullLocal, StringComparison.OrdinalIgnoreCase))
+                .Where(f => !f.EndsWith(".example.json", StringComparison.OrdinalIgnoreCase))
+                .Order(StringComparer.OrdinalIgnoreCase);
+            foreach (var sibling in siblings)
+            {
+                try
+                {
+                    bundles.Add(ParseProfile(await File.ReadAllTextAsync(sibling, ct).ConfigureAwait(false), sibling));
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _log($"Skipping {Path.GetFileName(sibling)} beside the profile: {ex.Message}");
+                }
+            }
             source = "shipped";
+            chosen = local;
         }
         else
         {
@@ -298,24 +422,27 @@ internal sealed class TunnelEngine : IAsyncDisposable
                 $"No profile at {_config.ProfilePath} and nothing from the licence server either.");
         }
 
-        _profile = JsonSerializer.Deserialize(json, ProfileJsonContext.Default.ProfileBundle)
-                   ?? throw new InvalidOperationException("The profile is not valid.");
+        _profile = ProfileMerge.Merge(bundles);
         _profileSource = source;
-        var chosen = source == "shipped" ? local : SealedProfilePath;
+        var games = string.Join(", ", _profile.Games.Select(g => g.Name));
 
         if (licensed && source != "pushed")
         {
             // Loud, because it is the silent failure this whole path exists to avoid: the tunnel
             // will work perfectly on ranges that may be months old.
-            _log($"Loaded the {source} profile from {chosen}. A licence server is configured but " +
+            _log($"Loaded the {source} profile from {chosen} ({games}). A licence server is configured but " +
                  "nothing has been pushed yet - sign in so the app can fetch the current one.");
         }
         else
         {
-            _log($"Loaded the {source} profile from {chosen}");
+            _log($"Loaded the {source} profile from {chosen} ({games})");
         }
         ApplySelfHostedRelay();
     }
+
+    private static ProfileBundle ParseProfile(string json, string path) =>
+        JsonSerializer.Deserialize(json, ProfileJsonContext.Default.ProfileBundle)
+        ?? throw new InvalidOperationException($"The profile at {path} is not valid.");
 
     // -------------------------------------------------------------- connect
 
@@ -355,7 +482,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
                 _log($"Could not reload the profile ({ex.Message}) - continuing with the one already loaded.");
             }
 
-            _game = FindGame(gameId ?? _config.DefaultGameId);
+            _game = ChooseGameForConnect(gameId);
             var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
 
             // Choose the relay before creating anything. Probing is pure UDP - no adapter, no
@@ -385,8 +512,8 @@ internal sealed class TunnelEngine : IAsyncDisposable
             // the relay for carrying the wrong source address - a late lobby route hangs the lobby.
             InstallLobbyRoutes();
 
-            // Watch the game so routes come and go with it.
-            _watcher = new GameProcessWatcher(_game.ProcessNames);
+            // Watch EVERY game in the profile, so routes come and go with whichever one is opened.
+            _watcher = new GameProcessWatcher(_profile!.Games.SelectMany(g => g.ProcessNames));
             _watcher.GameStateChanged += OnGameStateChanged;
             _watcher.Start();
 
@@ -402,7 +529,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             SetState(TunnelState.Connected,
                 _watcher.IsGameRunning
                     ? $"Connected to {_relay.Name} - accelerating {_game.Name}"
-                    : $"Connected to {_relay.Name} - waiting for {_game.Name} to start");
+                    : $"Connected to {_relay.Name} - waiting for {GamesLabel} to start");
         }
         catch (Exception ex)
         {
@@ -1338,6 +1465,23 @@ internal sealed class TunnelEngine : IAsyncDisposable
         {
             if (running)
             {
+                var detected = processName is null
+                    ? null
+                    : ProfileMerge.FindByProcess(_profile?.Games ?? [], processName);
+                if (detected is null) return;
+
+                if (!ReferenceEquals(detected, _game))
+                {
+                    SwitchGame(detected);
+                }
+                else if ((_routes?.ActiveGameRouteCount ?? 0) > 0)
+                {
+                    // The same game under another of its processes - PUBG's BattlEye shim handing
+                    // over to the game itself. Its routes are already in.
+                    return;
+                }
+                RememberLastGame(detected);
+
                 // The game can start while the tunnel is down and the reconnect loop is sweeping
                 // relays. Installing routes then would push the game's packets into an adapter
                 // with nothing behind it - the exact blackhole the reconnect path just undid.
@@ -1348,7 +1492,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
                     return;
                 }
 
-                _log($"Detected {processName}.exe running - installing routes.");
+                _log($"Detected {processName}.exe running - installing routes for {detected.Name}.");
                 InstallRoutes();
                 SetState(TunnelState.Connected, $"Accelerating {_game?.Name} through {_relay?.Name}");
             }
@@ -1359,7 +1503,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
                 // Do not claim Connected while a reconnect is still in progress.
                 if (_tunnel is not null)
                 {
-                    SetState(TunnelState.Connected, $"Connected to {_relay?.Name} - waiting for {_game?.Name} to start");
+                    SetState(TunnelState.Connected, $"Connected to {_relay?.Name} - waiting for {GamesLabel} to start");
                 }
             }
         }
@@ -1401,15 +1545,20 @@ internal sealed class TunnelEngine : IAsyncDisposable
     /// </summary>
     private void InstallLobbyRoutes()
     {
-        if (_adapter is null || _routes is null || _tunnel is null || _game is null) return;
-        if (_game.LobbyAddresses.Count == 0) return;
+        if (_adapter is null || _routes is null || _tunnel is null || _profile is null) return;
 
-        var relays = (_profile?.Relays ?? []).Select(r => r.Endpoint).ToList();
+        // Every game's, not only the one relays were measured for. Nobody chooses a game, and a lobby
+        // opens in the first seconds after launch - before the watcher has said which game it is.
+        var games = _profile.Games;
+        var lobby = games.SelectMany(g => g.LobbyAddresses).ToList();
+        if (lobby.Count == 0) return;
+
+        var relays = _profile.Relays.Select(r => r.Endpoint).ToList();
         if (_relay is not null) relays.Add(_relay.Endpoint);
-        var landmarks = _game.Regions.SelectMany(r => r.Landmarks);
+        var landmarks = games.SelectMany(g => g.Regions).SelectMany(r => r.Landmarks);
 
         var rejected = new List<LobbyRoutes.Rejection>();
-        var hostRoutes = LobbyRoutes.ToHostRoutes(_game.LobbyAddresses, relays, landmarks, rejected);
+        var hostRoutes = LobbyRoutes.ToHostRoutes(lobby, relays, landmarks, rejected);
         foreach (var refusal in rejected)
         {
             _log($"WARNING: lobby address '{refusal.Entry}' is not routed - {refusal.Reason}.");
@@ -1420,7 +1569,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
         {
             _routes.InstallLobbyRoutes(_adapter.InterfaceIndex, hostRoutes);
             _log($"Installed {hostRoutes.Count} lobby route(s) into the virtual adapter " +
-                 $"({string.Join(", ", hostRoutes)}) - now, not when {_game.Name} starts.");
+                 $"({string.Join(", ", hostRoutes)}) - now, not when the game starts.");
         }
         catch (Exception ex)
         {
@@ -1444,6 +1593,10 @@ internal sealed class TunnelEngine : IAsyncDisposable
     /// </summary>
     private void WarnAboutRoutedLandmarks(List<string> cidrs)
     {
+        // A Steam Datagram Relay game's landmarks are its own relays, routed on purpose: the game
+        // probes and plays on the same relay address and port. See GameEntry.LandmarksRouted.
+        if (_game!.LandmarksRouted) return;
+
         var ranges = new List<(uint Network, uint Mask, string Cidr)>();
         foreach (var cidr in cidrs)
         {
@@ -1603,7 +1756,9 @@ internal sealed class TunnelEngine : IAsyncDisposable
             GameRegionName = _path?.RegionName,
             LossRatio = _tunnel?.LossRatio,
             GameRunning = _watcher?.IsGameRunning ?? false,
-            GameName = _game?.Name,
+            // The game being played, or every game that would be when none is: there is no selector,
+            // so naming the one relays happened to be measured for would read as a choice nobody made.
+            GameName = (_watcher?.IsGameRunning ?? false) ? _game?.Name : GamesLabelOrNull,
             ActiveRoutes = _routes?.ActiveRouteCount ?? 0,
             PacketsSent = _tunnel?.PacketsSent ?? 0,
             PacketsReceived = _tunnel?.PacketsReceived ?? 0,
@@ -1628,9 +1783,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             // Read from the file rather than remembered in a field, so it is right after a restart
             // and right after somebody has copied a profile in by hand. A missing file is null,
             // which the UI reads as "never" - correct on a machine that has never signed in.
-            ProfileUpdatedAt = File.Exists(SealedProfilePath)
-                ? new DateTimeOffset(File.GetLastWriteTimeUtc(SealedProfilePath)).ToUnixTimeSeconds()
-                : null,
+            ProfileUpdatedAt = OldestSealedProfileWrite()?.ToUnixTimeSeconds(),
         };
     }
 
@@ -1813,6 +1966,85 @@ internal sealed class TunnelEngine : IAsyncDisposable
     private GameEntry FindGame(string id) =>
         _profile!.Games.FirstOrDefault(g => g.Id.Equals(id, StringComparison.OrdinalIgnoreCase))
         ?? throw new InvalidOperationException($"The profile has no game with id '{id}'.");
+
+    /// <summary>
+    /// Which game relays are measured for at connect, before the watcher has seen anything.
+    ///
+    /// Relays are compared once, against one game's region, so this is the best guess there is: the
+    /// game already open, else the last one seen - so somebody who plays Counter-Strike 2 is measured
+    /// for it from their second session on - else the configured default, else the first game in the
+    /// profile. An explicit id still wins; the UI never sends one.
+    /// </summary>
+    private GameEntry ChooseGameForConnect(string? requested)
+    {
+        var games = _profile!.Games;
+        if (games.Count == 0) throw new InvalidOperationException("The profile declares no games.");
+        if (!string.IsNullOrWhiteSpace(requested)) return FindGame(requested);
+
+        var running = GameProcessWatcher.FindRunning(games.SelectMany(g => g.ProcessNames));
+        if (running is not null && ProfileMerge.FindByProcess(games, running) is { } open) return open;
+
+        foreach (var id in new[] { _config.LastGameId, _config.DefaultGameId })
+        {
+            if (string.IsNullOrWhiteSpace(id)) continue;
+            var known = games.FirstOrDefault(g => g.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
+            if (known is not null) return known;
+        }
+        return games[0];
+    }
+
+    /// <summary>
+    /// Moves the routes over to a game that has just been detected, from whichever game they were for.
+    ///
+    /// The relay stays. It was measured at connect against the other game's region, but moving to a
+    /// different relay now would give the game servers a new source address - exactly what a failover
+    /// costs - to fix a difference nobody has measured. The log says so, and the next connect measures
+    /// for this game: see ServiceConfig.LastGameId.
+    /// </summary>
+    private void SwitchGame(GameEntry game)
+    {
+        var previous = _game;
+        if (_adapter is not null && (_routes?.ActiveGameRouteCount ?? 0) > 0)
+        {
+            _routes!.RemoveGameRoutes(_adapter.InterfaceIndex);
+        }
+        _game = game;
+
+        // Both belonged to the previous game's server. The probe loop measures the new one within a
+        // second of its first packet.
+        _path = null;
+        ForgetDirectPing();
+
+        if (previous is not null)
+        {
+            _log($"{game.Name} is running - moving the routes over from {previous.Name}. Relays were " +
+                 $"measured for {previous.Name} at connect; the next connect measures them for {game.Name}.");
+        }
+    }
+
+    /// <summary>Records the game just seen, so the next connect measures relays for it. Never fails the caller.</summary>
+    private void RememberLastGame(GameEntry game)
+    {
+        if (game.Id.Equals(_config.LastGameId, StringComparison.OrdinalIgnoreCase)) return;
+
+        var previous = _config.LastGameId;
+        _config.LastGameId = game.Id;
+        try
+        {
+            _config.Save();
+        }
+        catch (Exception ex)
+        {
+            _config.LastGameId = previous;
+            _log($"Could not remember {game.Name} as the last game played: {ex.Message}");
+        }
+    }
+
+    /// <summary>Every game in the profile by name, "PUBG / Counter-Strike 2", or null without a profile.</summary>
+    private string? GamesLabelOrNull =>
+        _profile is { Games.Count: > 0 } profile ? string.Join(" / ", profile.Games.Select(g => g.Name)) : null;
+
+    private string GamesLabel => GamesLabelOrNull ?? "the game";
 
     private RelayEntry FindRelay(string? id)
     {

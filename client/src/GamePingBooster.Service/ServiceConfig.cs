@@ -60,8 +60,20 @@ public sealed class ServiceConfig
     [JsonIgnore]
     public bool HasKey => !string.IsNullOrWhiteSpace(Psk);
 
-    /// <summary>Default game id.</summary>
+    /// <summary>
+    /// The game relays are measured for at connect when no game is open and none has been seen
+    /// yet. Only a fallback: which game is accelerated is decided by which process is running.
+    /// </summary>
     [JsonPropertyName("defaultGameId")] public string DefaultGameId { get; set; } = "pubg";
+
+    /// <summary>
+    /// The last game the service saw running, written when it changes.
+    ///
+    /// Relays are measured once, at connect, against one game's region - usually before any game is
+    /// open. Remembering the last one means somebody who plays Counter-Strike 2 gets relays chosen
+    /// for Counter-Strike 2 from their second session on, without choosing anything.
+    /// </summary>
+    [JsonPropertyName("lastGameId")] public string? LastGameId { get; set; }
 
     /// <summary>Virtual adapter name as shown in Network Connections.</summary>
     [JsonPropertyName("adapterName")] public string AdapterName { get; set; } = "Game Ping Booster";

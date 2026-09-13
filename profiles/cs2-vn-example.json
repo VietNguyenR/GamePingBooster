@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "generatedUtc": "2026-09-13T13:18:22Z",
+  "games": [
+    {
+      "id": "cs2",
+      "name": "Counter-Strike 2",
+      "processNames": ["cs2.exe"],
+      "landmarksRouted": true,
+      "lobbyAddresses": [],
+      "regions": [
+        {
+          "id": "sgp",
+          "name": "Singapore",
+          "source": "steam-sdr:730:sgp",
+          "note": "Every relay Valve publishes for PoP \u0027sgp\u0027 (GetSDRConfig appid 730, revision 1787769460), each as a /32. The licensed client receives this from the licence server, kept current by web-service/scripts/sync-sdr.ts; this file is the self-hosted copy and goes stale when Valve replaces relays.",
+          "cidrs": [],
+          "landmarks": []
+        },
+        {
+          "id": "hkg",
+          "name": "Hong Kong",
+          "source": "steam-sdr:730:hkg",
+          "note": "Every relay Valve publishes for PoP \u0027hkg\u0027 (GetSDRConfig appid 730, revision 1787769460), each as a /32. The licensed client receives this from the licence server, kept current by web-service/scripts/sync-sdr.ts; this file is the self-hosted copy and goes stale when Valve replaces relays.",
+          "cidrs": [],
+          "landmarks": []
+        }
+      ]
+    }
+  ],
+  "relays": []
+}
