@@ -232,8 +232,8 @@ Windows will not accept anything else in a file version resource.
 That is the whole procedure. It refuses, before changing anything, when: you are not on `main`,
 there are uncommitted changes, `main` is behind `origin`, the tag already exists, or the version
 is not newer than the latest release. It then shows what it will do and asks once. After the tag
-is pushed, `.github/workflows/release.yml` builds the installer, the client zip and the relay
-package, and creates the release with them attached.
+is pushed, `.github/workflows/release.yml` builds the installer and the relay package, and
+creates the release with them attached.
 
 **Never create or publish a release on the GitHub web page.** Releases on this repository are
 immutable. A published release accepts no new assets, so one published by hand can never receive

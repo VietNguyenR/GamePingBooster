@@ -155,28 +155,11 @@ jobs:
           if (-not (Test-Path $installer)) { throw "Expected installer not found: $installer" }
           Write-Host "Installer OK: $installer"
 
-      - name: Package the client zip
-        # No existing script produces a plain client package (only the installer does), so this
-        # stages the same files the installer copies - see installer/GamePingBooster.iss [Files] -
-        # and zips them for people who don't want to run an installer.
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $stage = "dist\client"
-          New-Item -ItemType Directory -Force -Path $stage | Out-Null
-
-          $svcPublish = "client\src\GamePingBooster.Service\bin\Release\net9.0-windows\win-x64\publish"
-          $appPublish = "client\src\GamePingBooster.App\bin\Release\net9.0-windows\win-x64\publish"
-          # Flat copy, same as gpb.ps1's own `publish` verb does for these two folders - Native
-          # AOT publish output here has no subdirectories worth preserving.
-          Get-ChildItem $svcPublish, $appPublish -File | Where-Object { $_.Extension -ne '.pdb' } |
-            ForEach-Object { Copy-Item $_.FullName $stage -Force }
-          Copy-Item client\native\wintun\wintun.dll $stage -Force
-          New-Item -ItemType Directory -Force -Path "$stage\profiles" | Out-Null
-          Copy-Item profiles\pubg-vn.json "$stage\profiles\pubg-vn.json" -Force
-
-          $zipName = "GamePingBooster-Client-$env:VERSION-win-x64.zip"
-          Compress-Archive -Path "$stage\*" -DestinationPath $zipName -Force
-          Write-Host "Client package OK: $zipName"
+      # There is deliberately no client zip. Releases up to v0.2.1 shipped
+      # GamePingBooster-Client-x.y.z-win-x64.zip beside the installer, and players kept downloading
+      # it instead of Setup: it is a loose copy of the files, so nothing registers the Windows
+      # service (installer/GamePingBooster.iss [Run], sc.exe create) and the app has no background
+      # service to talk to. Removed 2026-09-13 - the installer is the only way to install the client.
 
       - name: Build and package the relay server
         # Reuses relay/deploy.ps1 -PackageOnly as-is: it cross-compiles relayd for linux/amd64
@@ -208,7 +191,6 @@ jobs:
           $repo = "${{ github.repository }}"
           $assets = @(
             "installer\dist\GamePingBooster-Setup-$env:VERSION.exe",
-            "GamePingBooster-Client-$env:VERSION-win-x64.zip",
             "GamePingBooster-Server-$env:VERSION-linux-amd64.tar.gz"
           )
 
