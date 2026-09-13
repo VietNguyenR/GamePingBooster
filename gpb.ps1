@@ -741,7 +741,8 @@ switch ($Verb.ToLowerInvariant()) {
             # and an installer that shipped without it produced an app that crashed on launch
             # with a TypeInitializationException naming neither the file nor the installer.
             'libSkiaSharp' = Join-Path $client 'src\GamePingBooster.App\bin\Release\net9.0-windows\win-x64\publish\libSkiaSharp.dll'
-            'the profile'  = Join-Path $root 'profiles\pubg-vn.json'
+            'the PUBG profile' = Join-Path $root 'profiles\pubg-vn.json'
+            'the CS2 profile'  = Join-Path $root 'profiles\cs2-vn.json'
         }
         foreach ($what in $required.Keys) {
             if (-not (Test-Path $required[$what])) {

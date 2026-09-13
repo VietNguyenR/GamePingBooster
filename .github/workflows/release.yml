@@ -129,16 +129,23 @@ jobs:
           New-Item -ItemType Directory -Force -Path client\native\wintun | Out-Null
           Copy-Item $dll.FullName client\native\wintun\wintun.dll -Force
 
-      - name: Prepare the PUBG server profile
-        # profiles/pubg-vn.json (real IP ranges) is gitignored on purpose - it's live production
-        # context, not public. A CI checkout never has it. Per project decision, this workflow
-        # packages the public example profile instead; swap in the real one before this step
+      - name: Prepare the server profiles
+        # profiles/<game>-vn.json (real IP ranges) are gitignored on purpose - live production
+        # context, not public. A CI checkout never has them. Per project decision, this workflow
+        # packages the public example profiles instead; swap in the real ones before this step
         # (e.g. from a secret) if a release needs to ship real IPs.
+        #
+        # One per file the installer lists (installer/GamePingBooster.iss). Missing one does not fail
+        # here - it fails in Inno Setup as "Compile aborted", which is how v0.2.3 was lost.
         run: |
           $ErrorActionPreference = 'Stop'
-          if (-not (Test-Path profiles\pubg-vn.json)) {
-            Write-Warning "profiles\pubg-vn.json not present (expected - it's gitignored). Using profiles\pubg-vn.example.json instead."
-            Copy-Item profiles\pubg-vn.example.json profiles\pubg-vn.json
+          foreach ($game in 'pubg', 'cs2') {
+            $real = "profiles\$game-vn.json"
+            $example = "profiles\$game-vn.example.json"
+            if (-not (Test-Path $real)) {
+              Write-Warning "$real not present (expected - it's gitignored). Using $example instead."
+              Copy-Item $example $real
+            }
           }
 
       - name: Build client and package the installer
