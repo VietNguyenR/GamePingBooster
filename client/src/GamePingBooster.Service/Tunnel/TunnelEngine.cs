@@ -689,6 +689,22 @@ internal sealed class TunnelEngine : IAsyncDisposable
     ///
     /// Probing is sequential on purpose. Running the probes in parallel would have them compete
     /// for the same uplink and inflate each other's numbers, which defeats the point.
+    ///
+    /// ENTRIES are a second round, run only when the first did not help: when no relay beats the
+    /// player's own connection to the game by <see cref="RelayPaths.HelpMargin"/>. An entry is a
+    /// forwarder in front of a relay - the same relay reached by another road - for lines whose route
+    /// abroad is the problem. A VNTT line on 2026-09-13 left Vietnam through Hong Kong and reached
+    /// Singapore in 68 ms direct and 71 through our relay, while a datacentre in Ho Chi Minh City
+    /// reached that relay in 39. Players on such lines do not report it; they see no change and
+    /// leave, which is why this is automatic. A line the relays already help never measures one.
+    ///
+    /// TWO PATHS TO ONE RELAY ARE NEVER OPEN AT ONCE. relayd keeps one session per device and
+    /// answers a second handshake with that same session, moved to the new address. A client that
+    /// then closed the path it did not pick with a Disconnect - which relayd accepts from the
+    /// session's current address - would end the session of the path it did pick, and the tunnel
+    /// would come up silent. So a relay's own probe is closed WITHOUT a Disconnect before an entry
+    /// to it is measured, and reopened if the relay wins after all: the handshake resumes the same
+    /// session. See <see cref="CloseProbesOf"/> and <see cref="OpenChosenAsync"/>.
     /// </summary>
     private async Task<(RelayEntry Relay, TunnelClient Tunnel)> SelectRelayAsync(
         string? preferredId, byte[] psk, CancellationToken ct)
@@ -696,9 +712,14 @@ internal sealed class TunnelEngine : IAsyncDisposable
         var candidates = _profile!.Relays;
         if (candidates.Count == 0) throw new InvalidOperationException("The profile declares no relays.");
 
+        var paths = RelayPaths.Expand(candidates);
+
         if (preferredId is not null)
         {
-            var pinned = candidates.FirstOrDefault(r => r.Id.Equals(preferredId, StringComparison.OrdinalIgnoreCase));
+            // An entry can be pinned as well as a relay: the override for a player the automatic rule
+            // below gets wrong.
+            var pinned = candidates.Concat(paths)
+                .FirstOrDefault(r => r.Id.Equals(preferredId, StringComparison.OrdinalIgnoreCase));
             if (pinned is not null)
             {
                 var client = new TunnelClient(ParseEndpoint(pinned.Endpoint), AuthFor(pinned, psk), _clientId, _log);
@@ -709,7 +730,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             _log($"The profile has no relay '{preferredId}' - measuring all of them instead.");
         }
 
-        if (candidates.Count == 1)
+        if (candidates.Count == 1 && paths.Count == 0)
         {
             var only = candidates[0];
             var client = new TunnelClient(ParseEndpoint(only.Endpoint), AuthFor(only, psk), _clientId, _log);
@@ -721,61 +742,198 @@ internal sealed class TunnelEngine : IAsyncDisposable
         var target = await ChooseTargetRegionAsync(ct).ConfigureAwait(false);
 
         var probes = new List<RelayProbe>();
-        foreach (var relay in candidates)
+        try
         {
-            ct.ThrowIfCancellationRequested();
-            TunnelClient? client = null;
-            try
+            foreach (var relay in candidates)
             {
-                client = new TunnelClient(ParseEndpoint(relay.Endpoint), AuthFor(relay, psk), _clientId, _log);
-                await client.HandshakeAsync(attempts: 2, ct).ConfigureAwait(false);
+                if (await ProbeAsync(relay, psk, target, ct).ConfigureAwait(false) is { } probe) probes.Add(probe);
+            }
 
-                // Both legs measured the same way, best of three. The handshake RTT is still
-                // taken and still logged, but it is one sample, and subtracting one sample from a
-                // best-of-three echo is what made the second leg come out as zero - see
-                // MeasureRelayRttAsync. It stays as the fallback for a relay that answers a
-                // handshake but not a ping.
-                var legOne = await client.MeasureRelayRttAsync(attempts: 3, ct).ConfigureAwait(false)
-                             ?? client.HandshakeRttMs;
-
-                double? endToEnd = null;
-                if (target is not null)
+            if (paths.Count > 0 && ShouldTryEntries(probes, target))
+            {
+                foreach (var path in paths)
                 {
-                    endToEnd = await client.MeasureThroughTunnelAsync(target.Landmark, attempts: 3, ct)
-                        .ConfigureAwait(false);
+                    CloseProbesOf(probes, RelayPaths.RelayIdOf(path));
+                    if (await ProbeAsync(path, psk, target, ct).ConfigureAwait(false) is { } probe) probes.Add(probe);
                 }
-
-                probes.Add(new RelayProbe(relay, client, legOne, endToEnd));
-                _log($"  {relay.Name} [{relay.Id}] ({relay.Location}): {Describe(legOne, endToEnd, target)}");
             }
-            catch (OperationCanceledException)
+
+            // An entry that could not reach the landmark cannot be scored, and letting it in would drop
+            // the whole comparison to the first leg (see ChooseByEndToEnd) - which an entry a few
+            // milliseconds from the player wins by construction. Relays keep the old all-or-nothing
+            // rule; an unscored entry is simply left out.
+            var scored = target is null
+                ? probes
+                : probes.Where(p => p.Relay.ViaRelayId is null || p.EndToEndMs is not null).ToList();
+
+            if (scored.Count == 0)
             {
-                client?.Dispose();
-                throw;
+                throw new InvalidOperationException(
+                    $"None of the {candidates.Count} relays in the profile answered. Check the network, " +
+                    "the endpoints in the profile, and that the PSK matches.");
             }
-            catch (Exception ex)
+
+            var best = ChooseByEndToEnd(scored, target);
+            var tunnel = await OpenChosenAsync(best, probes, psk, ct).ConfigureAwait(false);
+            return (best.Relay, tunnel);
+        }
+        catch
+        {
+            foreach (var probe in probes)
             {
-                _log($"  {relay.Name} [{relay.Id}] ({relay.Location}): unreachable - {ex.Message}");
-                client?.Dispose();
+                probe.Client?.Dispose();
+                probe.Client = null;
             }
+            throw;
         }
-
-        if (probes.Count == 0)
-        {
-            throw new InvalidOperationException(
-                $"None of the {candidates.Count} relays in the profile answered. Check the network, " +
-                "the endpoints in the profile, and that the PSK matches.");
-        }
-
-        var best = ChooseByEndToEnd(probes, target);
-        foreach (var probe in probes)
-        {
-            if (!ReferenceEquals(probe.Client, best.Client)) probe.Client.Dispose();
-        }
-        return (best.Relay, best.Client);
     }
 
-    private sealed record RelayProbe(RelayEntry Relay, TunnelClient Client, double LegOneMs, double? EndToEndMs);
+    /// <summary>
+    /// Handshakes with one relay or entry and measures both legs through it, or logs why it could
+    /// not and returns null. The probe it returns holds the tunnel open.
+    /// </summary>
+    private async Task<RelayProbe?> ProbeAsync(RelayEntry relay, byte[] psk, LandmarkProbe.Result? target, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        TunnelClient? client = null;
+        try
+        {
+            client = new TunnelClient(ParseEndpoint(relay.Endpoint), AuthFor(relay, psk), _clientId, _log);
+            await client.HandshakeAsync(attempts: 2, ct).ConfigureAwait(false);
+
+            // Both legs measured the same way, best of three. The handshake RTT is still
+            // taken and still logged, but it is one sample, and subtracting one sample from a
+            // best-of-three echo is what made the second leg come out as zero - see
+            // MeasureRelayRttAsync. It stays as the fallback for a relay that answers a
+            // handshake but not a ping.
+            var legOne = await client.MeasureRelayRttAsync(attempts: 3, ct).ConfigureAwait(false)
+                         ?? client.HandshakeRttMs;
+
+            double? endToEnd = null;
+            if (target is not null)
+            {
+                endToEnd = await client.MeasureThroughTunnelAsync(target.Landmark, attempts: 3, ct)
+                    .ConfigureAwait(false);
+            }
+
+            _log($"  {relay.Name} [{relay.Id}] ({relay.Location}): {Describe(legOne, endToEnd, target)}");
+            return new RelayProbe(relay, legOne, endToEnd) { Client = client };
+        }
+        catch (OperationCanceledException)
+        {
+            client?.Dispose();
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _log($"  {relay.Name} [{relay.Id}] ({relay.Location}): unreachable - {ex.Message}");
+
+            // An entry's session is its relay's session. A Disconnect from it would also end the
+            // relay's own probe, closed a moment ago precisely so that it could be reopened.
+            if (relay.ViaRelayId is null) client?.Dispose();
+            else Abandon(client);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Whether the entries are worth a second round, saying why in the log when they are.
+    ///
+    /// Only when the relays could be judged - every one measured end to end against a region - and
+    /// none beat the player's own connection by enough to matter. Or when no relay answered at all,
+    /// since then there is nothing to lose. Relays that could not be judged are not a reason: an entry
+    /// has no fair number to be compared with.
+    /// </summary>
+    private bool ShouldTryEntries(List<RelayProbe> probes, LandmarkProbe.Result? target)
+    {
+        if (probes.Count == 0)
+        {
+            _log("No relay answered directly - trying the entries in front of them.");
+            return true;
+        }
+        if (target is null || probes.Any(p => p.EndToEndMs is null)) return false;
+
+        var best = probes.Min(p => p.EndToEndMs!.Value);
+        if (!RelayPaths.WorthTryingEntries(target.RttMs, best)) return false;
+
+        _log($"The fastest relay is {best:F0} ms end to end to {target.RegionName}, against {target.RttMs:F0} ms " +
+             "on your own connection - not enough of a difference. Trying the entries that reach the same " +
+             "relays by another route.");
+        return true;
+    }
+
+    /// <summary>
+    /// Closes every open probe that ends at <paramref name="relayId"/>, WITHOUT a Disconnect, so the
+    /// next path to that relay can be measured alone. The relay keeps the session, and a later
+    /// handshake on any path to it resumes that session rather than taking a second address.
+    /// </summary>
+    private static void CloseProbesOf(List<RelayProbe> probes, string relayId)
+    {
+        foreach (var probe in probes)
+        {
+            if (probe.Client is null) continue;
+            if (!RelayPaths.RelayIdOf(probe.Relay).Equals(relayId, StringComparison.OrdinalIgnoreCase)) continue;
+            Abandon(probe.Client);
+            probe.Client = null;
+        }
+    }
+
+    /// <summary>
+    /// Closes every probe but the winner and hands back the winner's tunnel, reopening it first if it
+    /// was closed to make way for an entry to the same relay.
+    ///
+    /// Probes to OTHER relays go with a Disconnect, as they always have: each is a separate relayd,
+    /// and its address should go back to its pool now. A probe that ends at the SAME relay as the
+    /// winner goes without one - it shares the winner's session, and a Disconnect from it would end it.
+    /// </summary>
+    private async Task<TunnelClient> OpenChosenAsync(RelayProbe best, List<RelayProbe> probes, byte[] psk, CancellationToken ct)
+    {
+        var winner = RelayPaths.RelayIdOf(best.Relay);
+        foreach (var probe in probes)
+        {
+            if (ReferenceEquals(probe, best) || probe.Client is null) continue;
+            if (RelayPaths.RelayIdOf(probe.Relay).Equals(winner, StringComparison.OrdinalIgnoreCase))
+            {
+                Abandon(probe.Client);
+            }
+            else
+            {
+                probe.Client.Dispose();
+            }
+            probe.Client = null;
+        }
+
+        if (best.Client is { } open)
+        {
+            best.Client = null;
+            return open;
+        }
+
+        _log($"Reopening {best.Relay.Name} - it was closed while an entry to the same relay was measured.");
+        var client = new TunnelClient(ParseEndpoint(best.Relay.Endpoint), AuthFor(best.Relay, psk), _clientId, _log);
+        try
+        {
+            await client.HandshakeAsync(attempts: 4, ct).ConfigureAwait(false);
+            return client;
+        }
+        catch
+        {
+            client.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// One path measured during selection. <see cref="Client"/> is the open tunnel, and null once it
+    /// has been closed - to make way for another path to the same relay, or because it lost.
+    /// </summary>
+    private sealed class RelayProbe(RelayEntry relay, double legOneMs, double? endToEndMs)
+    {
+        public RelayEntry Relay { get; } = relay;
+        public double LegOneMs { get; } = legOneMs;
+        public double? EndToEndMs { get; } = endToEndMs;
+        public TunnelClient? Client { get; set; }
+    }
 
     /// <summary>
     /// What the chosen relay measured on the way to the game's datacentre, kept for the status.
@@ -1614,7 +1772,10 @@ internal sealed class TunnelEngine : IAsyncDisposable
         var lobby = games.SelectMany(g => g.LobbyAddresses).ToList();
         if (lobby.Count == 0) return;
 
-        var relays = _profile.Relays.Select(r => r.Endpoint).ToList();
+        // Entries too: the client pins whichever path it connects through, and an entry is one.
+        var relays = _profile.Relays.Select(r => r.Endpoint)
+            .Concat(RelayPaths.Expand(_profile.Relays).Select(p => p.Endpoint))
+            .ToList();
         if (_relay is not null) relays.Add(_relay.Endpoint);
         var landmarks = games.SelectMany(g => g.Regions).SelectMany(r => r.Landmarks);
 

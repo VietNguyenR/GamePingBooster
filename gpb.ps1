@@ -35,6 +35,10 @@
         .\gpb.ps1 relay logs [name]   follow journalctl on a relay
         .\gpb.ps1 relay test          Go tests only
 
+        .\gpb.ps1 entry deploy [name] upload setup-entry.sh to an entry VPS; it pings every relay
+                                      in gpb.conf and forwards to the nearest (runs ./gpb)
+        .\gpb.ps1 entry list          show the entries gpb.conf declares
+
         .\gpb.ps1 release x.y.z       bump VERSION, commit, push main and the tag; GitHub Actions
                                       then builds and publishes the release. Never publish a
                                       release on the GitHub web page - see .github/workflows/release.yml
@@ -627,6 +631,15 @@ switch ($Verb.ToLowerInvariant()) {
             Warn "Git's bash not found - skipped tools\test-relay-deploy-mode.sh"
         }
 
+        # The relay an entry forwards to is sticky on purpose, so a wrong choice would stay wrong.
+        if ($gitBash) {
+            Say "Entry deploy: the relay choice and what goes over ssh"
+            & $gitBash ((Join-Path $tools 'test-entry-deploy.sh') -replace '\\', '/')
+            if ($LASTEXITCODE -ne 0) { throw "the entry deploy test failed" }
+        } else {
+            Warn "Git's bash not found - skipped tools\test-entry-deploy.sh"
+        }
+
         # Pure logic, no network and no service: it drives the lag verdict with synthetic
         # samples, which is the only way to reach its branches. A healthy connection reaches one.
         Say "Lag diagnosis: the verdict rules"
@@ -778,6 +791,21 @@ switch ($Verb.ToLowerInvariant()) {
         Say "  GamePingBooster-Setup-$version.exe" 'Green'
         Warn "It is NOT code signed. Windows SmartScreen will warn every person who runs it,"
         Warn "and many will stop there. Signing needs a certificate you have to buy."
+    }
+
+    'entry' {
+        # One implementation, in ./gpb. An entry deploy is ssh, a shell script and some iptables rules
+        # on the far end - nothing Windows adds to - so Git's bash runs exactly the code a Linux or
+        # macOS machine does, instead of a second copy here that would have to be kept in step by
+        # hand the way deploy.ps1 and ./gpb are.
+        $gitBash = Get-GitBash
+        if (-not $gitBash) {
+            throw "Git's bash not found. The entry verbs run through ./gpb - install Git for Windows, or run ./gpb entry from any shell."
+        }
+        $gpbArgs = @(((Join-Path $root 'gpb') -replace '\\', '/'), 'entry')
+        foreach ($a in @($Arg1, $Arg2) + @($Rest)) { if ($a) { $gpbArgs += $a } }
+        & $gitBash @gpbArgs
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 
     'relay' {

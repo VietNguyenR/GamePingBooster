@@ -89,6 +89,40 @@ RELAY_SG_LISTEN=51820
 # RELAY_HK_KEY=~/.ssh/id_ed25519
 
 
+# =============================================================================== your entries
+#
+# An entry is a small VPS - normally in the players' own country - that forwards UDP, untouched, to
+# one of the relays above. It is for players whose ISP reaches the relays the long way round but
+# reaches a datacentre at home in a few milliseconds. No relayd runs there; clients find it by
+# themselves and use it only when it is faster for them.
+#
+#   ./gpb entry deploy vn1         ping every relay above FROM the entry, forward to the nearest
+#   ./gpb entry list               show every entry this file declares
+#   ./gpb entry setup              first-time setup, explained
+#
+#   ENTRY_<NAME>_HOST       IPv4 address of the VPS                          (required)
+#   ENTRY_<NAME>_USER       SSH user                                         [root]
+#   ENTRY_<NAME>_PORT       SSH port                                         [22]
+#   ENTRY_<NAME>_KEY        private key file, ~ allowed                      [ssh decides]
+#   ENTRY_<NAME>_PASSWORD   password, if the host refuses key auth           [ssh asks you]
+#   ENTRY_<NAME>_SUDO_PASSWORD   password for sudo, when it differs          [the one above]
+#   ENTRY_<NAME>_LISTEN     UDP port players reach the entry on              [51820]
+#   ENTRY_<NAME>_RELAY      a relay name from above, instead of the nearest  [the nearest]
+#   ENTRY_<NAME>_WAN        network interface, when detection picks wrong    [detected]
+#
+# Relays declared by hostname rather than address are left out: a forwarding rule takes an address.
+#
+# The relay an entry forwards to is KEPT from one deploy to the next, because the licence server
+# lists the entry under that relay and a client checks that relay's signature through it. A later
+# deploy only reports a nearer relay. It moves by itself only when its relay stops answering or is
+# removed from this file, and says so loudly. Every deploy ends by printing what to enter in
+# /admin/relays.
+#
+# ENTRY_VN1_HOST=198.51.100.30
+# ENTRY_VN1_USER=root
+# ENTRY_VN1_KEY=~/.ssh/id_ed25519
+
+
 # Relay used when a command needs one and you did not name it, as in `./gpb relay deploy`.
 RELAY_DEFAULT=sg
 

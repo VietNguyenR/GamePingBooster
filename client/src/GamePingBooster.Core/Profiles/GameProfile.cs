@@ -138,6 +138,38 @@ public sealed class RelayEntry
     /// and they must keep working untouched.
     /// </summary>
     [JsonPropertyName("publicKey")] public string? PublicKey { get; set; }
+
+    /// <summary>
+    /// Forwarders in front of this relay: the same relay reached by another road, for lines whose
+    /// own route to it is the problem. See <see cref="RelayPaths"/>, which turns each into a path the
+    /// tunnel measures like a relay, and TunnelEngine.SelectRelayAsync for when it bothers.
+    ///
+    /// Absent from older profiles and from self-hosted relays, which is an empty list. A client older
+    /// than the field ignores it and measures exactly the relays it always did.
+    /// </summary>
+    [JsonPropertyName("entries")] public List<RelayEntryPoint> Entries { get; set; } = [];
+
+    /// <summary>
+    /// Set only on a path <see cref="RelayPaths.Expand"/> made from an entry: the id of the relay
+    /// behind it. Never read from a profile and never written to one.
+    /// </summary>
+    [JsonIgnore] public string? ViaRelayId { get; set; }
+}
+
+/// <summary>
+/// One forwarder in front of a relay, as the licence server serves it. It has no key and no name of
+/// its own - a forwarder signs nothing, so the client checks the relay's signature through it.
+/// </summary>
+public sealed class RelayEntryPoint
+{
+    /// <summary>Unique across relays and entries alike: the log names paths by it, and defaultRelayId can pin one.</summary>
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
+
+    /// <summary>Where the forwarder is, for people, e.g. "Vietnam (vHost HCM)".</summary>
+    [JsonPropertyName("location")] public string? Location { get; set; }
+
+    /// <summary>In "ip:port" form, like a relay's.</summary>
+    [JsonPropertyName("endpoint")] public string Endpoint { get; set; } = "";
 }
 
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]

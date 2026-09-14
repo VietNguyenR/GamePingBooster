@@ -84,6 +84,7 @@ internal static class Program
         CheckProfileEnvelope(root);
         CheckLobbyRoutes();
         CheckProfileMerge();
+        CheckRelayEntries();
 
         Console.WriteLine();
         if (_failures == 0)
@@ -158,6 +159,60 @@ internal static class Program
             Refused("1", "10.1", "35.71.163.061") == 3, "\"1\" parses as 0.0.0.1 and must not become a route");
         Check("lobby: garbage is refused, not thrown", Refused("", "pubg.com", "35.71.163.61/abc") == 3,
             "an unparseable entry must be reported, not crash route installation");
+    }
+
+    /// <summary>
+    /// Entries in front of a relay, read from a profile as the licence server writes it, and the rule
+    /// for when the client measures them. The server side of the same shape is
+    /// web-service/scripts/check-relay-entries.ts.
+    /// </summary>
+    private static void CheckRelayEntries()
+    {
+        const string json = """
+            {"schemaVersion":1,"games":[],
+             "relays":[{"id":"sg-1","name":"SG licensed 1","location":"Singapore","endpoint":"139.99.73.90:51820","publicKey":"04ab",
+                        "entries":[{"id":"sg-1-vn","location":"Vietnam (vHost HCM)","endpoint":"103.232.121.10:51820"}]},
+                       {"id":"sg-2","name":"SG licensed 2","endpoint":"206.189.150.52:51820"}]}
+            """;
+        var bundle = System.Text.Json.JsonSerializer.Deserialize(json,
+            GamePingBooster.Core.Profiles.ProfileJsonContext.Default.ProfileBundle)!;
+
+        Check("entries: read under that exact name", bundle.Relays[0].Entries.Count == 1,
+            "the JSON name and RelayEntry disagree - every client would ignore every entry");
+        Check("entries: a relay without the field has none", bundle.Relays[1].Entries.Count == 0,
+            $"got {bundle.Relays[1].Entries.Count}");
+
+        var paths = GamePingBooster.Core.Profiles.RelayPaths.Expand(bundle.Relays);
+        Check("entries: one path per entry", paths.Count == 1, $"got {paths.Count}");
+        var path = paths[0];
+        Check("entries: the path is named by the entry's id", path.Id == "sg-1-vn", path.Id);
+        Check("entries: reached at the forwarder", path.Endpoint == "103.232.121.10:51820", path.Endpoint);
+        Check("entries: verified with the relay's own key", path.PublicKey == "04ab",
+            "the forwarder signs nothing - with any other key every handshake through it fails");
+        Check("entries: located where the traffic leaves", path.Location == "Singapore", path.Location ?? "null");
+        Check("entries: named after the relay, via the forwarder",
+            path.Name == "SG licensed 1 via Vietnam (vHost HCM)", path.Name);
+        Check("entries: a path knows the relay behind it",
+            GamePingBooster.Core.Profiles.RelayPaths.RelayIdOf(path) == "sg-1" &&
+            GamePingBooster.Core.Profiles.RelayPaths.RelayIdOf(bundle.Relays[0]) == "sg-1",
+            "two paths to one relayd would be held open together, and closing one ends the other");
+
+        var written = System.Text.Json.JsonSerializer.Serialize(
+            new GamePingBooster.Core.Profiles.ProfileBundle { Relays = [path] },
+            GamePingBooster.Core.Profiles.ProfileJsonContext.Default.ProfileBundle);
+        Check("entries: the relay behind a path is never written into a profile", !written.Contains("viaRelayId"),
+            written);
+
+        // When entries are measured at all: only when the relays do not beat the player's own line.
+        Check("entries: the VNTT line (68 ms direct, 71 through the relay) tries them",
+            GamePingBooster.Core.Profiles.RelayPaths.WorthTryingEntries(68, 71), "the player this was built for would never get one");
+        Check("entries: a line the relays help (66 direct, 43 through) does not",
+            !GamePingBooster.Core.Profiles.RelayPaths.WorthTryingEntries(66, 43),
+            "every connect on a good line would pay for handshakes it does not need");
+        Check("entries: 6 ms better on a 68 ms line is not enough",
+            GamePingBooster.Core.Profiles.RelayPaths.WorthTryingEntries(68, 62), "the margin is max(5 ms, 10%)");
+        Check("entries: 8 ms better is",
+            !GamePingBooster.Core.Profiles.RelayPaths.WorthTryingEntries(68, 60), "the margin is max(5 ms, 10%)");
     }
 
     /// <summary>
