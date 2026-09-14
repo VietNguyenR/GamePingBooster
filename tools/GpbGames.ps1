@@ -1,11 +1,12 @@
-﻿<#
+<#
 .SYNOPSIS
     Reads tools\profile-builder\games.json and turns a game name into the arguments the capture
     and profile scripts need.
 
 .DESCRIPTION
-    Dot-sourced by gpb.ps1, and deliberately shaped like GpbConf.ps1 next to it: one parser, in
-    one place, so `./gpb capture cs2` and `./gpb profile cs2` cannot disagree about what cs2 is.
+    Dot-sourced by gpb.ps1 and by Build-PubgProfile.ps1, and deliberately shaped like GpbConf.ps1
+    next to it: one parser, in one place, so `./gpb capture cs2` and `./gpb profile cs2` cannot
+    disagree about what cs2 is.
 
     Only PowerShell reads this. `capture` and `profile` are Windows-only commands that the POSIX
     ./gpb hands straight to gpb.ps1, so the JSON never has to be parsed by a shell script - which
@@ -14,7 +15,8 @@
 
     A game the file does not declare is an ERROR, not something to guess at. The alternative -
     falling back to PUBG's settings under another name - would capture the wrong process into the
-    wrong file and look like it had worked.
+    wrong file and look like it had worked. The same goes for every file a game writes: each game
+    names its own, and two games naming the same one is refused before anything runs.
 #>
 
 function Get-GpbGamesPath {
@@ -47,6 +49,89 @@ function Get-GpbGameNames {
     return @($games.PSObject.Properties.Name | Sort-Object)
 }
 
+# One games.json entry, with every path resolved to an absolute one.
+function ConvertTo-GpbGame {
+    param([string]$RepoRoot, [string]$Id, $Game)
+
+    $builder = Join-Path $RepoRoot 'tools\profile-builder'
+
+    # Resolve against the builder folder rather than the caller's location. Both scripts are run
+    # with Push-Location into that folder today, but a relative path that only works because of
+    # where the caller happened to be standing is the kind of thing that breaks the first time
+    # somebody calls it from anywhere else.
+    function Resolve-GamePath([string]$relative) {
+        if ([string]::IsNullOrWhiteSpace($relative)) { return $null }
+        return [System.IO.Path]::GetFullPath((Join-Path $builder $relative))
+    }
+
+    # No defaults for these. The scripts behind them used to default to PUBG's file names, and a
+    # game that left one out got PUBG's file - which is how CS2's captures could land in PUBG's
+    # landmark list.
+    foreach ($field in 'watchProcess', 'observedPath', 'tcpSessionsPath', 'unverifiedPath', 'manualCidrPath', 'profilePath') {
+        if ([string]::IsNullOrWhiteSpace([string]$Game.$field)) {
+            throw "games.json: '$Id' declares no $field. Every game names its own files - a shared or borrowed one mixes two games' addresses."
+        }
+    }
+
+    # @() around a pipeline, not a helper function: a function returning an empty array hands its
+    # caller $null, and @($null) is an array of one.
+    return [PSCustomObject]@{
+        Id                = $Id
+        Name              = if ($Game.name) { $Game.name } else { $Id }
+        WatchProcess      = $Game.watchProcess
+        ProbePort         = $Game.probePort
+        ObservedPath      = Resolve-GamePath $Game.observedPath
+        LandmarkPath      = Resolve-GamePath $Game.landmarkPath
+        TcpSessionsPath   = Resolve-GamePath $Game.tcpSessionsPath
+        UnverifiedPath    = Resolve-GamePath $Game.unverifiedPath
+        ManualCidrPath    = Resolve-GamePath $Game.manualCidrPath
+        ProfilePath       = Resolve-GamePath $Game.profilePath
+        AwsRegions        = @(@($Game.awsRegions) | Where-Object { $_ })
+        AzureRegions      = @(@($Game.azureRegions) | Where-Object { $_ })
+        GlobalAccelerator = [bool]$Game.globalAccelerator
+        Asns              = @(@($Game.asns) | Where-Object { $null -ne $_ } | ForEach-Object { [int]$_ })
+        Note              = $Game.note
+    }
+}
+
+<#
+.SYNOPSIS
+    Every declared game, after checking that no two of them write the same file.
+
+.DESCRIPTION
+    Checked on every call rather than trusted to review: the files are append-only address lists,
+    and the day two games share one there is no way to split it again. A path is compared across
+    all of a game's fields too, so one game's unverified list cannot be another's observed list.
+#>
+function Get-GpbAllGames {
+    param([string]$RepoRoot)
+
+    $config = Read-GpbGames $RepoRoot
+    $all = @()
+    if ($config.games) {
+        foreach ($entry in @($config.games.PSObject.Properties)) {
+            $all += ConvertTo-GpbGame -RepoRoot $RepoRoot -Id $entry.Name -Game $entry.Value
+        }
+    }
+
+    $owners = @{}
+    foreach ($game in $all) {
+        foreach ($field in 'ObservedPath', 'LandmarkPath', 'TcpSessionsPath', 'UnverifiedPath', 'ManualCidrPath', 'ProfilePath') {
+            $path = $game.$field
+            if (-not $path) { continue }
+            $key = $path.ToLowerInvariant()
+            if ($owners.ContainsKey($key)) {
+                $first = $owners[$key]
+                throw ("games.json: '$($game.Id)' $field and '$($first.Id)' $($first.Field) are the same file, $path. " +
+                       "Give each its own - once two sets of addresses share a file they cannot be told apart.")
+            }
+            $owners[$key] = [pscustomobject]@{ Id = $game.Id; Field = $field }
+        }
+    }
+
+    return [pscustomobject]@{ Config = $config; Games = $all }
+}
+
 <#
 .SYNOPSIS
     The settings for one game, with every path resolved to an absolute one.
@@ -61,44 +146,32 @@ function Get-GpbGame {
         [string]$Name
     )
 
-    $config = Read-GpbGames $RepoRoot
-    $wanted = if ([string]::IsNullOrWhiteSpace($Name)) { $config.default } else { $Name.ToLowerInvariant() }
+    $everything = Get-GpbAllGames $RepoRoot
+    $wanted = if ([string]::IsNullOrWhiteSpace($Name)) { $everything.Config.default } else { $Name.ToLowerInvariant() }
 
     if ([string]::IsNullOrWhiteSpace($wanted)) {
         throw "games.json declares no `"default`", so a game has to be named: ./gpb capture <game>"
     }
 
-    $entry = $config.games.PSObject.Properties | Where-Object { $_.Name -eq $wanted } | Select-Object -First 1
-    if (-not $entry) {
+    $game = $everything.Games | Where-Object { $_.Id -eq $wanted } | Select-Object -First 1
+    if (-not $game) {
         $known = (Get-GpbGameNames $RepoRoot) -join ', '
         throw "games.json does not declare '$wanted'. Known games: $known"
     }
+    return $game
+}
 
-    $builder = Join-Path $RepoRoot 'tools\profile-builder'
-    $game = $entry.Value
-
-    # Resolve against the builder folder rather than the caller's location. Both scripts are run
-    # with Push-Location into that folder today, but a relative path that only works because of
-    # where the caller happened to be standing is the kind of thing that breaks the first time
-    # somebody calls it from anywhere else.
-    function Resolve-GamePath([string]$relative) {
-        if ([string]::IsNullOrWhiteSpace($relative)) { return $null }
-        return [System.IO.Path]::GetFullPath((Join-Path $builder $relative))
-    }
-
-    return [PSCustomObject]@{
-        Id             = $wanted
-        Name           = if ($game.name) { $game.name } else { $wanted }
-        WatchProcess   = $game.watchProcess
-        ProbePort      = $game.probePort
-        ObservedPath   = Resolve-GamePath $game.observedPath
-        LandmarkPath   = Resolve-GamePath $game.landmarkPath
-        ManualCidrPath = Resolve-GamePath $game.manualCidrPath
-        ProfilePath    = Resolve-GamePath $game.profilePath
-        AwsRegions     = @($game.awsRegions)
-        AzureRegions   = @($game.azureRegions)
-        Note           = $game.note
-    }
+<#
+.SYNOPSIS
+    Every declared game except this one - whose addresses this game's profile must never cover.
+#>
+function Get-GpbOtherGames {
+    param(
+        [string]$RepoRoot,
+        [string]$Id
+    )
+    $self = "$Id".ToLowerInvariant()
+    return @((Get-GpbAllGames $RepoRoot).Games | Where-Object { $_.Id -ne $self })
 }
 
 <#
@@ -106,15 +179,18 @@ function Get-GpbGame {
     True when this game has enough declared for the profile builder to produce anything honest.
 
 .DESCRIPTION
-    The builder keeps an observed address only when it falls inside a published range of one of
-    the declared cloud regions. With both lists empty every address is unverified, and the run
-    ends with a profile containing no ranges at all - which is not an empty result, it is a
-    wrong one: it looks like a finished profile and would ship as such.
+    The builder keeps an observed address only when it falls inside a published range: an AWS or
+    Azure region, AWS Global Accelerator, or a prefix one of the game's own ASNs announces. With
+    none of those declared every address is unverified, and the run ends with a profile containing
+    no ranges at all - which is not an empty result, it is a wrong one: it looks like a finished
+    profile and would ship as such.
 
     So this is checked before the builder runs rather than after, and the caller refuses. See the
     cs2 note in games.json for the case this exists for.
 #>
 function Test-GpbGameBuildable {
     param([PSCustomObject]$Game)
-    return (@($Game.AwsRegions).Count + @($Game.AzureRegions).Count) -gt 0
+    $sources = @($Game.AwsRegions).Count + @($Game.AzureRegions).Count + @($Game.Asns).Count
+    if ($Game.GlobalAccelerator) { $sources++ }
+    return $sources -gt 0
 }

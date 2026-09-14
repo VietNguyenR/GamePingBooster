@@ -480,18 +480,23 @@ switch ($Verb.ToLowerInvariant()) {
             throw "games.json declares a game called '$($game.Id)', which is also a protocol name. Rename it."
         }
 
+        # Every output file is passed, never left to the script's defaults: those are PUBG's file
+        # names, and a default taken for another game writes that game's addresses into PUBG's.
         $captureArgs = @{
-            WatchProcess = $game.WatchProcess
-            OutputPath   = $game.ObservedPath
+            WatchProcess  = $game.WatchProcess
+            OutputPath    = $game.ObservedPath
+            TcpOutputPath = $game.TcpSessionsPath
         }
         if ($protocol) { $captureArgs['Protocol'] = $protocol.ToLowerInvariant() }
 
-        # A game with no datacentre-probe port collects no landmarks. Passing the PUBG default
-        # would fill its landmark file with whatever else happens to use 8081, and the builder
-        # would then treat that as the set of endpoints the game picks a region from.
+        # A game with no datacentre-probe port collects no landmarks. Leaving -ProbePort out is not
+        # the same thing: the script then falls back to PUBG's 8081 and PUBG's landmark file, and
+        # anything this game sends on 8081 is filed as one of PUBG's probes. 0 switches it off.
         if ($null -ne $game.ProbePort) {
             $captureArgs['ProbePort'] = [int]$game.ProbePort
             if ($game.LandmarkPath) { $captureArgs['LandmarkPath'] = $game.LandmarkPath }
+        } else {
+            $captureArgs['ProbePort'] = 0
         }
 
         Say "Capturing $($game.Name) - watching $($game.WatchProcess).exe"
@@ -512,19 +517,27 @@ switch ($Verb.ToLowerInvariant()) {
         # it - which is worse than an error, because it looks like a finished profile and would
         # be pushed as one. games.json says per game what is still missing.
         if (-not (Test-GpbGameBuildable $game)) {
-            $message = "$($game.Name) has no AWS or Azure regions declared in games.json, so every " +
-                "observed address would fail the cross-check and the profile would come out empty."
+            $message = "$($game.Name) declares no published ranges in games.json - no AWS or Azure " +
+                "region, no Global Accelerator, no ASN - so every observed address would fail the " +
+                "cross-check and the profile would come out empty."
             if ($game.Note) { $message += "`n`n    $($game.Note)" }
             throw $message
         }
 
+        # Other games' addresses are not passed from here: the builder reads games.json itself, so
+        # a run that bypasses ./gpb is kept off them just the same.
         $profileArgs = @{
-            GameId         = $game.Id
-            ObservedIpPath = $game.ObservedPath
-            ProfilePath    = $game.ProfilePath
-            ManualCidrPath = $game.ManualCidrPath
-            AwsRegions     = $game.AwsRegions
-            AzureRegions   = $game.AzureRegions
+            GameId            = $game.Id
+            GameName          = $game.Name
+            ProcessNames      = @("$($game.WatchProcess).exe")
+            ObservedIpPath    = $game.ObservedPath
+            ProfilePath       = $game.ProfilePath
+            ManualCidrPath    = $game.ManualCidrPath
+            UnverifiedPath    = $game.UnverifiedPath
+            AwsRegions        = $game.AwsRegions
+            AzureRegions      = $game.AzureRegions
+            GlobalAccelerator = $game.GlobalAccelerator
+            Asns              = $game.Asns
         }
         if ($game.LandmarkPath) { $profileArgs['LandmarkObservedPath'] = $game.LandmarkPath }
 

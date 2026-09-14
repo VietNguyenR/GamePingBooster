@@ -77,3 +77,7 @@ tools/profile-builder/manual-cidrs.txt
 tools/Test-LicenceConnection.ps1
 tools/profile-builder/tcp-sessions.txt
 profiles/cs2-vn.json
+# One of each per game (games.json names them), so globs rather than one line per game.
+tools/profile-builder/manual-cidrs*
+tools/profile-builder/tcp-sessions*
+profiles/valorant-vn.json

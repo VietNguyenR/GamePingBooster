@@ -111,29 +111,72 @@ param(
     [switch]$AllowCoverageLoss,
     [switch]$DryRun,
     [string[]]$AwsRegions = @('ap-southeast-1', 'ap-northeast-1', 'ap-northeast-2'),
-    [string[]]$AzureRegions = @('southeastasia', 'japaneast', 'koreacentral')
+    [string[]]$AzureRegions = @('southeastasia', 'japaneast', 'koreacentral'),
+
+    # AWS Global Accelerator. Its anycast addresses are published only as GLOBAL /17s that every
+    # accelerator customer draws from, so a match is routed as exactly its /32 - never widened.
+    [switch]$GlobalAccelerator,
+
+    # Autonomous systems the game's publisher owns outright, e.g. 6507 for Riot Direct. The
+    # prefixes they announce (RIPEstat) count as published ranges.
+    [int[]]$Asns = @(),
+
+    [string]$UnverifiedPath,
+
+    # Only used when -ProfilePath does not exist yet, to start the new profile.
+    [string]$GameName,
+    [string[]]$ProcessNames = @()
 )
 
 $ErrorActionPreference = 'Stop'
 
-if (-not $ObservedIpPath) { $ObservedIpPath = Join-Path $PSScriptRoot 'observed.txt' }
-if (-not $LandmarkObservedPath) { $LandmarkObservedPath = Join-Path $PSScriptRoot 'landmarks-observed.txt' }
-if (-not $ProfilePath) { $ProfilePath = Join-Path $PSScriptRoot '..\..\profiles\pubg-vn.json' }
-if (-not $ManualCidrPath) { $ManualCidrPath = Join-Path $PSScriptRoot 'manual-cidrs.txt' }
+# The defaults are PUBG's files, and only PUBG gets them. They used to be filled in whatever
+# -GameId was given, so a run for another game read PUBG's observed.txt and promoted PUBG's
+# datacentre probes out of landmarks-observed.txt into that game's profile. Every other game names
+# its own files; ./gpb profile <game> passes them from games.json.
+if ($GameId -eq 'pubg') {
+    if (-not $ObservedIpPath) { $ObservedIpPath = Join-Path $PSScriptRoot 'observed.txt' }
+    if (-not $LandmarkObservedPath) { $LandmarkObservedPath = Join-Path $PSScriptRoot 'landmarks-observed.txt' }
+    if (-not $ProfilePath) { $ProfilePath = Join-Path $PSScriptRoot '..\..\profiles\pubg-vn.json' }
+    if (-not $ManualCidrPath) { $ManualCidrPath = Join-Path $PSScriptRoot 'manual-cidrs.txt' }
+    if (-not $UnverifiedPath) { $UnverifiedPath = Join-Path $PSScriptRoot 'observed-unverified.txt' }
+} else {
+    foreach ($required in 'ObservedIpPath', 'ProfilePath', 'ManualCidrPath', 'UnverifiedPath') {
+        if (-not (Get-Variable -Name $required -ValueOnly)) {
+            throw "-$required is required for '$GameId' - its files are declared in games.json. Run: ./gpb profile $GameId"
+        }
+    }
+}
 $cacheDir = Join-Path $PSScriptRoot '.cache'
-$unverifiedPath = Join-Path $PSScriptRoot 'observed-unverified.txt'
 
-# Which profile region each cloud region belongs to. Adding a new region to the game means
-# adding it here and in the -AwsRegions / -AzureRegions defaults above.
+# games.json is read here as well as by ./gpb, for one thing: the addresses every OTHER game was
+# observed on, which this game's profile must never cover. Reading it here rather than having them
+# passed in means a run that bypasses ./gpb is held to the same rule.
+. (Join-Path $PSScriptRoot '..\GpbGames.ps1')
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+
+# Which profile region each published range belongs to. Adding a new region to the game means
+# adding it here and in games.json.
 $regionMap = @{
     'ap-southeast-1' = 'asia-sg'; 'southeastasia' = 'asia-sg'
+    'ap-east-1'      = 'asia-hk'
     'ap-northeast-1' = 'asia-jp'; 'japaneast'     = 'asia-jp'
     'ap-northeast-2' = 'asia-kr'; 'koreacentral'  = 'asia-kr'
+    # Global Accelerator's ranges carry no location - the same address is announced from every
+    # edge - so its /32s form a region of their own rather than being guessed into a city.
+    'GLOBAL'         = 'aws-ga'
 }
 $regionNames = @{
     'asia-sg' = 'Southeast Asia (Singapore)'
+    'asia-hk' = 'Hong Kong'
     'asia-jp' = 'Japan (Tokyo)'
     'asia-kr' = 'Korea (Seoul)'
+    'aws-ga'  = 'AWS Global Accelerator (anycast)'
+}
+# An ASN's announcements carry no location either, so the same applies.
+foreach ($asn in $Asns) {
+    $regionMap["AS$asn"] = "as$asn"
+    $regionNames["as$asn"] = "AS$asn network"
 }
 
 # ------------------------------------------------------------------- helpers
@@ -303,6 +346,111 @@ function Get-AzureRanges {
     throw "Could not obtain the Azure Service Tags file. Download it by hand from https://www.microsoft.com/en-us/download/details.aspx?id=56519 into $cacheDir"
 }
 
+function Get-AsnPrefixes {
+    param([int]$Asn)
+
+    # RIPEstat's announced-prefixes: what the ASN has announced to the global routing table over
+    # the last two weeks, as seen by RIPE's route collectors. Not a list the publisher maintains
+    # for anyone - Riot publishes none - but it is public, machine-readable, and cannot contain an
+    # address the publisher does not route, which is the property the cross-check needs.
+    $path = Join-Path $cacheDir "announced-prefixes-AS$Asn.json"
+    $fresh = (Test-Path $path) -and ((Get-Date) - (Get-Item $path).LastWriteTime).TotalHours -lt 24
+    if ($fresh) {
+        Write-Host "==> AS$Asn prefixes from cache ($([int]((Get-Date) - (Get-Item $path).LastWriteTime).TotalHours)h old)"
+    } else {
+        Write-Host "==> Downloading the prefixes AS$Asn announces (RIPEstat)"
+        $partial = "$path.download"
+        try {
+            Invoke-WebRequest -Uri "https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS$Asn" `
+                -OutFile $partial -UseBasicParsing -TimeoutSec 60
+            Move-Item -LiteralPath $partial -Destination $path -Force
+        } catch {
+            Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path $path)) {
+                throw "Could not get the prefixes AS$Asn announces from RIPEstat: $($_.Exception.Message)"
+            }
+            Write-Warning "Could not refresh AS$Asn from RIPEstat; using the cached copy from $((Get-Item $path).LastWriteTime)."
+        }
+    }
+
+    $data = Get-Content $path -Raw | ConvertFrom-Json
+    $prefixes = @($data.data.prefixes | ForEach-Object { $_.prefix } | Where-Object { $_ -and -not $_.Contains(':') })
+    if ($prefixes.Count -eq 0) {
+        # An empty answer is a failed lookup, not an ASN that routes nothing. Treated as success it
+        # would hold every observed address back and the coverage check would then refuse the build
+        # with a message about observed.txt.
+        throw "RIPEstat lists no IPv4 prefix for AS$Asn. Delete $path and try again, or check the ASN in games.json."
+    }
+    return $prefixes
+}
+
+<#
+.SYNOPSIS
+    Every address another game is known to use, and every other game's profile file.
+
+.DESCRIPTION
+    Read from the other games' own evidence: their observed and landmark files, and the single
+    addresses in their profiles - landmarks, lobby addresses and /32 ranges. This game's profile
+    may not cover any of them.
+
+    Deliberately addresses, not the other profiles' ranges. A range is a bet made from addresses,
+    and the two games' bets can legitimately land on the same cloud block; the addresses are what
+    each game was actually seen talking to. Narrowing away from those on both sides is enough for
+    their ranges never to overlap, and Test-Profile.ps1 checks the ranges as well.
+#>
+function Get-OtherGameEvidence {
+    $owners = @{}
+    $profiles = @()
+
+    foreach ($other in @(Get-GpbOtherGames -RepoRoot $repoRoot -Id $GameId)) {
+        foreach ($file in @($other.ObservedPath, $other.LandmarkPath)) {
+            if (-not $file -or -not (Test-Path -LiteralPath $file)) { continue }
+            $leaf = Split-Path $file -Leaf
+            foreach ($line in (Get-Content -LiteralPath $file)) {
+                $first = ($line.Trim() -split '\s+')[0]
+                if ($first -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { continue }
+                if (-not $owners.ContainsKey($first)) { $owners[$first] = "$($other.Id) ($leaf)" }
+            }
+        }
+
+        if (-not $other.ProfilePath -or -not (Test-Path -LiteralPath $other.ProfilePath)) { continue }
+        $profiles += $other.ProfilePath
+        $leaf = Split-Path $other.ProfilePath -Leaf
+        $data = Get-Content -LiteralPath $other.ProfilePath -Raw | ConvertFrom-Json
+        foreach ($g in @($data.games)) {
+            if (-not $g -or $g.id -eq $GameId) { continue }
+            $singles = @($g.lobbyAddresses)
+            foreach ($r in @($g.regions)) {
+                if (-not $r) { continue }
+                $singles += @($r.landmarks)
+                $singles += @($r.cidrs | Where-Object { "$_" -match '/32$' })
+            }
+            foreach ($s in $singles) {
+                if (-not $s) { continue }
+                $address = ("$s".Trim() -split '/')[0]
+                if ($address -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { continue }
+                if (-not $owners.ContainsKey($address)) { $owners[$address] = "$($g.id) ($leaf)" }
+            }
+        }
+    }
+
+    $list = @(foreach ($address in $owners.Keys) {
+        [pscustomobject]@{ Address = $address; Value = (ConvertTo-UInt32Address $address); Owner = $owners[$address] }
+    })
+    return @{ Addresses = $list; Owners = $owners; Profiles = $profiles }
+}
+
+# The first address of another game inside the /$Bits block around $Value, or $null.
+function Find-ForeignInBlock {
+    param([uint32]$Value, [int]$Bits)
+    $mask = [uint32](4294967295L -band (-bnot ((1L -shl (32 - $Bits)) - 1L)))
+    $network = $Value -band $mask
+    foreach ($f in $foreign.Addresses) {
+        if (($f.Value -band $mask) -eq $network) { return $f }
+    }
+    return $null
+}
+
 # ------------------------------------------------------------ observed input
 
 if (-not (Test-Path $ObservedIpPath)) {
@@ -348,6 +496,22 @@ foreach ($region in $AzureRegions) {
 }
 Write-Host "    $($azurePrefixes.Count) Azure prefixes in $($AzureRegions -join ', ')"
 
+$gaPrefixes = @()
+if ($GlobalAccelerator) {
+    $gaPrefixes = @($aws.prefixes | Where-Object { $_.service -eq 'GLOBALACCELERATOR' })
+    Write-Host "    $($gaPrefixes.Count) AWS Global Accelerator prefixes - matches are routed one address at a time"
+}
+
+$asnPrefixes = @()
+foreach ($asn in $Asns) {
+    $announced = @(Get-AsnPrefixes -Asn $asn)
+    foreach ($cidr in $announced) { $asnPrefixes += [pscustomobject]@{ Prefix = $cidr; Asn = $asn } }
+    Write-Host "    $($announced.Count) IPv4 prefixes announced by AS$asn"
+}
+
+$foreign = Get-OtherGameEvidence
+Write-Host "    $($foreign.Addresses.Count) addresses belong to other games in games.json - never covered by this profile"
+
 # ------------------------------------------------------------------ matching
 #
 # Which published cloud prefix an address falls inside does not depend on the width the profile
@@ -362,14 +526,24 @@ $unverified = @()
 
 foreach ($ip in $observed) {
     $value = ConvertTo-UInt32Address $ip
-    $best = $null; $bestBits = -1; $source = $null; $cloudRegion = $null
+
+    # Seen by this game AND another. No range can be drawn around it without covering the other
+    # game's server, and nothing here says whose it really is - usually something both games talk
+    # to, like a voice or telemetry service, which is not worth routing anyway.
+    if ($foreign.Owners.ContainsKey($ip)) {
+        Write-Host ("    {0,-18} also observed for {1} - held back" -f $ip, $foreign.Owners[$ip]) -ForegroundColor DarkYellow
+        $unverified += $ip
+        continue
+    }
+
+    $best = $null; $bestBits = -1; $source = $null; $cloudRegion = $null; $anycast = $false
 
     foreach ($p in $awsPrefixes) {
         if (Test-IpInCidr $value $p.ip_prefix) {
             $bits = [int]$p.ip_prefix.Split('/')[1]
             if ($bits -gt $bestBits) {
                 $best = $p.ip_prefix; $bestBits = $bits
-                $source = "aws:$($p.region)"; $cloudRegion = $p.region
+                $source = "aws:$($p.region)"; $cloudRegion = $p.region; $anycast = $false
             }
         }
     }
@@ -378,23 +552,41 @@ foreach ($ip in $observed) {
             $bits = [int]$p.Prefix.Split('/')[1]
             if ($bits -gt $bestBits) {
                 $best = $p.Prefix; $bestBits = $bits
-                $source = "azure:$($p.Region)"; $cloudRegion = $p.Region
+                $source = "azure:$($p.Region)"; $cloudRegion = $p.Region; $anycast = $false
+            }
+        }
+    }
+    foreach ($p in $gaPrefixes) {
+        if (Test-IpInCidr $value $p.ip_prefix) {
+            $bits = [int]$p.ip_prefix.Split('/')[1]
+            if ($bits -gt $bestBits) {
+                $best = $p.ip_prefix; $bestBits = $bits
+                $source = 'aws:globalaccelerator'; $cloudRegion = 'GLOBAL'; $anycast = $true
+            }
+        }
+    }
+    foreach ($p in $asnPrefixes) {
+        if (Test-IpInCidr $value $p.Prefix) {
+            $bits = [int]$p.Prefix.Split('/')[1]
+            if ($bits -gt $bestBits) {
+                $best = $p.Prefix; $bestBits = $bits
+                $source = "as$($p.Asn)"; $cloudRegion = "AS$($p.Asn)"; $anycast = $false
             }
         }
     }
 
     if (-not $best) {
-        Write-Host ("    {0,-18} not in any Asian cloud range - held back" -f $ip) -ForegroundColor DarkYellow
+        Write-Host ("    {0,-18} in no published range declared for this game - held back" -f $ip) -ForegroundColor DarkYellow
         $unverified += $ip
         continue
     }
 
     $matched += [pscustomobject]@{
         Address = $ip; Value = $value; Published = $best; PublishedBits = $bestBits
-        Source = $source; RegionId = $regionMap[$cloudRegion]
+        Source = $source; RegionId = $regionMap[$cloudRegion]; Anycast = $anycast
     }
 }
-Write-Host "    $($matched.Count) matched in an Asian cloud range, $($unverified.Count) held back"
+Write-Host "    $($matched.Count) matched in a published range, $($unverified.Count) held back"
 
 function Get-ClampedPrefixes {
     param([int]$Width)
@@ -415,14 +607,38 @@ function Get-ClampedPrefixes {
     $lines = @()
 
     foreach ($m in $matched) {
-        $fallback = (ConvertFrom-UInt32Address ([uint32]($m.Value -band $capMask))) + "/$Width"
-        if ($m.PublishedBits -lt $Width) {
-            $chosen = $fallback
-            $lines += ("    {0,-18} {1,-22} published as {2}, using {3}" -f $m.Address, $m.Source, $m.Published, $chosen)
+        $why = @()
+        if ($m.Anycast) {
+            # One accelerator's static address, drawn from a pool every Global Accelerator customer
+            # shares - PUBG's lobby is one of them. Its neighbours are somebody else's.
+            $bits = 32
+            $why += "anycast, published as $($m.Published)"
+        } elseif ($m.PublishedBits -lt $Width) {
+            $bits = $Width
+            $why += "published as $($m.Published)"
         } else {
-            $chosen = $m.Published
-            $lines += ("    {0,-18} {1,-22} {2}" -f $m.Address, $m.Source, $chosen)
+            $bits = $m.PublishedBits
         }
+
+        # Never over another game's address. Narrow one bit at a time until the block holds none;
+        # at /32 the block is this address alone, and an address both games use never got this far.
+        $start = $bits
+        $firstHit = Find-ForeignInBlock -Value $m.Value -Bits $bits
+        $hit = $firstHit
+        while ($hit -and $bits -lt 32) {
+            $bits++
+            $hit = Find-ForeignInBlock -Value $m.Value -Bits $bits
+        }
+        if ($bits -gt $start) {
+            $why += "narrowed from /$start, which holds $($firstHit.Address) of $($firstHit.Owner)"
+        }
+
+        $mask = [uint32](4294967295L -band (-bnot ((1L -shl (32 - $bits)) - 1L)))
+        $chosen = (ConvertFrom-UInt32Address ([uint32]($m.Value -band $mask))) + "/$bits"
+        $suffix = ''
+        if ($why.Count -gt 0) { $suffix = '  (' + ($why -join '; ') + ')' }
+        $fields = @($m.Address, $m.Source, $chosen, $suffix)
+        $lines += ("    {0,-18} {1,-22} {2}{3}" -f $fields)
 
         if (-not $byRegion.ContainsKey($m.RegionId)) { $byRegion[$m.RegionId] = @(); $sources[$m.RegionId] = @() }
         $byRegion[$m.RegionId] += $chosen
@@ -564,7 +780,7 @@ function New-ProfileAtWidth {
 }
 
 if ($unverified.Count -gt 0) {
-    Set-Content -Path $unverifiedPath -Value ($unverified | Sort-Object -Unique) -Encoding ascii
+    Set-Content -Path $UnverifiedPath -Value ($unverified | Sort-Object -Unique) -Encoding ascii
 }
 
 # Are the declared landmarks still where the profile says they are?
@@ -788,7 +1004,31 @@ function Test-LandmarkRegions {
 Write-Host ""
 Write-Host "==> Updating $ProfilePath" -ForegroundColor Cyan
 
-$profileData = Get-Content $ProfilePath -Raw | ConvertFrom-Json
+$newProfile = -not (Test-Path $ProfilePath)
+if ($newProfile) {
+    # The first build of a game starts its profile rather than asking for one to be written by
+    # hand. Everything in it but the process names is regenerated below anyway, and the relays
+    # stay empty: the client takes relays from its primary profile, never from a game's own.
+    if (@($ProcessNames).Count -eq 0) {
+        throw "No profile at $ProfilePath, and no -ProcessNames to start one with. Run: ./gpb profile $GameId"
+    }
+    $displayName = if ($GameName) { $GameName } else { $GameId }
+    Write-Host "    No profile yet - starting one for $displayName"
+    $profileData = [pscustomobject]@{
+        schemaVersion = 1
+        generatedUtc  = ''
+        games         = @([pscustomobject]@{
+            id             = $GameId
+            name           = $displayName
+            processNames   = @($ProcessNames)
+            lobbyAddresses = @()
+            regions        = @()
+        })
+        relays        = @()
+    }
+} else {
+    $profileData = Get-Content $ProfilePath -Raw | ConvertFrom-Json
+}
 $game = $profileData.games | Where-Object { $_.id -eq $GameId }
 if (-not $game) { throw "The profile has no game with id '$GameId'." }
 
@@ -798,7 +1038,9 @@ if (-not $game) { throw "The profile has no game with id '$GameId'." }
 # different paths and pick a region that is worse both ways. That is not a hypothetical - it is
 # how 20.43.176.0/20 got in, why a tester was sent to Korea, and the reason this check exists.
 # See HANDOFF section 6a.
-Add-ObservedLandmarks -Game $game -Azure $azure -Path $LandmarkObservedPath
+if ($LandmarkObservedPath) {
+    Add-ObservedLandmarks -Game $game -Azure $azure -Path $LandmarkObservedPath
+}
 
 $landmarks = @()
 foreach ($r in $game.regions) {
@@ -818,6 +1060,20 @@ $manualCount = 0
 foreach ($k in $manualCidrs.Keys) { $manualCount += @($manualCidrs[$k]).Count }
 if ($manualCount -gt 0) {
     Write-Host "    $manualCount hand-added prefix(es) from $(Split-Path $ManualCidrPath -Leaf)"
+}
+
+# A hand-added range gets no narrowing - it is exactly what somebody typed - so one that covers
+# another game's address stops the build instead.
+foreach ($regionId in $manualCidrs.Keys) {
+    foreach ($cidr in @($manualCidrs[$regionId])) {
+        foreach ($f in $foreign.Addresses) {
+            if (Test-IpInCidr -Ip $f.Value -Cidr $cidr) {
+                throw ("$(Split-Path $ManualCidrPath -Leaf): '$regionId $cidr' covers $($f.Address), which " +
+                       "belongs to $($f.Owner). One game's ranges must never carry another game's " +
+                       "servers - narrow the entry or remove it.")
+            }
+        }
+    }
 }
 
 # Rebuild rather than accrete, and narrow until the whole profile fits.
@@ -897,7 +1153,7 @@ $profileData.generatedUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH
 
 if ($unverified.Count -gt 0) {
     Write-Host ""
-    Write-Host "    $($unverified.Count) addresses held back, written to observed-unverified.txt:" -ForegroundColor DarkYellow
+    Write-Host "    $($unverified.Count) addresses held back, written to $(Split-Path $UnverifiedPath -Leaf):" -ForegroundColor DarkYellow
     $unverified | Sort-Object -Unique | ForEach-Object { Write-Host "      $_" }
     Write-Host "    These are usually voice chat or a CDN. Look them up before adding any by hand."
 }
@@ -914,16 +1170,26 @@ if ($totalNew -eq 0) {
     Write-Host "    That is the signal you are looking for: a few sessions in a row like this means the list has saturated."
 }
 
-Copy-Item $ProfilePath "$ProfilePath.bak" -Force
+if (-not $newProfile) { Copy-Item $ProfilePath "$ProfilePath.bak" -Force }
 $json = Format-Json ($profileData | ConvertTo-Json -Depth 10)
 Set-Content -Path $ProfilePath -Value $json -Encoding ascii
-Write-Host "    Written (previous version kept as $(Split-Path $ProfilePath -Leaf).bak)"
+if ($newProfile) { Write-Host "    Written - a new profile" }
+else { Write-Host "    Written (previous version kept as $(Split-Path $ProfilePath -Leaf).bak)" }
 
 # ----------------------------------------------------------------- validate
 
 Write-Host ""
 Write-Host "==> Validating" -ForegroundColor Cyan
-& (Join-Path $PSScriptRoot 'Test-Profile.ps1') -Path $ProfilePath -MaxPrefixWidth $MaxPrefixWidth -MaxTotalAddresses $MaxTotalAddresses
+& (Join-Path $PSScriptRoot 'Test-Profile.ps1') -Path $ProfilePath -MaxPrefixWidth $MaxPrefixWidth `
+    -MaxTotalAddresses $MaxTotalAddresses -OtherProfilePaths $foreign.Profiles
+if ($LASTEXITCODE -ne 0 -and $newProfile) {
+    # Nothing to restore, and a rejected first profile left in place would be loaded by the
+    # service - which does not run the validator - and read as the baseline by the next build.
+    Remove-Item $ProfilePath -Force
+    Write-Host ""
+    Write-Warning "Validation failed - the new profile was removed, nothing was changed."
+    exit 1
+}
 if ($LASTEXITCODE -ne 0) {
     # Put the good profile back rather than telling the operator to do it.
     #

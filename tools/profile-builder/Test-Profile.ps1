@@ -18,7 +18,13 @@
 param(
     [Parameter(Mandatory = $true)][string]$Path,
     [int]$MaxPrefixWidth = 20,
-    [int]$MaxTotalAddresses = 131072
+    [int]$MaxTotalAddresses = 131072,
+
+    # The other games' profiles. A range here that overlaps one of theirs, or covers one of their
+    # landmarks or lobby addresses, is an error: whichever game is running would carry the other's
+    # servers through the relay. Their relays are checked against this profile too, since a game's
+    # own profile usually names none.
+    [string[]]$OtherProfilePaths = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,6 +55,53 @@ foreach ($relay in $profileData.relays) {
     $relayHost = $relay.endpoint.Split(':')[0]
     if ($relayHost -match '^\d{1,3}(\.\d{1,3}){3}$') { $relayIps += $relayHost }
     else { $warnings += "Relay '$($relay.id)' uses hostname '$relayHost' - prefer a literal IP so the pinned route is exact." }
+}
+
+function Test-CidrsOverlap {
+    param([string]$A, [string]$B)
+    $bits = [math]::Min([int]$A.Split('/')[1], [int]$B.Split('/')[1])
+    if ($bits -eq 0) { return $true }
+    $mask = [uint32]::MaxValue -shl (32 - $bits)
+    return (((ConvertTo-UInt32Address $A.Split('/')[0]) -band $mask) -eq
+            ((ConvertTo-UInt32Address $B.Split('/')[0]) -band $mask))
+}
+
+# Everything the other games route or measure, as CIDRs with a label saying whose.
+$ownIds = @($profileData.games | ForEach-Object { $_.id })
+$foreignRanges = @()
+foreach ($otherPath in $OtherProfilePaths) {
+    if (-not $otherPath -or -not (Test-Path -LiteralPath $otherPath)) { continue }
+    $other = Get-Content -LiteralPath $otherPath -Raw | ConvertFrom-Json
+    $leaf = Split-Path $otherPath -Leaf
+
+    foreach ($relay in @($other.relays)) {
+        if (-not $relay) { continue }
+        $relayHost = "$($relay.endpoint)".Split(':')[0]
+        if ($relayHost -match '^\d{1,3}(\.\d{1,3}){3}$' -and $relayIps -notcontains $relayHost) { $relayIps += $relayHost }
+    }
+
+    foreach ($g in @($other.games)) {
+        if (-not $g -or $ownIds -contains $g.id) { continue }
+        foreach ($region in @($g.regions)) {
+            if (-not $region) { continue }
+            foreach ($c in @($region.cidrs)) {
+                if ("$c" -match '^\d{1,3}(\.\d{1,3}){3}/\d{1,2}$') {
+                    $foreignRanges += [pscustomobject]@{ Cidr = "$c"; Label = "$($g.id)/$($region.id) in $leaf" }
+                }
+            }
+            foreach ($lm in @($region.landmarks)) {
+                if ("$lm" -match '^\d{1,3}(\.\d{1,3}){3}$') {
+                    $foreignRanges += [pscustomobject]@{ Cidr = "$lm/32"; Label = "landmark of $($g.id)/$($region.id) in $leaf" }
+                }
+            }
+        }
+        foreach ($entry in @($g.lobbyAddresses)) {
+            $address = ("$entry".Trim() -split '/')[0]
+            if ($address -match '^\d{1,3}(\.\d{1,3}){3}$') {
+                $foreignRanges += [pscustomobject]@{ Cidr = "$address/32"; Label = "lobby address of $($g.id) in $leaf" }
+            }
+        }
+    }
 }
 
 $privateRanges = @('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8', '169.254.0.0/16', '0.0.0.0/8')
@@ -114,6 +167,14 @@ foreach ($game in $profileData.games) {
                                 "a server that is worse both ways.")
                 }
             }
+
+            foreach ($f in $foreignRanges) {
+                if (Test-CidrsOverlap $cidr $f.Cidr) {
+                    $errors += ("$label - OVERLAPS $($f.Cidr), the $($f.Label). One game's ranges must " +
+                                "never carry another game's servers. Rebuild both with ./gpb profile - " +
+                                "each build narrows away from the other game's observed addresses.")
+                }
+            }
         }
     }
 
@@ -149,6 +210,9 @@ foreach ($game in $profileData.games) {
         }
         foreach ($lm in $landmarks) {
             if ($lm.Value -eq $value) { $errors += "$label - is the landmark for region '$($lm.Region)'. Landmarks must never be routed" }
+        }
+        foreach ($f in $foreignRanges) {
+            if (Test-IpInCidr $value $f.Cidr) { $errors += "$label - inside $($f.Cidr), the $($f.Label)" }
         }
     }
 

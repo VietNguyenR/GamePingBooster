@@ -127,8 +127,13 @@ $captureTcp = $Protocol -in @('tcp', 'all')
 # probes hit 90 packets in a 186-second session, so a long enough evening pushes them over any
 # threshold that still lets a short match through. The port is what actually identifies them, and
 # it is unambiguous - probes are only ever seen on 8081, and no gameplay session has ever used it.
+#
+# -ProbePort 0 means the game has no probe port. ./gpb capture passes it for such a game rather than
+# leaving the parameter out, because left out it defaults to PUBG's 8081 - and anything the game
+# happened to send on 8081 would then be filed in PUBG's landmark list.
 function Test-ProbeEndpoint {
     param($Row)
+    if ($ProbePort -le 0) { return $false }
     $ports = @($Row.Ports.Keys)
     if ($ports.Count -eq 0) { return $false }
     foreach ($port in $ports) { if ([int]$port -ne $ProbePort) { return $false } }
