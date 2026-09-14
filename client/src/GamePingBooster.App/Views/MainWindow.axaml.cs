@@ -142,14 +142,10 @@ public partial class MainWindow : SurfaceWindow
     private void OnUpdateClick(object? sender, RoutedEventArgs e)
     {
         if (DataContext is not MainViewModel { Update: { } update }) return;
-        try
-        {
-            Process.Start(new ProcessStartInfo(update.Url) { UseShellExecute = true });
-        }
-        catch (Exception)
-        {
-            // No default browser, or the shell refused. Nothing more useful to do from a menu item.
-        }
+
+        // Through BrowserLauncher, so the same broken default-browser setting that once blocked
+        // sign-in cannot also block somebody from reaching the update that might fix it.
+        Services.BrowserLauncher.TryOpen(update.Url);
     }
 
     // ------------------------------------------------------------ minimise to tray

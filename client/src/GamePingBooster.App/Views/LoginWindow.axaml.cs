@@ -1,4 +1,5 @@
 ﻿using Avalonia.Controls;
+using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
 using GamePingBooster.App.ViewModels;
@@ -32,6 +33,25 @@ public partial class LoginWindow : SurfaceWindow
         // Close only on success. On failure the window stays with the message in it, because
         // closing would leave somebody looking at the main window wondering what happened.
         if (vm.Succeeded) Close();
+    }
+
+    private async void OnCopyLinkClick(object? sender, RoutedEventArgs e)
+    {
+        if (DataContext is not LoginViewModel { ManualUrl: { } url } vm) return;
+
+        var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+        if (clipboard is null) return;
+
+        try
+        {
+            await clipboard.SetTextAsync(url);
+            vm.MarkLinkCopied();
+        }
+        catch (Exception)
+        {
+            // The clipboard can be held open by another program. The link is still in the box and
+            // selectable, so there is nothing worth interrupting the person with.
+        }
     }
 
     private void OnCancelClick(object? sender, RoutedEventArgs e) => Close();

@@ -51,6 +51,16 @@
     <TextBlock Classes="hint" Text="{Binding Status}" IsVisible="{Binding HasStatus}"
                TextWrapping="Wrap" />
 
+    <!-- The way through when the browser does not open, or opens somewhere the person cannot see.
+         Read-only and selectable, so it can be copied by hand even if the clipboard is refused. -->
+    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8" IsVisible="{Binding HasManualUrl}">
+      <TextBox Grid.Column="0" Text="{Binding ManualUrl, Mode=OneWay}" IsReadOnly="True"
+               Background="#242424" Foreground="#ababab" BorderThickness="0"
+               CornerRadius="8" Padding="10,8" FontSize="11" />
+      <Button Grid.Column="1" Content="{Binding CopyLabel}" Click="OnCopyLinkClick"
+              Background="#242424" Foreground="#e5e5e5" VerticalAlignment="Stretch" />
+    </Grid>
+
     <!-- Which machine this is. "This account already has 2 devices" is unanswerable without it,
          and a public key costs nothing to show. -->
     <TextBlock Classes="hint" Text="{Binding DeviceText}" />

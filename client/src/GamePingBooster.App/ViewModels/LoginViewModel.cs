@@ -83,6 +83,42 @@ public sealed class LoginViewModel : INotifyPropertyChanged
 
     public bool HasError => !string.IsNullOrEmpty(Error);
 
+    private string? _manualUrl;
+
+    /// <summary>
+    /// The sign-in link, on screen for as long as the app is waiting for the browser.
+    ///
+    /// Always offered while waiting, not only when opening the browser failed. The two cases it
+    /// rescues look identical from the person's chair - "nothing happened" - whether the browser
+    /// could not be started or simply opened behind this window, and the link is the one remedy
+    /// that works for both. The listener accepts the callback from any browser, so pasting it into
+    /// whichever one they use finishes the sign-in exactly as a click would.
+    ///
+    /// Nothing in it is a secret: the PKCE challenge is a hash, and the code it produces can only
+    /// come back to this process's own loopback port, where the verifier is waiting.
+    /// </summary>
+    public string? ManualUrl
+    {
+        get => _manualUrl;
+        private set
+        {
+            if (Set(ref _manualUrl, value)) Raise(nameof(HasManualUrl));
+        }
+    }
+
+    public bool HasManualUrl => !string.IsNullOrEmpty(ManualUrl);
+
+    private string _copyLabel = "Copy link";
+
+    /// <summary>The copy button's text, which says "Copied" once it has been, so a click visibly did something.</summary>
+    public string CopyLabel
+    {
+        get => _copyLabel;
+        private set => Set(ref _copyLabel, value);
+    }
+
+    public void MarkLinkCopied() => CopyLabel = "Copied";
+
     /// <summary>True once a token has been stored, which is what the window closes on.</summary>
     public bool Succeeded { get; private set; }
 
@@ -105,11 +141,23 @@ public sealed class LoginViewModel : INotifyPropertyChanged
         try
         {
             loopback = LoopbackAuth.Start(_licenceUrl, Environment.MachineName);
+            ManualUrl = loopback.AuthorizeUrl;
+            CopyLabel = "Copy link";
 
             // Said before the browser opens, not after. The window may end up behind the app, and
             // "nothing happened" is the report you get otherwise.
-            Status = "Finish signing in in your browser, then come back here.";
-            loopback.OpenBrowser();
+            Status = "Finish signing in in your browser, then come back here. " +
+                     "If it did not open, copy the link below into any browser.";
+
+            // A browser that will not start is NOT a failed sign-in. The listener is already up
+            // and will take the callback from a browser the person opens themselves, so the wait
+            // goes on and only the wording changes. Treating it as fatal is what stranded a
+            // customer on 2026-09-14 behind a raw "Application not found".
+            if (!loopback.OpenBrowser())
+            {
+                Status = "Couldn't open a browser on this PC. Copy the link below, paste it into " +
+                         "Chrome, Edge or any browser, and finish signing in there.";
+            }
 
             var code = await loopback.WaitForCodeAsync(ct).ConfigureAwait(true);
 
@@ -149,6 +197,9 @@ public sealed class LoginViewModel : INotifyPropertyChanged
         finally
         {
             Status = null;
+            // Gone with the listener: a link left on screen after the wait ended would lead to a
+            // browser page that "signs in" and then cannot reach anything.
+            ManualUrl = null;
             loopback?.Stop();
             Busy = false;
         }

@@ -35,6 +35,15 @@ public partial class AboutWindow : SurfaceWindow
     /// </summary>
     private static void Open(string target)
     {
+        // Web links go through BrowserLauncher, which survives a broken default-browser setting.
+        // mailto: has no such fallback - there is no "installed mail clients" list worth trusting -
+        // so it stays with the shell.
+        if (target.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+        {
+            Services.BrowserLauncher.TryOpen(target);
+            return;
+        }
+
         try
         {
             Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });

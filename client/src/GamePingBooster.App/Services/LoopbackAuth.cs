@@ -92,19 +92,16 @@ public sealed class LoopbackAuth
     }
 
     /// <summary>
-    /// Opens the browser at the authorize page.
+    /// Opens a browser at the authorize page. False when no browser could be started at all.
     ///
-    /// <c>UseShellExecute</c> is what hands the URL to whatever the person has set as their
-    /// default browser. Without it .NET tries to execute the string as a program and throws.
+    /// Returns rather than throws, and that is the fix for a real failure: this used to call
+    /// <c>Process.Start</c> directly, so a machine whose default-browser association pointed at an
+    /// uninstalled browser threw "Application not found" and the whole sign-in was abandoned -
+    /// with the listener already up and perfectly able to receive a browser that the person could
+    /// have opened by hand. Now the caller carries on waiting and shows the link instead. See
+    /// BrowserLauncher for the attempts made before giving up.
     /// </summary>
-    public void OpenBrowser()
-    {
-        using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-        {
-            FileName = _request.AuthorizeUrl,
-            UseShellExecute = true,
-        });
-    }
+    public bool OpenBrowser() => BrowserLauncher.TryOpen(_request.AuthorizeUrl);
 
     /// <summary>
     /// Waits for the browser's callback and returns the one-time code.
