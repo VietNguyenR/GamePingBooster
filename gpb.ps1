@@ -15,6 +15,8 @@
                                       (udp); tcp/all also report which lobby/login connections
                                       never answered, into tcp-sessions.txt - never the profile
         .\gpb.ps1 profile [game]      rebuild that game's profile from what was captured
+        .\gpb.ps1 push-profile <game> [remove]  seal that local profile into the running service,
+                                      to test a game the licence server does not serve yet
         .\gpb.ps1 check               is the game actually going through the relay right now
         .\gpb.ps1 lag [seconds]       run this DURING the lag: which segment is at fault
         .\gpb.ps1 probe               which provider's Singapore network this line reaches best,
@@ -551,6 +553,18 @@ switch ($Verb.ToLowerInvariant()) {
         try { & (Join-Path $builder 'Build-PubgProfile.ps1') @profileArgs } finally { Pop-Location }
     }
 
+    'push-profile' {
+        # Its own file: every step exists to avoid one specific way of breaking the other games'
+        # relays, and those reasons belong next to the steps.
+        if (-not $Arg1) { throw "Which game? Usage: ./gpb push-profile <game> [remove]" }
+        $pushArgs = @{ Game = $Arg1 }
+        if ($Arg2) {
+            if ($Arg2.ToLowerInvariant() -ne 'remove') { throw "unknown option '$Arg2'. Usage: ./gpb push-profile <game> [remove]" }
+            $pushArgs['Remove'] = $true
+        }
+        & (Join-Path $tools 'Push-LocalProfile.ps1') @pushArgs
+    }
+
     'check' {
         Push-Location $builder
         try { & (Join-Path $builder 'Test-GameRouting.ps1') } finally { Pop-Location }
@@ -655,6 +669,12 @@ switch ($Verb.ToLowerInvariant()) {
         if ($LASTEXITCODE -ne 0) { throw "C# build failed" }
         & dotnet run --project (Join-Path $client 'src\GamePingBooster.ProtocolCheck\GamePingBooster.ProtocolCheck.csproj')
         if ($LASTEXITCODE -ne 0) { throw "the C# client and the Go relay disagree on the wire format" }
+
+        # Pure logic, like the lag diagnosis above: synthetic quarter seconds are the only way to
+        # reach the spike verdicts, since a healthy connection only ever produces "no spike".
+        Say "C#: spike detector verdicts"
+        & dotnet run --project (Join-Path $client 'src\GamePingBooster.QualityCheck\GamePingBooster.QualityCheck.csproj')
+        if ($LASTEXITCODE -ne 0) { throw "the spike detector checks failed" }
 
         Say "Everything passed" 'Green'
     }

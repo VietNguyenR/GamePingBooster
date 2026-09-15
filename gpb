@@ -33,6 +33,8 @@
 #                                says which process to watch and which files to write
 #                                also show which lobby/login connections never answered
 #   ./gpb profile [game]         rebuild that game's profile              (Windows)
+#   ./gpb push-profile <game> [remove]  seal that local profile into the     (Windows)
+#                                running service, to test a game the licence server lacks
 #   ./gpb check                  is the game going through the relay      (Windows)
 #   ./gpb lag [seconds]          where the lag is: PC, home, ISP or relay (Windows) <~ tu dong detect xem tai sao ping lai cao, do personal network hay do relay server
 #   ./gpb logs | status | stop | publish | diag                           (Windows)
@@ -1137,6 +1139,8 @@ case "$verb" in
             say "C#: build and wire-format check"
             dotnet build "$root/client/GamePingBooster.sln" --nologo -v quiet
             dotnet run --project "$root/client/src/GamePingBooster.ProtocolCheck/GamePingBooster.ProtocolCheck.csproj"
+            say "C#: spike detector verdicts"
+            dotnet run --project "$root/client/src/GamePingBooster.QualityCheck/GamePingBooster.QualityCheck.csproj"
         else
             warn "dotnet not found - skipped the C# build and the wire-format check."
             warn "The Go side passed; install the .NET 9 SDK to check the client too."
@@ -1146,7 +1150,7 @@ case "$verb" in
 
     release) release "$@" ;;
 
-    dev | capture | profile | check | lag | logs | status | stop | publish | diag | installer | reset | version)
+    dev | capture | profile | push-profile | check | lag | logs | status | stop | publish | diag | installer | reset | version)
         delegate "$verb" "$@"
         ;;
 
