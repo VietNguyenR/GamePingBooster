@@ -135,12 +135,15 @@ jobs:
         # packages the public example profiles instead; swap in the real ones before this step
         # (e.g. from a secret) if a release needs to ship real IPs.
         #
-        # The logic lives in gpb.ps1, so ./gpb release rehearses exactly this before a tag exists. It
-        # reads the list from installer/GamePingBooster.iss; see the verb for why.
+        # The logic lives in gpb.ps1 and reads the list from installer/GamePingBooster.iss; see the verb.
+        #
+        # NO `if ($LASTEXITCODE -ne 0)` after this call. That check belongs after a NATIVE program.
+        # release-profiles runs none, so in this fresh session $LASTEXITCODE does not exist, and
+        # `$null -ne 0` is TRUE: the step threw "failed" after the verb had succeeded, and v0.2.7 was
+        # lost to it. A failure inside gpb.ps1 is a throw, and under 'Stop' a throw fails the step.
         run: |
           $ErrorActionPreference = 'Stop'
           .\gpb.ps1 release-profiles
-          if ($LASTEXITCODE -ne 0) { throw "gpb.ps1 release-profiles failed" }
 
       - name: Build client and package the installer
         # Reuses gpb.ps1's own `installer` verb end to end: it Native-AOT publishes both the

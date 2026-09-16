@@ -914,29 +914,30 @@ version_gt() {
     }'
 }
 
-# The rehearsal: the build .github/workflows/release.yml will run, run here first, on exactly what
-# is about to be tagged, while nothing has been pushed and a failure costs nothing.
+# The rehearsal: .github/workflows/release.yml's own steps, run here first, on exactly what is about to
+# be tagged, while nothing has been pushed and a failure costs nothing.
 #
 # Why it exists: a release that fails in CI still burns its version. The tag is public the moment it
 # is pushed, releases here are immutable, and the fix is always "release the next number". v0.2.3
-# and v0.2.6 were both lost to a profile the installer listed and a clean checkout did not have -
-# and both built perfectly on this machine, because this machine had the file.
+# and v0.2.6 were lost to a profile the installer listed and a clean checkout did not have - both built
+# perfectly on this machine, because this machine had the file. v0.2.7 was lost to a check in the
+# workflow's own step text, after a rehearsal that called the same verbs its own way had passed.
 #
-# So it does not build in this tree. It builds in a git worktree of HEAD, which holds only what is
-# committed: no gitignored real profiles, no untracked file that was never added, no stale bin\ -
-# the same starting point as the CI checkout. And it runs the same verbs CI runs (release-profiles,
-# installer, relay\deploy.ps1 -PackageOnly), not a copy of them, so the two cannot drift apart.
-#
-# What it cannot rehearse, and says so: GitHub itself - the runner image, choco, gh. wintun.dll is
-# copied from this tree rather than downloaded, but the pinned download URL is checked.
+# So it builds in a git worktree of HEAD, which holds only what is committed: no gitignored real
+# profiles, no untracked file that was never added, no stale bin\ - the starting point of a CI
+# checkout. And it does not call the build its own way: tools/Invoke-ReleaseRehearsal.ps1 reads the
+# run: blocks out of release.yml and runs each one the way GitHub does, in PowerShell 7. It skips, by
+# name, only the steps that need GitHub or install software, and says which.
 release_rehearse() {
     rr_ver=$1
 
     [ "$is_windows" -eq 1 ] || die "a release is rehearsed before it is tagged, and the rehearsal builds the Windows installer.
     Run ./gpb release from Windows (Git Bash or PowerShell)."
     need powershell "It ships with Windows; make sure C:/Windows/System32/WindowsPowerShell/v1.0 is on PATH."
+    need pwsh "The release workflow runs its steps in PowerShell 7, so the rehearsal does too. Install it:
+    winget install --id Microsoft.PowerShell
+    then open a new terminal."
     need cygpath "It ships with Git for Windows."
-    need curl "It ships with Git for Windows."
 
     rr_dir=$(mktemp -d)
     rr_src="$rr_dir/src"
@@ -952,63 +953,26 @@ release_rehearse() {
     trap 'release_rehearse_cleanup keep' INT TERM HUP
 
     printf '\n'
-    say "Rehearsing the release build on a clean checkout of HEAD (several minutes)"
+    say "Rehearsing release.yml on a clean checkout of HEAD (a few minutes)"
 
-    rr_step "checkout of HEAD, committed files only" \
-        git worktree add --detach --quiet "$rr_src" HEAD || release_rehearse_failed
+    printf '    %-48s' "checkout of HEAD, committed files only"
+    if git worktree add --detach --quiet "$rr_src" HEAD >> "$rr_log" 2>&1; then printf 'ok\n'; else printf 'FAILED\n'; release_rehearse_failed; fi
     rr_win=$(cygpath -w "$rr_src")
 
     # What the release commit will say. Written in the worktree only; this tree is untouched.
     printf '%s' "$rr_ver" > "$rr_src/VERSION"
 
-    rr_step "wintun download CI will fetch still exists" rr_wintun_url || release_rehearse_failed
-    rr_step "wintun.dll (copied from this tree)" rr_wintun_copy || release_rehearse_failed
-    rr_step "release-profiles" rr_ps release-profiles || release_rehearse_failed
-    rr_step "installer" rr_ps installer || release_rehearse_failed
-    rr_step "  GamePingBooster-Setup-$rr_ver.exe exists" \
-        test -f "$rr_src/installer/dist/GamePingBooster-Setup-$rr_ver.exe" || release_rehearse_failed
-    rr_step "relay package" rr_relay_package || release_rehearse_failed
-    rr_step "  gpb-relay.tar.gz exists" test -f "$rr_src/relay/gpb-relay.tar.gz" || release_rehearse_failed
+    rr_repo=$(git remote get-url origin | sed -nE 's#\.git$##; s#^(https://|git@)github\.com[:/]([^/]+/[^/]+)$#\2#p')
+    [ -n "$rr_repo" ] || rr_repo=unknown/unknown
+
+    # The runner comes from the worktree too: what is rehearsed is what is committed.
+    powershell -NoProfile -ExecutionPolicy Bypass -File "$rr_win\\tools\\Invoke-ReleaseRehearsal.ps1" \
+        -Tag "v$rr_ver" -Repository "$rr_repo" -Log "$(cygpath -w "$rr_log")" \
+        || release_rehearse_failed
 
     trap - INT TERM HUP
     release_rehearse_cleanup
-    say "Rehearsal passed - CI will build the same thing from the same files"
-}
-
-rr_step() {
-    printf '    %-48s' "$1"
-    shift
-    printf '\n==== %s\n' "$*" >> "$rr_log"
-    if "$@" >> "$rr_log" 2>&1; then
-        printf 'ok\n'
-        return 0
-    fi
-    printf 'FAILED\n'
-    return 1
-}
-
-rr_in_src() { ( cd "$rr_src" && "$@" ); }
-
-rr_ps() { rr_in_src powershell -NoProfile -ExecutionPolicy Bypass -File "$rr_win\\gpb.ps1" "$@"; }
-
-rr_relay_package() {
-    rr_in_src powershell -NoProfile -ExecutionPolicy Bypass -File "$rr_win\\relay\\deploy.ps1" -PackageOnly
-}
-
-rr_wintun_url() {
-    rr_wv=$(sed -n 's/^ *WINTUN_VERSION: *"\([^"]*\)".*/\1/p' "$rr_src/.github/workflows/release.yml")
-    [ -n "$rr_wv" ] || { echo "WINTUN_VERSION not found in release.yml"; return 1; }
-    echo "https://www.wintun.net/builds/wintun-$rr_wv.zip"
-    curl -sfIL -o /dev/null "https://www.wintun.net/builds/wintun-$rr_wv.zip"
-}
-
-rr_wintun_copy() {
-    [ -f "$root/client/native/wintun/wintun.dll" ] || {
-        echo "client/native/wintun/wintun.dll is missing here - see client/native/wintun/README.md"
-        return 1
-    }
-    mkdir -p "$rr_src/client/native/wintun"
-    cp "$root/client/native/wintun/wintun.dll" "$rr_src/client/native/wintun/wintun.dll"
+    say "Rehearsal passed - every step release.yml runs on a runner passed here, from the same files"
 }
 
 # Removes the worktree. With "keep", the log is left behind for reading.
