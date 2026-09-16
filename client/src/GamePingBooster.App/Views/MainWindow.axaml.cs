@@ -240,7 +240,7 @@ public partial class MainWindow : SurfaceWindow
     /// The close is cancelled, not delayed: the window stays on screen saying "Disconnecting..."
     /// while the service tears down, and closes for real afterwards. Hiding it and letting the
     /// process linger would look like a hang, and this can genuinely take a second or two -
-    /// netsh runs one process per route.
+    /// the adapter and the pump threads take their time going away.
     ///
     /// async void is right here and only here: this overrides an event-shaped method, and there
     /// is nothing to hand a Task to.

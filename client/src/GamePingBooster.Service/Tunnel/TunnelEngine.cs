@@ -459,6 +459,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
         try
         {
             SetState(TunnelState.Connecting, "Preparing...");
+            var phases = new ConnectTimer();
 
             // The licence gate, before anything is created and before a packet is sent. An
             // expired subscription is a refusal the relay would make anyway; making it here as
@@ -484,6 +485,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
                 _log($"Could not reload the profile ({ex.Message}) - continuing with the one already loaded.");
             }
 
+            phases.Mark("profile");
             _game = ChooseGameForConnect(gameId);
             var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
 
@@ -495,14 +497,16 @@ internal sealed class TunnelEngine : IAsyncDisposable
                 .ConfigureAwait(false);
             var endpoint = ParseEndpoint(_relay.Endpoint);
             var session = _tunnel.Session;
+            phases.Mark("relays");
 
             SetState(TunnelState.Connecting, "Creating the virtual adapter...");
             _adapter = WintunAdapter.Create(_config.AdapterName, log: _log);
             _adapter.StartSession();
             _log($"Virtual adapter '{_config.AdapterName}' is ready, interface index {_adapter.InterfaceIndex}");
+            phases.Mark("adapter");
 
             // Pin the relay to the physical adapter BEFORE installing any route into the tunnel.
-            _routes = new RouteManager();
+            _routes = new RouteManager(_log);
             _routes.PinRelayRoute(endpoint.Address);
             PinDoors();
 
@@ -514,6 +518,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             // opens in its first seconds, and one caught by a route after it opened is dropped by
             // the relay for carrying the wrong source address - a late lobby route hangs the lobby.
             InstallLobbyRoutes();
+            phases.Mark("routing");
 
             // Watch EVERY game in the profile, so routes come and go with whichever one is opened.
             _watcher = new GameProcessWatcher(_profile!.Games.SelectMany(g => g.ProcessNames));
@@ -529,6 +534,8 @@ internal sealed class TunnelEngine : IAsyncDisposable
             StartSupervisor(token);
             StartGamePingProbe(token);
             StartSpikeRecorder(token);
+            phases.Mark("start");
+            _log($"Connect took {phases}.");
 
             SetState(TunnelState.Connected,
                 _watcher.IsGameRunning
@@ -543,6 +550,34 @@ internal sealed class TunnelEngine : IAsyncDisposable
             await TeardownAsync().ConfigureAwait(false);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Where a connect's time went, for one log line: "5.1 s (profile 40 ms, relays 2.8 s, adapter 1.4 s,
+    /// routing 12 ms, start 30 ms)". Each mark closes the phase since the previous one. Written because
+    /// the only way to find the 27 seconds netsh cost was reading gaps between unrelated log lines.
+    /// </summary>
+    private sealed class ConnectTimer
+    {
+        private readonly long _started = System.Diagnostics.Stopwatch.GetTimestamp();
+        private long _last;
+        private readonly List<(string Name, TimeSpan Took)> _phases = [];
+
+        public ConnectTimer() => _last = _started;
+
+        public void Mark(string name)
+        {
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            _phases.Add((name, System.Diagnostics.Stopwatch.GetElapsedTime(_last, now)));
+            _last = now;
+        }
+
+        public override string ToString() =>
+            $"{Format(System.Diagnostics.Stopwatch.GetElapsedTime(_started, _last))} (" +
+            string.Join(", ", _phases.Select(p => $"{p.Name} {Format(p.Took)}")) + ")";
+
+        private static string Format(TimeSpan t) =>
+            t.TotalSeconds >= 1 ? $"{t.TotalSeconds:F1} s" : $"{t.TotalMilliseconds:F0} ms";
     }
 
     // ------------------------------------------------------- authentication
@@ -2153,7 +2188,9 @@ internal sealed class TunnelEngine : IAsyncDisposable
     {
         if (_state == TunnelState.Disconnected) return;
         SetState(TunnelState.Disconnected, "Disconnecting...");
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         await TeardownAsync().ConfigureAwait(false);
+        _log($"Disconnect took {System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} ms.");
         SetState(TunnelState.Disconnected, reason ?? "Not connected");
     }
 

@@ -1,9 +1,8 @@
 using System.Diagnostics;
 using System.Net;
-using System.Net.NetworkInformation;
 using System.Net.Sockets;
-using System.Text;
 using GamePingBooster.Core.Native;
+using GamePingBooster.Service.Native;
 
 namespace GamePingBooster.Service.Network;
 
@@ -11,19 +10,49 @@ namespace GamePingBooster.Service.Network;
 /// Owns the Windows routing table: pushes the game's IP ranges into the virtual adapter and
 /// pulls them back out afterwards.
 ///
-/// Why netsh instead of P/Invoke into CreateIpForwardEntry2: every route is added with
-/// <c>store=active</c>, meaning it lives in RAM and disappears on reboot. For software that
-/// touches a user's network that is a feature, not a limitation - after a hang or a BSOD the
-/// machine comes back with a clean routing table.
+/// Through the IP Helper API (<see cref="IpHelper"/>), not netsh. It used to start one netsh.exe
+/// per route and per setting, chosen for <c>store=active</c> - routes that live in RAM and are gone
+/// after a reboot, so a hang or a BSOD leaves a clean routing table. That property is kept:
+/// CreateIpForwardEntry2 writes to the active store only. What went was the cost. Each netsh process
+/// took seconds as LocalSystem while the adapter was coming up, and on 2026-09-17 a connect spent
+/// about 27 of its 30 seconds on them, with 64 game routes adding another 8.5 when the game opened.
+/// It also retires the reason every add had its own process: netsh reported failures in the display
+/// language and through one exit code, where each call here returns its own Win32 error.
 ///
-/// The price is netsh's error reporting: it prints failures on stdout in the user's display
-/// language and only surfaces them through the process exit code, which in <c>-f</c> script mode
-/// reflects the last command alone. So anything whose failure matters runs through
-/// <see cref="RunNetsh"/>, one command per process, and the adapter address is read back through
-/// NetworkInformation afterwards rather than trusted.
+/// Every operation logs how long it took, so a slow connect says where its time went.
 /// </summary>
 internal sealed class RouteManager
 {
+    private readonly Action<string>? _log;
+
+    /// <summary>Route metric for everything added here - the same metric=1 netsh was given.</summary>
+    private const uint Metric = 1;
+
+    public RouteManager(Action<string>? log = null)
+    {
+        IpHelper.SelfCheck();
+        _log = log;
+    }
+
+    /// <summary>
+    /// Runs one routing operation and logs its duration - "Routing: pinned the relay in 2 ms." - or how
+    /// long it ran before failing. The failure itself is the caller's to report; this only times it.
+    /// </summary>
+    private void Timed(string what, Action action)
+    {
+        var started = Stopwatch.GetTimestamp();
+        try
+        {
+            action();
+            _log?.Invoke($"Routing: {what} in {Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} ms.");
+        }
+        catch
+        {
+            _log?.Invoke($"Routing: failed after {Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} ms: {what}.");
+            throw;
+        }
+    }
+
     private readonly List<string> _installedPrefixes = [];
 
     // The lobby's host routes, kept apart from the game routes because they live on a different
@@ -63,58 +92,73 @@ internal sealed class RouteManager
     /// Assigns the inner IP and MTU to the virtual adapter. Call this after the relay has
     /// handed out an address during the handshake.
     /// </summary>
-    public void ConfigureAdapter(uint tunInterfaceIndex, IPAddress innerIp, int prefixLength, int mtu)
-    {
-        var mask = PrefixLengthToMask(prefixLength);
+    public void ConfigureAdapter(uint tunInterfaceIndex, IPAddress innerIp, int prefixLength, int mtu) =>
+        Timed("configured the virtual adapter", () =>
+        {
+            // The only IPv4 address on the adapter, usable at once: duplicate address detection has
+            // nothing to find inside our own tunnel.
+            var error = IpHelper.SetOnlyAddress(tunInterfaceIndex, innerIp, (byte)prefixLength);
+            if (error != IpHelper.NoError)
+            {
+                throw new InvalidOperationException(
+                    $"Could not give the virtual adapter (interface {tunInterfaceIndex}) the address " +
+                    $"{innerIp}/{prefixLength}: {IpHelper.Describe(error)}.");
+            }
 
-        // Mind the parameter names, they are not consistent across netsh commands:
-        //   set address       takes name=      ("Interface name or index")
-        //   set subinterface  takes interface=
-        //   set interface     takes interface=
-        // Writing interface= on set address is a syntax error, and netsh only reports it on
-        // stdout - which is why each of these runs as its own process with its own exit code.
-        RunNetsh($"interface ipv4 set address name={tunInterfaceIndex} source=static address={innerIp} mask={mask} store=active");
-        RunNetsh($"interface ipv4 set subinterface interface={tunInterfaceIndex} mtu={mtu} store=active");
-        // Do not let Windows register DNS for this adapter; it is not a real network card.
-        RunNetsh($"interface ipv4 set interface interface={tunInterfaceIndex} dadtransmits=0 store=active");
+            // MTU, and dadtransmits=0 as netsh set it.
+            var (mtuError, mtuAfter) = IpHelper.SetMtu(tunInterfaceIndex, (uint)mtu);
+            if (mtuError != IpHelper.NoError)
+            {
+                throw new InvalidOperationException(
+                    $"Could not set the virtual adapter's MTU to {mtu}: {IpHelper.Describe(mtuError)}.");
+            }
+            if (mtuAfter != (uint)mtu)
+            {
+                // Not fatal - the tunnel clamps what it sends - but worth knowing about.
+                _log?.Invoke($"Routing: asked for MTU {mtu} on the virtual adapter, Windows reports {mtuAfter}.");
+            }
 
-        WaitForAddress(tunInterfaceIndex, innerIp);
-    }
+            WaitForAddress(tunInterfaceIndex, innerIp);
+        });
 
     /// <summary>
-    /// Confirms the address really landed on the adapter, reading it back through
-    /// NetworkInformation rather than parsing netsh output (which is localised).
+    /// Confirms the address really landed on the adapter, reading it back from the address table
+    /// rather than trusting the call that set it.
     ///
-    /// netsh can report success while the address is not usable yet, and the failure that follows
+    /// Windows can report success while the address is not usable yet, and the failure that follows
     /// is silent: routes install fine, packets go nowhere, and nothing logs an error. Better to
     /// fail here, loudly, than to hand the user a tunnel that looks connected and does nothing.
+    ///
+    /// The table, not NetworkInformation: that went through GetAdaptersAddresses, which is what cost
+    /// 4 to 5 seconds here while the new adapter was settling - see GatewayCandidates.
     /// </summary>
     private static void WaitForAddress(uint tunInterfaceIndex, IPAddress expected, int timeoutMs = 5000)
     {
+        var wanted = IpHelper.ToInAddr(expected);
         var deadline = Environment.TickCount64 + timeoutMs;
         do
         {
-            foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
-            {
-                IPInterfaceProperties props;
-                try { props = nic.GetIPProperties(); }
-                catch (NetworkInformationException) { continue; }
-
-                try
-                {
-                    if (props.GetIPv4Properties()?.Index != (int)tunInterfaceIndex) continue;
-                }
-                catch (NetworkInformationException) { continue; }
-
-                if (props.UnicastAddresses.Any(a => a.Address.Equals(expected))) return;
-            }
-            Thread.Sleep(100);
+            if (IpHelper.ReadAddresses().Any(a => a.InterfaceIndex == tunInterfaceIndex && a.Address == wanted)) return;
+            Thread.Sleep(50);
         } while (Environment.TickCount64 < deadline);
 
         throw new InvalidOperationException(
             $"The virtual adapter (interface {tunInterfaceIndex}) still does not carry {expected} " +
-            $"after {timeoutMs} ms. netsh reported success, so the adapter is most likely in a bad " +
+            $"after {timeoutMs} ms. Windows reported success, so the adapter is most likely in a bad " +
             "state - disconnect, then connect again.");
+    }
+
+    /// <summary>
+    /// <see cref="GetRouteTo"/>, with a log line when it is slow. It was the lookup, not the route, that
+    /// took seconds once netsh had gone; if it ever does again the log should say so by name.
+    /// </summary>
+    private (uint InterfaceIndex, IPAddress Gateway)? LookUpRoute(IPAddress destination)
+    {
+        var started = Stopwatch.GetTimestamp();
+        var found = GetRouteTo(destination);
+        var took = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        if (took >= 50) _log?.Invoke($"Routing: looking up the way out to {destination} took {took:F0} ms.");
+        return found;
     }
 
     /// <summary>
@@ -125,9 +169,12 @@ internal sealed class RouteManager
     /// pushed back into the tunnel - an infinite loop that takes the machine offline. Pin first,
     /// always.
     /// </summary>
-    public void PinRelayRoute(IPAddress relayIp)
+    public void PinRelayRoute(IPAddress relayIp) =>
+        Timed($"pinned the relay {relayIp}", () => PinRelayRouteCore(relayIp));
+
+    private void PinRelayRouteCore(IPAddress relayIp)
     {
-        var (physIndex, gateway) = GetRouteTo(relayIp)
+        var (physIndex, gateway) = LookUpRoute(relayIp)
             ?? throw new InvalidOperationException(
                 "No network adapter with a default gateway was found - is the machine offline?");
 
@@ -149,7 +196,7 @@ internal sealed class RouteManager
         }
 
         // Already pinned as a way into the relay: a move onto it. Taken over as it stands - deleting and adding
-        // it again would cost two netsh processes on the move and leave the address unpinned in between.
+        // it again would leave the address unpinned for a moment on the move.
         if (_pinnedDoorPrefixes.TryGetValue(prefix, out var doorInterface))
         {
             _pinnedRelayPrefix = prefix;
@@ -159,13 +206,11 @@ internal sealed class RouteManager
 
         // Always delete before adding. This route goes through the PHYSICAL adapter, so unlike
         // the game routes it does not disappear when the virtual adapter goes away - a service
-        // that was killed rather than stopped cleanly leaves it behind, and then `add` fails.
-        // We cannot simply ignore that failure by matching netsh's message, because the message
-        // is localised: an English Windows says "The object already exists" and a Vietnamese one
-        // says something else entirely.
+        // that was killed rather than stopped cleanly leaves it behind, possibly through a gateway
+        // that has since changed. Replacing it is the only way to be sure it points where it should.
         DeleteRoute(prefix, physIndex);
 
-        RunNetsh($"interface ipv4 add route prefix={prefix} interface={physIndex} nexthop={gateway} metric=1 store=active");
+        AddRoute(prefix, physIndex, gateway);
         _pinnedRelayPrefix = prefix;
         _pinnedRelayInterface = physIndex;
     }
@@ -180,7 +225,10 @@ internal sealed class RouteManager
     /// ordinary routing table, and if a game range happens to contain that address it goes into the
     /// tunnel - measuring a loop, and switching the player onto one.
     /// </summary>
-    public void PinDoorRoutes(IReadOnlyCollection<IPAddress> addresses)
+    public void PinDoorRoutes(IReadOnlyCollection<IPAddress> addresses) =>
+        Timed($"pinned {addresses.Count} way(s) into the relay", () => PinDoorRoutesCore(addresses));
+
+    private void PinDoorRoutesCore(IReadOnlyCollection<IPAddress> addresses)
     {
         var wanted = new Dictionary<string, IPAddress>();
         foreach (var address in addresses) wanted[$"{address}/32"] = address;
@@ -201,13 +249,13 @@ internal sealed class RouteManager
                 continue;
             }
 
-            var (physIndex, gateway) = GetRouteTo(address)
+            var (physIndex, gateway) = LookUpRoute(address)
                 ?? throw new InvalidOperationException(
                     "No network adapter with a default gateway was found - is the machine offline?");
             DeleteRoute(prefix, physIndex);
             // Recorded before the add, as the game routes are: if it fails the table may still hold it.
             _pinnedDoorPrefixes[prefix] = physIndex;
-            RunNetsh($"interface ipv4 add route prefix={prefix} interface={physIndex} nexthop={gateway} metric=1 store=active");
+            AddRoute(prefix, physIndex, gateway);
         }
     }
 
@@ -223,6 +271,7 @@ internal sealed class RouteManager
     /// </summary>
     public void InstallGameRoutes(uint tunInterfaceIndex, IEnumerable<string> cidrs)
     {
+        var started = Stopwatch.GetTimestamp();
         var fresh = new List<string>();
         foreach (var cidr in cidrs)
         {
@@ -238,23 +287,27 @@ internal sealed class RouteManager
         }
         if (fresh.Count == 0) return;
 
-        // Same reasoning as PinRelayRoute: clear any leftover entry first so `add` cannot fail
-        // on a duplicate. Two netsh invocations for the whole batch, not two per route.
-        RunNetshScript(
-            fresh.Select(cidr =>
-                $"interface ipv4 delete route prefix={cidr} interface={tunInterfaceIndex} store=active").ToList(),
-            ignoreErrors: true);
+        // Same reasoning as PinRelayRoute: clear any leftover entry first. One read of the routing
+        // table for the whole batch.
+        DeleteRoutes(fresh, tunInterfaceIndex);
 
         // Record them before the adds run, not after: if one fails partway some routes are
         // already in the table, and teardown must still know to remove them.
         _installedPrefixes.AddRange(fresh);
 
-        // One process per route so each exit code is attributable. A real PUBG profile is a few
-        // dozen prefixes, so this costs a second or two - once, when the game starts. Worth it:
-        // a route that silently fails to install looks exactly like a relay that is down.
-        foreach (var cidr in fresh)
+        // Every add checked on its own: a route that silently fails to install looks exactly like
+        // a relay that is down.
+        try
         {
-            RunNetsh($"interface ipv4 add route prefix={cidr} interface={tunInterfaceIndex} metric=1 store=active");
+            foreach (var cidr in fresh) AddRoute(cidr, tunInterfaceIndex, nextHop: null);
+            _log?.Invoke($"Routing: installed {fresh.Count} game route(s) in " +
+                         $"{Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} ms.");
+        }
+        catch
+        {
+            _log?.Invoke($"Routing: failed after {Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} ms " +
+                         $"installing {fresh.Count} game route(s).");
+            throw;
         }
     }
 
@@ -263,10 +316,8 @@ internal sealed class RouteManager
     {
         if (_installedPrefixes.Count == 0) return;
 
-        var commands = _installedPrefixes
-            .Select(cidr => $"interface ipv4 delete route prefix={cidr} interface={tunInterfaceIndex} store=active")
-            .ToList();
-        RunNetshScript(commands, ignoreErrors: true);
+        Timed($"removed {_installedPrefixes.Count} game route(s)",
+            () => DeleteRoutes(_installedPrefixes, tunInterfaceIndex));
         _installedPrefixes.Clear();
     }
 
@@ -280,6 +331,7 @@ internal sealed class RouteManager
     /// </summary>
     public void InstallLobbyRoutes(uint tunInterfaceIndex, IEnumerable<string> hostRoutes)
     {
+        var started = Stopwatch.GetTimestamp();
         var fresh = new List<string>();
         foreach (var prefix in hostRoutes)
         {
@@ -300,16 +352,21 @@ internal sealed class RouteManager
         }
         if (fresh.Count == 0) return;
 
-        RunNetshScript(
-            fresh.Select(prefix =>
-                $"interface ipv4 delete route prefix={prefix} interface={tunInterfaceIndex} store=active").ToList(),
-            ignoreErrors: true);
+        DeleteRoutes(fresh, tunInterfaceIndex);
 
         _lobbyPrefixes.AddRange(fresh);
 
-        foreach (var prefix in fresh)
+        try
         {
-            RunNetsh($"interface ipv4 add route prefix={prefix} interface={tunInterfaceIndex} metric=1 store=active");
+            foreach (var prefix in fresh) AddRoute(prefix, tunInterfaceIndex, nextHop: null);
+            _log?.Invoke($"Routing: installed {fresh.Count} lobby route(s) in " +
+                         $"{Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} ms.");
+        }
+        catch
+        {
+            _log?.Invoke($"Routing: failed after {Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} ms " +
+                         $"installing {fresh.Count} lobby route(s).");
+            throw;
         }
     }
 
@@ -318,10 +375,8 @@ internal sealed class RouteManager
     {
         if (_lobbyPrefixes.Count == 0) return;
 
-        var commands = _lobbyPrefixes
-            .Select(prefix => $"interface ipv4 delete route prefix={prefix} interface={tunInterfaceIndex} store=active")
-            .ToList();
-        RunNetshScript(commands, ignoreErrors: true);
+        Timed($"removed {_lobbyPrefixes.Count} lobby route(s)",
+            () => DeleteRoutes(_lobbyPrefixes, tunInterfaceIndex));
         _lobbyPrefixes.Clear();
     }
 
@@ -331,14 +386,17 @@ internal sealed class RouteManager
         RemoveGameRoutes(tunInterfaceIndex);
         RemoveLobbyRoutes(tunInterfaceIndex);
 
-        if (_pinnedRelayPrefix is not null)
+        Timed("removed the relay pins", () =>
         {
-            DeleteRoute(_pinnedRelayPrefix, _pinnedRelayInterface);
-        }
-        foreach (var (prefix, iface) in _pinnedDoorPrefixes)
-        {
-            if (prefix != _pinnedRelayPrefix) DeleteRoute(prefix, iface);
-        }
+            if (_pinnedRelayPrefix is not null)
+            {
+                DeleteRoute(_pinnedRelayPrefix, _pinnedRelayInterface);
+            }
+            foreach (var (prefix, iface) in _pinnedDoorPrefixes)
+            {
+                if (prefix != _pinnedRelayPrefix) DeleteRoute(prefix, iface);
+            }
+        });
         _pinnedDoorPrefixes.Clear();
         _pinnedRelayPrefix = null;
     }
@@ -368,7 +426,7 @@ internal sealed class RouteManager
         // Windows' answer wins when this machine can act on it - which means an adapter that is
         // actually up and has a gateway to name. GetBestInterfaceEx can legitimately return an
         // interface with no gateway of its own (a point-to-point link, or a destination that is
-        // on-link), and `netsh add route` needs a nexthop, so those fall through rather than
+        // on-link), and a pin needs a next hop to name, so those fall through rather than
         // producing a route that cannot be installed.
         if (IpHelperInterop.BestInterfaceFor(destination) is { } best)
         {
@@ -382,158 +440,81 @@ internal sealed class RouteManager
     }
 
     /// <summary>
-    /// Every adapter that could carry traffic off this machine: up, not loopback, not a tunnel of
-    /// ours, and naming an IPv4 gateway.
+    /// Every interface that could carry traffic off this machine: each IPv4 default route that names a
+    /// gateway, best first by the metric Windows itself ranks them by (route metric plus interface
+    /// metric), one per interface.
     ///
-    /// Only OUR adapter is excluded by description, and deliberately so. An earlier version said
-    /// in a comment that it skipped VMware and Hyper-V while the code below it skipped neither,
-    /// and filtering them by name would have been the wrong fix anyway: a virtual adapter is
-    /// sometimes genuinely the way out - a VM host, a corporate VPN client - and a name is a poor
-    /// way to tell. Ranking them is <see cref="GetRouteTo"/>'s job, and it ranks them by asking
-    /// the routing table rather than by reading their descriptions.
+    /// Read from the routing table, not from NetworkInterface. The two give the same answer - an
+    /// adapter with a gateway is an adapter with a default route through it - but NetworkInterface asks
+    /// GetAdaptersAddresses for every adapter on the machine, and as LocalSystem, seconds after a
+    /// Wintun adapter was created, that call waited for it: 4 to 9 seconds per lookup on 2026-09-17,
+    /// most of what was left of a connect once netsh had gone. The table read takes a tenth of a
+    /// millisecond.
     ///
-    /// Our own adapter is different: it is excluded because pinning the relay through the tunnel
-    /// that carries the relay is a loop, whatever the routing table says about it.
+    /// Nothing is excluded by name. A virtual adapter is sometimes genuinely the way out - a VM host,
+    /// a corporate VPN client - and ranking is <see cref="GetRouteTo"/>'s job. A tunnel is excluded by
+    /// shape instead: its default route is on-link, with no gateway to name, and a pin through it would
+    /// be a loop. Ours never has a default route at all.
     /// </summary>
     private static List<(uint InterfaceIndex, IPAddress Gateway)> GatewayCandidates()
     {
-        var found = new List<(uint, IPAddress)>();
-        foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+        var metrics = new Dictionary<uint, uint?>();
+        uint? InterfaceMetric(uint index)
         {
-            if (nic.OperationalStatus != OperationalStatus.Up) continue;
-            if (nic.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
-            if (nic.Description.Contains("Wintun", StringComparison.OrdinalIgnoreCase)) continue;
-
-            var props = nic.GetIPProperties();
-            var gateway = props.GatewayAddresses
-                .Select(g => g.Address)
-                .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork && !a.Equals(IPAddress.Any));
-            if (gateway is null) continue;
-
-            try
+            if (!metrics.TryGetValue(index, out var metric))
             {
-                found.Add(((uint)props.GetIPv4Properties().Index, gateway));
+                var row = IpHelper.ReadInterface(index);
+                metrics[index] = metric = row is { Connected: not 0 } ? row.Value.Metric : null;
             }
-            catch (NetworkInformationException)
-            {
-                // Adapter has no IPv4 - skip it.
-            }
+            return metric;
         }
-        return found;
+
+        return IpHelper.ReadRoutes()
+            .Where(r => r.DestinationPrefixLength == 0 && r.DestinationAddress == 0 && r.NextHopAddress != 0)
+            .Select(r => (Route: r, InterfaceMetric: InterfaceMetric(r.InterfaceIndex)))
+            .Where(x => x.InterfaceMetric is not null)
+            .OrderBy(x => (ulong)x.Route.Metric + x.InterfaceMetric!.Value)
+            .Select(x => (x.Route.InterfaceIndex, new IPAddress(x.Route.NextHopAddress)))
+            .DistinctBy(x => x.InterfaceIndex)
+            .ToList();
     }
 
     /// <summary>
-    /// Deletes one route. Every deletion goes through here for one reason: netsh REQUIRES
-    /// interface= on `delete route`, and when it is missing netsh prints its usage text and
-    /// <b>exits with code 0</b>. The command does nothing, the exit code says success, and the
-    /// route silently stays in the table - which is how the pinned relay route survived every
-    /// disconnect for weeks. Taking the interface as a parameter makes that mistake impossible to
-    /// write rather than merely unlikely.
+    /// Deletes every route to <paramref name="prefix"/> through that interface, whatever its next hop.
+    /// The interface is required, as it was with netsh: the physical adapter can change between
+    /// pinning and unpinning, and deleting a prefix off every interface would take routes that are not
+    /// ours. A route that is not there is not an error.
     /// </summary>
-    private static void DeleteRoute(string prefix, uint interfaceIndex)
-        => RunNetsh($"interface ipv4 delete route prefix={prefix} interface={interfaceIndex} store=active",
-            ignoreErrors: true);
+    private static void DeleteRoute(string prefix, uint interfaceIndex) => DeleteRoutes([prefix], interfaceIndex);
 
-    private static bool IsValidIPv4Cidr(string cidr)
+    /// <summary>Deletes routes to these prefixes on one interface, with a single read of the routing table.</summary>
+    private static void DeleteRoutes(IEnumerable<string> prefixes, uint interfaceIndex)
     {
-        var parts = cidr.Split('/');
-        return parts.Length == 2
-               && IPAddress.TryParse(parts[0], out var ip)
-               && ip.AddressFamily == AddressFamily.InterNetwork
-               && int.TryParse(parts[1], out var bits)
-               && bits is >= 0 and <= 32;
-    }
-
-    private static string PrefixLengthToMask(int prefixLength)
-    {
-        var mask = prefixLength == 0 ? 0u : uint.MaxValue << (32 - prefixLength);
-        return $"{(mask >> 24) & 0xff}.{(mask >> 16) & 0xff}.{(mask >> 8) & 0xff}.{mask & 0xff}";
+        var targets = prefixes
+            .Select(IpHelper.ParsePrefix)
+            .OfType<IpHelper.Prefix>()
+            .Select(prefix => (prefix, interfaceIndex))
+            .ToList();
+        IpHelper.DeleteRoutes(targets);
     }
 
     /// <summary>
-    /// Runs a single netsh command in its own process and checks its exit code.
-    ///
-    /// Use this for anything whose failure matters. netsh reports a bad command on stdout in the
-    /// user's display language, so the message cannot be matched on - the exit code is the only
-    /// locale-independent signal, and it is only trustworthy one command at a time.
+    /// Adds one route, on-link when <paramref name="nextHop"/> is null, and throws naming it when Windows
+    /// refuses. One already there counts as added: every caller has just deleted it, so one still there
+    /// is the same route.
     /// </summary>
-    private static void RunNetsh(string command, bool ignoreErrors = false)
-        => RunNetshCore("netsh.exe", command, [command], ignoreErrors);
-
-    /// <summary>
-    /// Runs several netsh commands in one process via a script file (netsh -f).
-    ///
-    /// Cheaper than one process per command, but the exit code reflects only the last command:
-    /// an earlier failure is invisible here. Only use this where failures are expected and
-    /// ignored, or where a separate read-back confirms the result.
-    /// </summary>
-    private static void RunNetshScript(IReadOnlyCollection<string> commands, bool ignoreErrors = false)
+    private static void AddRoute(string prefix, uint interfaceIndex, IPAddress? nextHop)
     {
-        if (commands.Count == 0) return;
+        var parsed = IpHelper.ParsePrefix(prefix)
+            ?? throw new ArgumentException($"'{prefix}' is not an IPv4 prefix.", nameof(prefix));
 
-        var scriptPath = Path.Combine(Path.GetTempPath(), $"gpb-{Guid.NewGuid():N}.netsh");
-        try
-        {
-            var sb = new StringBuilder();
-            foreach (var c in commands) sb.AppendLine(c);
-            File.WriteAllText(scriptPath, sb.ToString(), Encoding.ASCII);
+        var error = IpHelper.AddRoute(parsed, interfaceIndex, nextHop, Metric);
+        if (error is IpHelper.NoError or IpHelper.ErrorObjectAlreadyExists) return;
 
-            RunNetshCore("netsh.exe", $"-f \"{scriptPath}\"", commands, ignoreErrors);
-        }
-        finally
-        {
-            try { File.Delete(scriptPath); } catch (IOException) { /* temp file, ignore */ }
-        }
+        throw new InvalidOperationException(
+            $"Could not add the route {parsed} on interface {interfaceIndex}" +
+            (nextHop is null ? "" : $" via {nextHop}") + $": {IpHelper.Describe(error)}.");
     }
 
-    private static void RunNetshCore(
-        string fileName, string arguments, IReadOnlyCollection<string> commands, bool ignoreErrors)
-    {
-        using var proc = Process.Start(new ProcessStartInfo
-        {
-            FileName = fileName,
-            Arguments = arguments,
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-        }) ?? throw new InvalidOperationException("Could not start netsh.exe");
-
-        var stdout = proc.StandardOutput.ReadToEnd();
-        var stderr = proc.StandardError.ReadToEnd();
-        proc.WaitForExit(15_000);
-
-        if (ignoreErrors) return;
-
-        if (proc.ExitCode != 0)
-        {
-            throw new InvalidOperationException(
-                $"netsh exited with {proc.ExitCode}. Commands: {string.Join(" | ", commands)}. " +
-                $"Output: {(stdout + stderr).Trim()}");
-        }
-
-        // The exit code alone is NOT enough. A command with a missing or misspelled parameter
-        // makes netsh print its usage block and exit 0, so a command that did nothing at all
-        // looks exactly like one that worked - which is how `delete route` ran without an
-        // interface= for weeks, deleting nothing, reporting success.
-        //
-        // Detecting that must not rely on reading the text, which is localised. It relies on the
-        // SHAPE instead, measured on this machine:
-        //
-        //   syntax error (missing interface=) : exit 0, 935 chars over 24 lines (the usage block)
-        //   real failure ("Element not found"): exit 1, 18 chars on 1 line
-        //   success ("Ok.")                   : exit 0, 3 chars on 1 line
-        //
-        // So: exit code catches real failures, and a multi-line wall of text on exit 0 catches
-        // syntax errors. Requiring BOTH conditions keeps a short localised acknowledgement from
-        // being mistaken for a failure - an earlier version of this check treated ANY output as a
-        // failure, and "Ok." from a perfectly good `add route` broke every connect.
-        var noise = (stdout + stderr).Trim();
-        if (noise.Length >= 200 && noise.AsSpan().Count('\n') >= 1)
-        {
-            throw new InvalidOperationException(
-                "netsh exited 0 but printed its usage text, which means it rejected the command " +
-                $"and did nothing. Commands: {string.Join(" | ", commands)}. Output: {noise}");
-        }
-    }
+    private static bool IsValidIPv4Cidr(string cidr) => IpHelper.ParsePrefix(cidr) is not null;
 }

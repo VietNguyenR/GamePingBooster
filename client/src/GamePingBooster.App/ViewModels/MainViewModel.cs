@@ -478,9 +478,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// the tunnel stays up: the adapter, the pinned route and every game route survive an app
     /// that looks closed, with nothing on screen to say so and no way to press Disconnect.
     ///
-    /// The timeout is not a formality either. Teardown removes routes through netsh, one process
-    /// per command, releases the adapter and joins two pump threads - seconds, not milliseconds,
-    /// on a bad day. What it must never do is hold the window open indefinitely, so the wait is
+    /// The timeout is not a formality either. Teardown removes routes, releases the adapter and
+    /// joins two pump threads - quick since routing stopped going through netsh, but seconds on a
+    /// bad day. What it must never do is hold the window open indefinitely, so the wait is
     /// capped and the service is left to finish on its own if it is slow. The verb having been
     /// sent is the part that matters; the wait is only so the user sees it happen.
     /// </summary>
@@ -490,6 +490,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         var wait = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _teardown = wait;
+        _holdConnecting = false;
         try
         {
             Detail = "Disconnecting...";
@@ -511,6 +512,31 @@ public sealed class MainViewModel : INotifyPropertyChanged
     // the profile is being fetched. A second press in that window would otherwise read the
     // Connecting state, send a disconnect, and then watch the first press connect anyway.
     private bool _connectInFlight;
+
+    /// <summary>
+    /// Holds the window on "Connecting..." from the press until the SERVICE says it has taken the connect
+    /// up - a status of Connecting, Connected or Reconnecting.
+    ///
+    /// Without it the window let go in the middle. The press set Connecting, then spent seconds fetching
+    /// the profile before the connect was even sent, and the service's once-a-second heartbeat - still
+    /// saying Disconnected, or Faulted from an earlier attempt - put "Not connected" back on screen and
+    /// the button back under the finger. People pressed it again, thinking the first press had failed.
+    ///
+    /// Only the service's state is held back: every other field of those statuses still applies. And it
+    /// is not held for ever - see <see cref="ConnectHoldAfterSend"/> - because a connect the service never
+    /// takes up (a version mismatch, which answers Faulted without starting) must still show its answer.
+    /// </summary>
+    private bool _holdConnecting;
+
+    /// <summary>When the connect verb was sent, or null while the profile is still being fetched.</summary>
+    private DateTimeOffset? _connectSentAt;
+
+    /// <summary>
+    /// How long after sending the connect a stale Disconnected or Faulted is still ignored. The service
+    /// handles pipe commands in order, so the profile pushes just before it can take a moment, but it
+    /// reports Connecting as its first act on a connect.
+    /// </summary>
+    private static readonly TimeSpan ConnectHoldAfterSend = TimeSpan.FromSeconds(15);
 
     /// <param name="profileSync">
     /// When given, the latest profile is fetched from the licence server BEFORE the connect is sent.
@@ -537,11 +563,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
             Error = null;
             if (State is TunnelState.Connected or TunnelState.Connecting)
             {
+                // A disconnect asked for while a connect is still held on screen (the tray can send
+                // one) wants the Disconnected that follows shown, not held back as stale.
+                _holdConnecting = false;
                 await _pipe.DisconnectTunnelAsync().ConfigureAwait(false);
             }
             else
             {
                 _connectInFlight = true;
+                _holdConnecting = true;
+                _connectSentAt = null;
                 State = TunnelState.Connecting;
 
                 if (profileSync is not null && !string.IsNullOrWhiteSpace(LicenceUrl))
@@ -557,10 +588,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
                 Detail = "Sending the request to the background service...";
                 await _pipe.ConnectTunnelAsync().ConfigureAwait(true);
+                _connectSentAt = DateTimeOffset.UtcNow;
             }
         }
         catch (Exception ex)
         {
+            _holdConnecting = false;
             State = TunnelState.Faulted;
             Error = ex.Message;
         }
@@ -589,7 +622,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private void OnStatus(StatusMessage status) => Dispatcher.UIThread.Post(() =>
     {
         LastStatus = status;
-        State = status.State;
 
         // Whoever is closing the app can stop waiting. Faulted counts: the tunnel is not up, and
         // holding the window open for five seconds over a teardown that already failed helps
@@ -598,8 +630,30 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             _teardown?.TrySetResult();
         }
+
+        // A press of Connect the service has not taken up yet: keep saying Connecting, with the
+        // window's own line about what it is doing, and none of an earlier attempt's error.
+        if (_holdConnecting)
+        {
+            var stale = status.State is TunnelState.Disconnected or TunnelState.Faulted;
+            var waited = _connectSentAt is { } sent && DateTimeOffset.UtcNow - sent > ConnectHoldAfterSend;
+            if (stale && !waited)
+            {
+                ApplyDetails(status);
+                return;
+            }
+            _holdConnecting = false;
+        }
+
+        State = status.State;
         Detail = status.Detail;
         Error = status.Error;
+        ApplyDetails(status);
+    });
+
+    /// <summary>Everything a status carries except the tunnel's state, its detail line and its error.</summary>
+    private void ApplyDetails(StatusMessage status)
+    {
         PingMs = status.TunnelPingMs;
         GamePingMs = status.GamePingMs;
         GamePingDirect = status.GamePingDirect;
@@ -623,13 +677,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
         ActiveRoutes = status.ActiveRoutes;
         PacketsSent = status.PacketsSent;
         PacketsReceived = status.PacketsReceived;
-    });
+    }
 
     private void OnDisconnected(string reason) => Dispatcher.UIThread.Post(() =>
     {
         // The pipe itself dropped. Nothing more is coming, so anything waiting on a status that
-        // says "down" would wait out its whole timeout for an answer that cannot arrive.
+        // says "down" would wait out its whole timeout for an answer that cannot arrive - and a
+        // connect held on screen would be held for one that never comes.
         _teardown?.TrySetResult();
+        _holdConnecting = false;
 
         State = TunnelState.Disconnected;
         Detail = reason;
