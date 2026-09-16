@@ -1476,6 +1476,74 @@ internal sealed class TunnelEngine : IAsyncDisposable
     /// <summary>Beyond this a reading is stale and the estimate takes the headline back.</summary>
     private static readonly TimeSpan DirectPingGoesStale = TimeSpan.FromSeconds(5);
 
+    /// <summary>When a region's landmark last failed to answer, so a silent one is not asked every second.</summary>
+    private readonly Dictionary<string, long> _regionRetryAfterTick = new(StringComparer.OrdinalIgnoreCase);
+
+    private static readonly TimeSpan RegionRetryAfter = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Points the in-game estimate at the region the game is actually playing in, found from where its traffic
+    /// goes.
+    ///
+    /// At connect the region is a prediction: the one the game would choose from its own probes, measured the same
+    /// way over the player's connection. The game can disagree - a player who picks a server by hand, a queue
+    /// that fills elsewhere - and the headline then read "~52 ms to Singapore" through a match played in Seoul.
+    /// The busiest destination of game traffic settles it: whichever region's ranges hold that address is the
+    /// region, and its landmark is measured through the live tunnel to replace the estimate's second leg.
+    ///
+    /// Only when a region can be told apart. An address inside no region's ranges, or a region with no landmark,
+    /// leaves the estimate where it was. VALORANT is the case that cannot: Riot Direct answers every region on
+    /// the same addresses, so its traffic says nothing about which server the player picked.
+    /// </summary>
+    private async Task FollowMatchRegionAsync(TunnelClient tunnel, IPAddress destination, CancellationToken ct)
+    {
+        var profile = _profile;
+        if (profile is null) return;
+
+        RegionEntry? region = null;
+        foreach (var game in profile.Games)
+        {
+            region = game.Regions.FirstOrDefault(r => r.Cidrs.Any(c => IPNetwork.TryParse(c, out var net) && net.Contains(destination)));
+            if (region is not null) break;
+        }
+        if (region is null || region.Landmarks.Count == 0) return;
+        if (_path is { } known && known.RegionName == region.Name) return;
+
+        var now = Environment.TickCount64;
+        if (_regionRetryAfterTick.TryGetValue(region.Name, out var after) && now < after) return;
+
+        foreach (var text in region.Landmarks)
+        {
+            if (!IPAddress.TryParse(text, out var landmark)) continue;
+
+            double? best = null;
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                if (await tunnel.ProbeGameServerAsync(landmark, ProbeTimeoutMs, ct).ConfigureAwait(false) is { } ms &&
+                    (best is null || ms < best))
+                {
+                    best = ms;
+                }
+            }
+            if (best is not { } endToEnd || tunnel.LastRttMs is not { } legOne) continue;
+
+            // Same arithmetic as RecordPath, and the same clamp: the echo travels the relay leg too.
+            var offset = Math.Max(0, endToEnd - legOne);
+            var previous = _path?.RegionName;
+            _path = new PathMeasurement(region.Name, offset, landmark);
+            _regionRetryAfterTick.Remove(region.Name);
+            _log(previous is null
+                ? $"The match is in {region.Name}: {endToEnd:F0} ms there through the tunnel. The in-game estimate follows it."
+                : $"The match is in {region.Name}, not {previous} as predicted at connect: {endToEnd:F0} ms there through " +
+                  "the tunnel. The in-game estimate follows it.");
+            return;
+        }
+
+        _regionRetryAfterTick[region.Name] = now + (long)RegionRetryAfter.TotalMilliseconds;
+        _log($"The match is in {region.Name}, but its landmark did not answer through the tunnel - the in-game " +
+             "estimate stays where it was for now.");
+    }
+
     private void StartGamePingProbe(CancellationToken ct) =>
         _gamePingProbe = Task.Run(() => ProbeGamePingAsync(ct), ct);
 
@@ -1818,6 +1886,12 @@ internal sealed class TunnelEngine : IAsyncDisposable
                     misses = 0;
                     quietUntilTick = 0;
                     ForgetDirectPing();
+                    await FollowMatchRegionAsync(tunnel, target, ct).ConfigureAwait(false);
+                }
+                else if (_path is null)
+                {
+                    // A failover to another relay blanks the estimate; the match in progress says where to take it again.
+                    await FollowMatchRegionAsync(tunnel, target, ct).ConfigureAwait(false);
                 }
 
                 if (Environment.TickCount64 < quietUntilTick) continue;

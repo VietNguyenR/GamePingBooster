@@ -409,7 +409,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         get => _gamePingMs;
         private set
         {
-            if (Set(ref _gamePingMs, value)) Raise(nameof(GamePingText));
+            if (!Set(ref _gamePingMs, value)) return;
+            Raise(nameof(GamePingText));
+            Raise(nameof(GamePingTip));
         }
     }
 
@@ -419,7 +421,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         get => _gamePingDirect;
         private set
         {
-            if (Set(ref _gamePingDirect, value)) Raise(nameof(GamePingText));
+            if (!Set(ref _gamePingDirect, value)) return;
+            Raise(nameof(GamePingText));
+            Raise(nameof(GamePingTip));
         }
     }
 
@@ -429,7 +433,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         get => _gameRegionName;
         private set
         {
-            if (Set(ref _gameRegionName, value)) Raise(nameof(GamePingText));
+            if (!Set(ref _gameRegionName, value)) return;
+            Raise(nameof(GamePingText));
+            Raise(nameof(GamePingTip));
         }
     }
 
@@ -482,7 +488,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         get => _relayName;
         private set
         {
-            if (Set(ref _relayName, value)) Raise(nameof(RelayText));
+            if (!Set(ref _relayName, value)) return;
+            Raise(nameof(RelayText));
+            Raise(nameof(GamePingTip));
         }
     }
 
@@ -573,6 +581,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
         ? (GamePingDirect ? "" : "~") +
           (GameRegionName is { } region ? $"{g:F0} ms to {region}" : $"{g:F0} ms")
         : "-";
+
+    /// <summary>
+    /// What the in-game figure is, on hover. The estimate is to the game's servers in a region, and a player who
+    /// has just picked a relay in another city reads "to Singapore" as the app ignoring the pick - so it says
+    /// that the game chooses its server and the relay only changes the road there.
+    /// </summary>
+    public string GamePingTip => GamePingMs is null
+        ? "Appears once the connection has been measured."
+        : GamePingDirect
+            ? "Measured: echoes to this match's game server, through the tunnel."
+            : $"Estimated: the ping to {RelayName ?? "the relay"} plus the distance from there to the game's " +
+              $"{GameRegionName ?? "servers"} servers. The game picks its own server - changing the relay changes " +
+              "the route to it, not the server. In a match it follows the region the game actually uses, where that " +
+              "can be told from its traffic.";
 
     public string PingText => PingMs is { } p ? $"{p:F0} ms" : "-";
     public string LossText => LossRatio is { } l ? $"{l * 100:F1}%" : "-";
