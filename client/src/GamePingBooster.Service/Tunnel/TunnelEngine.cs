@@ -1,5 +1,6 @@
 ﻿using System.Buffers.Binary;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text.Json;
 using GamePingBooster.Core.Ipc;
@@ -493,7 +494,8 @@ internal sealed class TunnelEngine : IAsyncDisposable
             // routes - so a relay that turns out to be unreachable costs nothing but a timeout.
             SetState(TunnelState.Connecting, "Measuring relays...");
             ResetThroughputBaseline();
-            (_relay, _tunnel) = await SelectRelayAsync(relayId ?? _config.DefaultRelayId, psk, token)
+            _choiceAtConnect = RelayChoice;
+            (_relay, _tunnel) = await SelectRelayAsync(string.IsNullOrWhiteSpace(relayId) ? RelayChoice : relayId, psk, token)
                 .ConfigureAwait(false);
             var endpoint = ParseEndpoint(_relay.Endpoint);
             var session = _tunnel.Session;
@@ -578,6 +580,148 @@ internal sealed class TunnelEngine : IAsyncDisposable
 
         private static string Format(TimeSpan t) =>
             t.TotalSeconds >= 1 ? $"{t.TotalSeconds:F1} s" : $"{t.TotalMilliseconds:F0} ms";
+    }
+
+    // ------------------------------------------------------- relay choice
+
+    /// <summary>The relay chosen on the main window, or null for automatic. Saved as defaultRelayId.</summary>
+    private string? RelayChoice => string.IsNullOrWhiteSpace(_config.DefaultRelayId) ? null : _config.DefaultRelayId;
+
+    /// <summary>The choice this tunnel was connected with, so a change since can be told from a relay that did not answer.</summary>
+    private volatile string? _choiceAtConnect;
+
+    /// <summary>Each relay's last ICMP round trip, by relay id - null when it did not answer. Read and written under its own lock.</summary>
+    private readonly Dictionary<string, double?> _relayPings = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The ping round in progress, so a list opened twice in a second shares one round rather than starting two.</summary>
+    private Task<List<RelayOption>>? _pinging;
+    private readonly object _pingingGate = new();
+
+    private const int RelayPingTimeoutMs = 1000;
+
+    /// <summary>
+    /// Pings every relay once, all at once, and returns the list with the results. For the main window's
+    /// relay list, which asks when it opens and every few seconds while it stays open.
+    ///
+    /// ICMP over the player's own connection rather than the measurement a connect makes: that one opens a
+    /// session on every relay, and doing it whenever a list is opened would leave a trail of them. An echo
+    /// costs a relay nothing. Relays answer them - the spike recorder's relayWire signal is the same echo.
+    /// It is only the first leg; automatic selection still compares the whole way to the game at connect.
+    ///
+    /// Safe with a tunnel up: the relay in use is pinned to the physical adapter, and no game range holds a
+    /// relay's address (WarnAboutRoutedLandmarks and the builders see to that), so the echoes cannot fall
+    /// into the tunnel.
+    /// </summary>
+    public Task<List<RelayOption>> PingRelaysAsync()
+    {
+        lock (_pingingGate)
+        {
+            if (_pinging is { IsCompleted: false } running) return running;
+            return _pinging = PingRoundAsync();
+        }
+    }
+
+    private async Task<List<RelayOption>> PingRoundAsync()
+    {
+        var relays = _profile?.Relays ?? [];
+        var rounds = relays.Select(async relay =>
+        {
+            double? rtt = null;
+            try
+            {
+                using var ping = new Ping();
+                var reply = await ping.SendPingAsync(ParseEndpoint(relay.Endpoint).Address, RelayPingTimeoutMs)
+                    .ConfigureAwait(false);
+                if (reply.Status == IPStatus.Success) rtt = reply.RoundtripTime;
+            }
+            catch (Exception)
+            {
+                // No route, a malformed endpoint, no ICMP: shown as no answer, and never a reason to fail the list.
+            }
+            lock (_relayPings) _relayPings[relay.Id] = rtt;
+        });
+        await Task.WhenAll(rounds).ConfigureAwait(false);
+        return RelayOptions();
+    }
+
+    /// <summary>
+    /// Every relay in the profile for the main window's choice, in profile order, with the last ping of each.
+    /// The relay the tunnel is on shows the tunnel's own round trip instead: live, and the same leg.
+    /// </summary>
+    public List<RelayOption> RelayOptions()
+    {
+        var relays = _profile?.Relays ?? [];
+        var current = _relay is { } relay && _tunnel?.LastRttMs is { } live
+            ? (Id: RelayPaths.RelayIdOf(relay), Ms: live)
+            : (Id: (string?)null, Ms: 0d);
+
+        lock (_relayPings)
+        {
+            return relays
+                .Select(r => new RelayOption
+                {
+                    Id = r.Id,
+                    Name = r.Name,
+                    Location = r.Location,
+                    PingMs = r.Id.Equals(current.Id, StringComparison.OrdinalIgnoreCase)
+                        ? Math.Round(current.Ms)
+                        : _relayPings.TryGetValue(r.Id, out var ms) && ms is { } value ? Math.Round(value) : null,
+                })
+                .ToList();
+        }
+    }
+
+    /// <summary>
+    /// Saves the relay to use from the next connect, or automatic for null or empty. Returns why not, or null.
+    /// Only a relay the loaded profile lists can be chosen.
+    /// </summary>
+    public string? SetRelayChoice(string? relayId)
+    {
+        RelayEntry? relay = null;
+        if (!string.IsNullOrWhiteSpace(relayId))
+        {
+            relay = _profile?.Relays.FirstOrDefault(r => r.Id.Equals(relayId.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (relay is null) return $"There is no relay '{relayId.Trim()}' in the current server list.";
+        }
+
+        var previous = _config.DefaultRelayId;
+        _config.DefaultRelayId = relay?.Id;
+        try
+        {
+            _config.Save();
+        }
+        catch (Exception ex)
+        {
+            _config.DefaultRelayId = previous;
+            return $"Could not save the relay choice: {ex.Message}";
+        }
+
+        _log(relay is null
+            ? "Relay choice: automatic (the fastest). It applies from the next connect."
+            : $"Relay choice: {relay.Name} [{relay.Id}]. It applies from the next connect.");
+        StatusChanged?.Invoke(Snapshot());
+        return null;
+    }
+
+    /// <summary>
+    /// Why the tunnel is not on the chosen relay, when it is up and that is so; null otherwise. Worked out
+    /// here, beside the state it describes, rather than in the UI from a relay id - which would be an
+    /// entry's id whenever the tunnel came in through one.
+    /// </summary>
+    private string? RelayChoiceNote()
+    {
+        var relay = _relay;
+        if (relay is null || _state is not (TunnelState.Connected or TunnelState.Reconnecting)) return null;
+
+        var choice = RelayChoice;
+        if (!string.Equals(choice, _choiceAtConnect, StringComparison.OrdinalIgnoreCase))
+        {
+            return "Applies the next time you connect.";
+        }
+        if (choice is null || RelayPaths.RelayIdOf(relay).Equals(choice, StringComparison.OrdinalIgnoreCase)) return null;
+
+        var chosen = _profile?.Relays.FirstOrDefault(r => r.Id.Equals(choice, StringComparison.OrdinalIgnoreCase));
+        return chosen is null ? null : $"{chosen.Name} is not answering - using {relay.Name} instead.";
     }
 
     // ------------------------------------------------------- authentication
@@ -748,17 +892,36 @@ internal sealed class TunnelEngine : IAsyncDisposable
     private async Task<(RelayEntry Relay, TunnelClient Tunnel)> SelectRelayAsync(
         string? preferredId, byte[] psk, CancellationToken ct)
     {
-        var candidates = _profile!.Relays;
-        if (candidates.Count == 0) throw new InvalidOperationException("The profile declares no relays.");
+        var relays = _profile!.Relays;
+        if (relays.Count == 0) throw new InvalidOperationException("The profile declares no relays.");
 
-        var paths = RelayPaths.Expand(candidates);
+        var paths = RelayPaths.Expand(relays);
 
-        if (preferredId is not null)
+        if (!string.IsNullOrWhiteSpace(preferredId))
         {
-            // An entry can be pinned as well as a relay: the override for a player the automatic rule
-            // below gets wrong.
-            var pinned = candidates.Concat(paths)
-                .FirstOrDefault(r => r.Id.Equals(preferredId, StringComparison.OrdinalIgnoreCase));
+            // A relay chosen on the main window: measured with the ways into it, exactly as the automatic
+            // rule would measure it, so an entry in front of it can still win. When nothing about it
+            // answers, the player gets the fastest relay rather than no connection - the status says so
+            // (RelayChoiceNote), and the choice stays saved for the next connect.
+            var chosen = relays.FirstOrDefault(r => r.Id.Equals(preferredId, StringComparison.OrdinalIgnoreCase));
+            if (chosen is not null)
+            {
+                _log($"Using {chosen.Name} [{chosen.Id}], the relay chosen in the app.");
+                try
+                {
+                    return await SelectAmongAsync([chosen], RelayPaths.Expand([chosen]), psk, ct).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested)
+                {
+                    _log($"{chosen.Name}, the relay chosen in the app, did not answer ({ex.Message}) - " +
+                         "choosing the fastest relay instead.");
+                    return await SelectAmongAsync(relays, paths, psk, ct).ConfigureAwait(false);
+                }
+            }
+
+            // An entry pinned by id in config.json: the override for a player the automatic rule gets
+            // wrong. Never offered in the app, and taken as it is.
+            var pinned = paths.FirstOrDefault(r => r.Id.Equals(preferredId, StringComparison.OrdinalIgnoreCase));
             if (pinned is not null)
             {
                 var client = new TunnelClient(ParseEndpoint(pinned.Endpoint), AuthFor(pinned, psk), _clientId, _log);
@@ -769,6 +932,16 @@ internal sealed class TunnelEngine : IAsyncDisposable
             _log($"The profile has no relay '{preferredId}' - measuring all of them instead.");
         }
 
+        return await SelectAmongAsync(relays, paths, psk, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The automatic rule, over <paramref name="candidates"/> and the entries in <paramref name="paths"/>:
+    /// every relay in the profile, or the one the player chose with its entries.
+    /// </summary>
+    private async Task<(RelayEntry Relay, TunnelClient Tunnel)> SelectAmongAsync(
+        List<RelayEntry> candidates, List<RelayEntry> paths, byte[] psk, CancellationToken ct)
+    {
         if (candidates.Count == 1 && paths.Count == 0)
         {
             var only = candidates[0];
@@ -796,6 +969,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
                     if (await ProbeAsync(path, psk, target, ct).ConfigureAwait(false) is { } probe) probes.Add(probe);
                 }
             }
+
 
             // An entry that could not reach the landmark cannot be scored, and letting it in would drop
             // the whole comparison to the first leg (see ChooseByEndToEnd) - which an entry a few
@@ -2313,6 +2487,8 @@ internal sealed class TunnelEngine : IAsyncDisposable
             // nobody made; the UI says how many instead of listing them all.
             GameName = (_watcher?.IsGameRunning ?? false) ? _game?.Name : OnlyGameName,
             GameCount = _profile?.Games.Count ?? 0,
+            RelayChoice = RelayChoice,
+            RelayChoiceNote = RelayChoiceNote(),
             ActiveRoutes = _routes?.ActiveRouteCount ?? 0,
             PacketsSent = _tunnel?.PacketsSent ?? 0,
             PacketsReceived = _tunnel?.PacketsReceived ?? 0,

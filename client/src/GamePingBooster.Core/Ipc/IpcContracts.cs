@@ -32,7 +32,7 @@ public sealed class CommandMessage
 
     /// <summary>
     /// "connect" | "disconnect" | "status" | "reload-profile" | "set-relay" | "set-token" |
-    /// "set-profile" | "games"
+    /// "set-profile" | "games" | "relays" | "set-relay-choice"
     /// </summary>
     [JsonPropertyName("verb")] public string Verb { get; set; } = "status";
 
@@ -66,7 +66,10 @@ public sealed class CommandMessage
     /// </summary>
     [JsonPropertyName("licenceUrl")] public string? LicenceUrl { get; set; }
 
-    /// <summary>Relay id to use, e.g. "sg-1". Empty means let the service pick by ping.</summary>
+    /// <summary>
+    /// connect: relay id to use for this connect only, e.g. "sg-1"; null uses the saved choice.
+    /// set-relay-choice: the relay to use from now on, saved; null or empty means automatic.
+    /// </summary>
     [JsonPropertyName("relayId")] public string? RelayId { get; set; }
 
     /// <summary>
@@ -166,6 +169,25 @@ public sealed class SupportedGame
 
     /// <summary>The game this machine last played - see ServiceConfig.LastGameId.</summary>
     [JsonPropertyName("lastPlayed")] public bool LastPlayed { get; set; }
+}
+
+/// <summary>
+/// One relay the player can choose on the main window. The same list for every game: a relay is the
+/// app's server, not the game's, and the game's own region is left to the game.
+/// </summary>
+public sealed class RelayOption
+{
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
+    [JsonPropertyName("name")] public string Name { get; set; } = "";
+    [JsonPropertyName("location")] public string? Location { get; set; }
+
+    /// <summary>
+    /// Round trip to the relay, milliseconds: an ICMP echo over the player's own connection, taken when the
+    /// list was asked for - or, for the relay the tunnel is on, the tunnel's own keepalive. The first leg
+    /// only, not on to the game; automatic selection still measures the whole way at connect. Null when
+    /// the relay did not answer or has not been pinged yet.
+    /// </summary>
+    [JsonPropertyName("pingMs")] public double? PingMs { get; set; }
 }
 
 /// <summary>State the service pushes up to the UI (on request, and on every change).</summary>
@@ -408,6 +430,22 @@ public sealed class StatusMessage
     /// grows with each game has no business in a once-a-second heartbeat. Additive, so no contract bump.
     /// </summary>
     [JsonPropertyName("games")] public List<SupportedGame>? Games { get; set; }
+
+    /// <summary>
+    /// relays and set-relay-choice only: every relay the player can choose. A relays reply comes once the
+    /// relays have been pinged, a second or so after it was asked for. Null on other statuses.
+    /// </summary>
+    [JsonPropertyName("relays")] public List<RelayOption>? Relays { get; set; }
+
+    /// <summary>The relay the player chose on the main window, or null for automatic. On every status.</summary>
+    [JsonPropertyName("relayChoice")] public string? RelayChoice { get; set; }
+
+    /// <summary>
+    /// A line for under the relay choice when the tunnel is not on it, or null: the chosen relay did not
+    /// answer and another one is carrying the game, or the choice changed after this connect and applies
+    /// from the next. On every status.
+    /// </summary>
+    [JsonPropertyName("relayChoiceNote")] public string? RelayChoiceNote { get; set; }
 
     /// <summary>quality-outbox only: how many records were still waiting, this batch included.</summary>
     [JsonPropertyName("qualityPending")] public int? QualityPending { get; set; }

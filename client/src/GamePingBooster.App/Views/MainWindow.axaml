@@ -6,8 +6,8 @@
         x:DataType="vm:MainViewModel"
         Title="Game Ping Booster"
         Icon="/favicon.ico"
-        Width="420" Height="540"
-        MinWidth="380" MinHeight="500"
+        Width="420" Height="600"
+        MinWidth="380" MinHeight="560"
         WindowStartupLocation="CenterScreen">
 
   <views:SurfaceWindow.Styles>
@@ -180,7 +180,7 @@
     </StackPanel>
 
     <!-- Primary action -->
-    <Grid Grid.Row="3" ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto">
+    <Grid Grid.Row="3" ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto">
 
       <!-- First run: there is no relay yet, so say so instead of offering a button that
            could only fail. -->
@@ -191,7 +191,32 @@
                    Text="No relay configured yet. Open Settings and enter your relay's address and key." />
       </Border>
 
-      <Button Grid.Row="1" Grid.ColumnSpan="2"
+      <!-- Which relay to use: automatic, or one the player picks. The same list for every game. -->
+      <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Margin="0,0,0,12" Spacing="4"
+                  IsVisible="{Binding ShowRelayChoice}">
+        <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+          <TextBlock Grid.Column="0" Text="Server" Foreground="#ababab" FontSize="13"
+                     VerticalAlignment="Center" />
+          <ComboBox Grid.Column="1" HorizontalAlignment="Stretch"
+                    ItemsSource="{Binding RelayItems}"
+                    SelectedItem="{Binding SelectedRelay}"
+                    IsEnabled="{Binding CanChooseRelay}"
+                    DropDownOpened="OnRelayListOpened"
+                    DropDownClosed="OnRelayListClosed"
+                    Background="#242424" Foreground="#E2E8F0" BorderThickness="0" CornerRadius="8"
+                    ToolTip.Tip="Ping is to the server itself. Automatic measures the whole way to the game when you connect and takes the fastest.">
+            <ComboBox.ItemTemplate>
+              <DataTemplate x:DataType="vm:RelayChoiceItem">
+                <TextBlock Text="{Binding Label}" TextTrimming="CharacterEllipsis" />
+              </DataTemplate>
+            </ComboBox.ItemTemplate>
+          </ComboBox>
+        </Grid>
+        <TextBlock Text="{Binding RelayChoiceNote}" IsVisible="{Binding HasRelayChoiceNote}"
+                   Foreground="#FBBF24" FontSize="11" TextWrapping="Wrap" HorizontalAlignment="Right" />
+      </StackPanel>
+
+      <Button Grid.Row="2" Grid.ColumnSpan="2"
               Content="{Binding ActionButtonText}"
               IsEnabled="{Binding CanPressAction}"
               Click="OnActionClick"
@@ -204,7 +229,7 @@
 
       <!-- Only on an installation that has a licence server. A self-hosted one never sees any
            of this, which is the default and stays the default. -->
-      <TextBlock Grid.Row="2" Grid.ColumnSpan="2"
+      <TextBlock Grid.Row="3" Grid.ColumnSpan="2"
                  IsVisible="{Binding ShowLicence}"
                  Text="{Binding LicenceText}"
                  TextWrapping="Wrap"

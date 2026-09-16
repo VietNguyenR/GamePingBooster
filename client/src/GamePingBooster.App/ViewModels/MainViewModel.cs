@@ -211,6 +211,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             Raise(nameof(ActionButtonText));
             Raise(nameof(IsBusy));
             Raise(nameof(CanPressAction));
+            Raise(nameof(CanChooseRelay));
         }
     }
 
@@ -236,6 +237,146 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     public bool NeedsSetup => !Configured;
+
+    // ------------------------------------------------------------ relay choice
+    //
+    // One list for every game: a relay is the app's server, and which of the GAME's regions a match
+    // lands in is the game's business. Automatic stays the default; a choice is saved by the service
+    // and applies from the next connect. See TunnelEngine.SelectRelayAsync for what happens when the
+    // chosen relay does not answer - the player is connected through the fastest one and told.
+
+    private IReadOnlyList<RelayChoiceItem> _relayItems = [RelayChoiceItem.Automatic];
+    public IReadOnlyList<RelayChoiceItem> RelayItems
+    {
+        get => _relayItems;
+        private set
+        {
+            if (!Set(ref _relayItems, value)) return;
+            Raise(nameof(ShowRelayChoice));
+        }
+    }
+
+    private RelayChoiceItem? _selectedRelay = RelayChoiceItem.Automatic;
+
+    /// <summary>
+    /// The relay picked in the list. Set by the person, it is sent to the service; set from a status,
+    /// it is only shown - <see cref="_applyingChoice"/> tells the two apart.
+    /// </summary>
+    public RelayChoiceItem? SelectedRelay
+    {
+        get => _selectedRelay;
+        set
+        {
+            // The ComboBox writes null while its items are being replaced; that is not a choice.
+            if (value is null || !Set(ref _selectedRelay, value) || _applyingChoice) return;
+            _ = SendRelayChoiceAsync(value.Id);
+        }
+    }
+
+    private bool _applyingChoice;
+
+    /// <summary>The choice the service last confirmed, so a heartbeat does not undo a pick still on its way down.</summary>
+    private string? _confirmedChoice;
+    private bool _choicePending;
+
+    private string? _relayChoiceNote;
+    public string? RelayChoiceNote
+    {
+        get => _relayChoiceNote;
+        private set
+        {
+            if (!Set(ref _relayChoiceNote, value)) return;
+            Raise(nameof(HasRelayChoiceNote));
+        }
+    }
+
+    public bool HasRelayChoiceNote => !string.IsNullOrEmpty(RelayChoiceNote);
+
+    /// <summary>Only worth showing when there is more than one relay to choose from.</summary>
+    public bool ShowRelayChoice => RelayItems.Count > 2;
+
+    /// <summary>Locked while a connect is on its way, like the button: nothing changes under a connect in progress.</summary>
+    public bool CanChooseRelay => !IsBusy;
+
+    /// <summary>Asks the service for the relay list. Called when it may have changed and when the list is opened.</summary>
+    public void RefreshRelays()
+    {
+        _ = SendQuietlyAsync(new CommandMessage { Verb = "relays" });
+    }
+
+    private async Task SendRelayChoiceAsync(string? relayId)
+    {
+        _choicePending = true;
+        await SendQuietlyAsync(new CommandMessage { Verb = "set-relay-choice", RelayId = relayId ?? "" })
+            .ConfigureAwait(false);
+    }
+
+    private async Task SendQuietlyAsync(CommandMessage command)
+    {
+        try
+        {
+            await _pipe.SendAsync(command).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // The service is unreachable, which the window already says. The list simply stays as it is.
+            Dispatcher.UIThread.Post(() => _choicePending = false);
+        }
+    }
+
+    /// <summary>
+    /// Takes the list from a relays or set-relay-choice reply. The same relays as before are updated where
+    /// they stand: replacing the items of an open ComboBox closes it and drops the highlight, and the list
+    /// is refreshed every few seconds while it is open.
+    /// </summary>
+    private void ApplyRelayList(List<RelayOption> relays)
+    {
+        var current = RelayItems.Skip(1).ToList();
+        if (current.Count == relays.Count &&
+            current.Zip(relays).All(pair => string.Equals(pair.First.Id, pair.Second.Id, StringComparison.OrdinalIgnoreCase)))
+        {
+            foreach (var (item, relay) in current.Zip(relays)) item.Update(relay.Name, relay.Location, relay.PingMs);
+            if (!_choicePending) ShowChoice(_confirmedChoice);
+            return;
+        }
+
+        var items = new List<RelayChoiceItem> { RelayChoiceItem.Automatic };
+        items.AddRange(relays.Select(r => new RelayChoiceItem(r.Id, r.Name, r.Location, r.PingMs)));
+
+        _applyingChoice = true;
+        try
+        {
+            RelayItems = items;
+            ShowChoice(_confirmedChoice);
+        }
+        finally
+        {
+            _applyingChoice = false;
+        }
+    }
+
+    /// <summary>Selects the item for <paramref name="relayId"/> without sending anything.</summary>
+    private void ShowChoice(string? relayId)
+    {
+        var item = RelayItems.FirstOrDefault(i => string.Equals(i.Id, relayId, StringComparison.OrdinalIgnoreCase))
+                   ?? RelayChoiceItem.Automatic;
+        _applyingChoice = true;
+        try
+        {
+            if (!ReferenceEquals(_selectedRelay, item))
+            {
+                _selectedRelay = item;
+                Raise(nameof(SelectedRelay));
+            }
+        }
+        finally
+        {
+            _applyingChoice = false;
+        }
+    }
+
+    private long? _relaysAskedForProfile;
+    private bool _relaysAsked;
 
     /// <summary>The configured endpoints, for the settings screen to open with. Never the key.</summary>
     public IReadOnlyList<string> RelayEndpoints { get; private set; } = [];
@@ -631,6 +772,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             _teardown?.TrySetResult();
         }
 
+        ApplyRelayChoice(status);
+
         // A press of Connect the service has not taken up yet: keep saying Connecting, with the
         // window's own line about what it is doing, and none of an earlier attempt's error.
         if (_holdConnecting)
@@ -650,6 +793,38 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Error = status.Error;
         ApplyDetails(status);
     });
+
+    /// <summary>
+    /// The relay list and the saved choice from a status. The list is asked for, not pushed: once at
+    /// start, whenever a new profile has been written, and after each connect - which is when the
+    /// service has new round trips to show beside each relay.
+    /// </summary>
+    private void ApplyRelayChoice(StatusMessage status)
+    {
+        if (status.AckVerb is "relays" or "set-relay-choice" && status.Relays is { } relays)
+        {
+            if (status.AckVerb == "set-relay-choice") _choicePending = false;
+            _confirmedChoice = status.RelayChoice;
+            ApplyRelayList(relays);
+        }
+        else if (!_choicePending && !string.Equals(_confirmedChoice, status.RelayChoice, StringComparison.OrdinalIgnoreCase))
+        {
+            // Changed somewhere else - config.json edited, or a relay that left the profile.
+            _confirmedChoice = status.RelayChoice;
+            ShowChoice(_confirmedChoice);
+        }
+
+        RelayChoiceNote = status.RelayChoiceNote;
+
+        var profileStamp = status.ProfileUpdatedAt ?? 0;
+        var connectedNow = status.State == TunnelState.Connected && State != TunnelState.Connected;
+        if (!_relaysAsked || _relaysAskedForProfile != profileStamp || connectedNow)
+        {
+            _relaysAsked = true;
+            _relaysAskedForProfile = profileStamp;
+            RefreshRelays();
+        }
+    }
 
     /// <summary>Everything a status carries except the tunnel's state, its detail line and its error.</summary>
     private void ApplyDetails(StatusMessage status)
@@ -712,4 +887,42 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     private void Raise(string? name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+}
+
+/// <summary>
+/// One line of the relay list on the main window: automatic, or a relay with its ping. Updated in place as
+/// new pings arrive, so an open list keeps its place.
+/// </summary>
+public sealed class RelayChoiceItem : INotifyPropertyChanged
+{
+    public static readonly RelayChoiceItem Automatic = new(null, "Automatic - the fastest", null, null);
+
+    public RelayChoiceItem(string? id, string name, string? location, double? pingMs)
+    {
+        Id = id;
+        _label = LabelFor(id, name, location, pingMs);
+    }
+
+    /// <summary>The relay id, or null for automatic.</summary>
+    public string? Id { get; }
+
+    private string _label;
+    public string Label => _label;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    public void Update(string name, string? location, double? pingMs)
+    {
+        var label = LabelFor(Id, name, location, pingMs);
+        if (label == _label) return;
+        _label = label;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Label)));
+    }
+
+    private static string LabelFor(string? id, string name, string? location, double? pingMs)
+    {
+        var place = location is null || name.Contains(location, StringComparison.OrdinalIgnoreCase) ? name : $"{name} ({location})";
+        if (id is null) return place;
+        return place + (pingMs is { } ms ? $" - {ms:F0} ms" : " - no answer");
+    }
 }

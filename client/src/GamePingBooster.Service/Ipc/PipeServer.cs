@@ -303,6 +303,36 @@ internal sealed class PipeServer
                 break;
             }
 
+            // The relays the main window offers, and the saved choice among them. Read-only, and nothing in
+            // it is secret: names and locations of relays whose addresses are in the routing table anyway.
+            //
+            // Answered once every relay has been pinged, and NOT awaited here: commands are handled one at a
+            // time, and a second of pinging must never hold up a connect sent right behind it.
+            case "relays":
+                _ = Task.Run(async () =>
+                {
+                    var relays = await _engine.PingRelaysAsync().ConfigureAwait(false);
+                    var reply = _engine.Snapshot();
+                    reply.AckVerb = "relays";
+                    reply.Relays = relays;
+                    await PushAsync(reply).ConfigureAwait(false);
+                }, ct);
+                break;
+
+            // Validated here like set-relay: anything at all can write to this pipe. It only chooses among
+            // relays the profile already lists, and applies from the next connect.
+            case "set-relay-choice":
+            {
+                var error = _engine.SetRelayChoice(cmd.RelayId);
+                if (error is not null) _log($"set-relay-choice rejected: {error}");
+                var reply = _engine.Snapshot();
+                reply.AckVerb = "set-relay-choice";
+                reply.CommandError = error;
+                reply.Relays = _engine.RelayOptions();
+                await PushAsync(reply).ConfigureAwait(false);
+                break;
+            }
+
             case "quality-ack":
             {
                 var removed = QualityOutbox.Acknowledge(cmd.QualityIds ?? []);

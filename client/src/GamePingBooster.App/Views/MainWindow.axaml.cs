@@ -28,6 +28,30 @@ public partial class MainWindow : SurfaceWindow
     /// <summary>The sign-in window fetches the game list as soon as it has a credential.</summary>
     public void AttachProfileSync(ProfileSync sync) => _profileSync = sync;
 
+    /// <summary>Pings the relays again this often while their list is open, so the numbers move.</summary>
+    private static readonly TimeSpan RelayPingInterval = TimeSpan.FromMilliseconds(2500);
+
+    private DispatcherTimer? _relayPingTimer;
+
+    /// <summary>The relay list is open: ping now, then every few seconds until it closes.</summary>
+    private void OnRelayListOpened(object? sender, EventArgs e)
+    {
+        if (DataContext is not MainViewModel vm) return;
+        vm.RefreshRelays();
+
+        _relayPingTimer ??= new DispatcherTimer { Interval = RelayPingInterval };
+        _relayPingTimer.Tick -= OnRelayPingTick;
+        _relayPingTimer.Tick += OnRelayPingTick;
+        _relayPingTimer.Start();
+    }
+
+    private void OnRelayListClosed(object? sender, EventArgs e) => _relayPingTimer?.Stop();
+
+    private void OnRelayPingTick(object? sender, EventArgs e)
+    {
+        if (DataContext is MainViewModel vm) vm.RefreshRelays();
+    }
+
     /// <summary>Opens the supported games list, from the menu or from the Game line.</summary>
     private async void OnGamesClick(object? sender, RoutedEventArgs e)
     {
