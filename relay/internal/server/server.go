@@ -120,6 +120,11 @@ type session struct {
 	up   *bucket // client -> internet, touched only by loopUDP
 	down *bucket // internet -> client, touched only by loopTUN
 
+	// probeSecond and probeCount cap how many Probes this session is answered in one second. Touched
+	// only by loopUDP. See handleProbe.
+	probeSecond atomic.Int64
+	probeCount  atomic.Int32
+
 	// ident is who this session belongs to, in token mode. Empty in PSK mode, where there is
 	// nobody to name: one shared key, no accounts.
 	//
@@ -370,6 +375,8 @@ func (s *Server) loopUDP() error {
 			s.handleData(buf[:n], from)
 		case protocol.TypePing:
 			s.handlePing(buf[:n], from)
+		case protocol.TypeProbe:
+			s.handleProbe(buf[:n], from)
 		case protocol.TypeDisconnect:
 			s.handleDisconnect(buf[:n], from)
 		default:
@@ -597,6 +604,51 @@ func (s *Server) handlePing(pkt []byte, from netip.AddrPort) {
 		sess.addr.Store(&f)
 	}
 	s.sendTo(protocol.BuildPong(sid, stamp), from)
+}
+
+// maxProbesPerSecond is how many Probes one session is answered per second. A client measures each
+// other way into its relay four times a second, and a relay has at most a few ways in; past this is
+// not a client measuring anything.
+const maxProbesPerSecond = 20
+
+// handleProbe answers a round trip on a path the session is not using - see protocol.TypeProbe.
+//
+// It changes NOTHING about the session, and each omission is the point. No return-address move: that
+// is what makes a Probe safe down a second path while the game runs on the first, where a Ping would
+// pull the game's traffic after it. No touch: a session measured but not played on must still time
+// out. No uplink bucket: a probe is not the player's traffic and must not spend its allowance.
+//
+// Answered only for a live session id, so the rule that a stranger hears nothing still holds - an
+// unknown id is as silent as a bad handshake. The reply is the request's size and goes back to where
+// the request came from, so it amplifies nothing, and the per-session cap bounds what anybody holding
+// a session id could reflect at somebody else's address.
+func (s *Server) handleProbe(pkt []byte, from netip.AddrPort) {
+	sid, stamp, err := protocol.DecodePing(pkt)
+	if err != nil {
+		s.stats.dropped.Add(1)
+		return
+	}
+	sess := s.lookup(sid)
+	if sess == nil {
+		s.stats.dropped.Add(1)
+		return
+	}
+	if !sess.allowProbe(time.Now()) {
+		s.stats.limited.Add(1)
+		return
+	}
+	s.sendTo(protocol.BuildProbeReply(sid, stamp), from)
+}
+
+// allowProbe counts one Probe against this second's allowance. A fixed window rather than a bucket:
+// what it bounds is a flood, and the only legitimate sender stays far below the cap.
+func (s *session) allowProbe(now time.Time) bool {
+	second := now.Unix()
+	if s.probeSecond.Load() != second {
+		s.probeSecond.Store(second)
+		s.probeCount.Store(0)
+	}
+	return s.probeCount.Add(1) <= maxProbesPerSecond
 }
 
 func (s *Server) handleDisconnect(pkt []byte, from netip.AddrPort) {

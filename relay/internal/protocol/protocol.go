@@ -29,6 +29,15 @@ const (
 	// nothing and means encryption can be added later beside the plaintext path instead of
 	// forcing a second handshake redesign.
 	TypeDataEncrypted = 0x7
+
+	// TypeProbe and TypeProbeReply time a round trip on a path the session is NOT using: the client
+	// measuring another way into the same relay - an entry in front of it, or the direct road when it
+	// came in through one - while the game runs on the current way. See docs/PROTOCOL-v3.md.
+	//
+	// A Ping cannot do that job. relayd moves a session's return address to wherever its latest Ping
+	// or Data came from, so a Ping down a second path would drag the game's traffic onto it.
+	TypeProbe      = 0x8
+	TypeProbeReply = 0x9
 )
 
 // Authentication modes. A relay is configured for exactly one and answers only that one.
@@ -62,6 +71,7 @@ const (
 
 	DataHeaderLen = 9
 	PingLen       = 17
+	ProbeLen      = 17
 	DisconnectLen = 9
 
 	// MaxPacketLen: max virtual adapter MTU of 1500 plus our header, rounded up.
@@ -493,7 +503,16 @@ func buildPingLike(t byte, sid SessionID, stamp uint64) []byte {
 	return pkt
 }
 
-// DecodePing reads the session id and timestamp out of a Ping/Pong message.
+// ------------------------------------------------------------ Probe / Reply
+//
+// A Ping and a Pong under two other type numbers, byte for byte: the same 17 bytes, the same session
+// id, the same opaque stamp echoed back. The difference is entirely in what the relay does with one -
+// it answers, and changes nothing about the session. See Server.handleProbe.
+
+func BuildProbe(sid SessionID, stamp uint64) []byte      { return buildPingLike(TypeProbe, sid, stamp) }
+func BuildProbeReply(sid SessionID, stamp uint64) []byte { return buildPingLike(TypeProbeReply, sid, stamp) }
+
+// DecodePing reads the session id and timestamp out of a Ping, Pong, Probe or ProbeReply message.
 func DecodePing(pkt []byte) (SessionID, uint64, error) {
 	var sid SessionID
 	if len(pkt) != PingLen {

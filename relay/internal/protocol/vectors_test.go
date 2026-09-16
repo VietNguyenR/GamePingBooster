@@ -109,6 +109,18 @@ type vectorFile struct {
 		PacketHex    string `json:"packetHex"`
 	} `json:"pong"`
 
+	Probe struct {
+		SessionIDHex string `json:"sessionIdHex"`
+		Stamp        uint64 `json:"stamp"`
+		PacketHex    string `json:"packetHex"`
+	} `json:"probe"`
+
+	ProbeReply struct {
+		SessionIDHex string `json:"sessionIdHex"`
+		Stamp        uint64 `json:"stamp"`
+		PacketHex    string `json:"packetHex"`
+	} `json:"probeReply"`
+
 	Disconnect struct {
 		SessionIDHex string `json:"sessionIdHex"`
 		PacketHex    string `json:"packetHex"`
@@ -220,6 +232,14 @@ func generateVectors(t *testing.T) {
 	v.Pong.SessionIDHex = vectorSessHex
 	v.Pong.Stamp = vectorStamp
 	v.Pong.PacketHex = hex.EncodeToString(BuildPong(sid, vectorStamp))
+
+	v.Probe.SessionIDHex = vectorSessHex
+	v.Probe.Stamp = vectorStamp
+	v.Probe.PacketHex = hex.EncodeToString(BuildProbe(sid, vectorStamp))
+
+	v.ProbeReply.SessionIDHex = vectorSessHex
+	v.ProbeReply.Stamp = vectorStamp
+	v.ProbeReply.PacketHex = hex.EncodeToString(BuildProbeReply(sid, vectorStamp))
 
 	v.Disconnect.SessionIDHex = vectorSessHex
 	v.Disconnect.PacketHex = hex.EncodeToString(BuildDisconnect(sid))
@@ -432,6 +452,14 @@ func TestProtocolVectors(t *testing.T) {
 	}
 	if pingSid != sid || pingStamp != v.Ping.Stamp {
 		t.Errorf("Ping decoded as %x/%#x, want %x/%#x", pingSid, pingStamp, sid, v.Ping.Stamp)
+	}
+
+	// ----------------------------------------------------------- Probe / Reply
+	if got := BuildProbe(sid, v.Probe.Stamp); !bytes.Equal(got, mustHex(t, v.Probe.PacketHex)) {
+		t.Errorf("Probe changed:\n got %x\nwant %s", got, v.Probe.PacketHex)
+	}
+	if got := BuildProbeReply(sid, v.ProbeReply.Stamp); !bytes.Equal(got, mustHex(t, v.ProbeReply.PacketHex)) {
+		t.Errorf("ProbeReply changed:\n got %x\nwant %s", got, v.ProbeReply.PacketHex)
 	}
 
 	// -------------------------------------------------------------- Disconnect

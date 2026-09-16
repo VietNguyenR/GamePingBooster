@@ -36,6 +36,16 @@
     "stamp": 81985529216486895,
     "packetHex": "3511223344556677880123456789abcdef"
   },
+  "probe": {
+    "sessionIdHex": "1122334455667788",
+    "stamp": 81985529216486895,
+    "packetHex": "3811223344556677880123456789abcdef"
+  },
+  "probeReply": {
+    "sessionIdHex": "1122334455667788",
+    "stamp": 81985529216486895,
+    "packetHex": "3911223344556677880123456789abcdef"
+  },
   "disconnect": {
     "sessionIdHex": "1122334455667788",
     "packetHex": "361122334455667788"

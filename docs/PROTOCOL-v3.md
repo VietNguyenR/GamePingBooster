@@ -225,6 +225,35 @@ Unchanged from v2 in every respect except the version nibble, which becomes 3. D
 address the relay assigned, and the client's outer address is still updated on every valid Data
 packet so roaming works.
 
+## Probe and ProbeReply - 17 bytes each
+
+Added after v3 shipped, without a version bump: a relay older than this drops type `0x8` like any
+type it does not know, and a client that hears nothing back simply has no measurement for that path.
+
+| off | len | field |
+|---|---|---|
+| 0 | 1 | header: type `0x8` Probe, `0x9` ProbeReply |
+| 1 | 8 | session id |
+| 9 | 8 | stamp - opaque to the relay, echoed unchanged |
+
+A Ping's layout under two new type numbers. The client sends a Probe down a path the session is
+NOT using - an entry in front of the same relay, or the direct road when it came in through an
+entry - to time that path while the game keeps running on the current one. That is what automatic
+entry switching decides on.
+
+A Ping cannot do this, and the reason is roaming: a Ping or Data packet from a new address moves the
+session's return address there, so a Ping down a second path would pull the game's traffic after it.
+The relay therefore treats a Probe differently in every respect that matters:
+
+- it answers only for a live session id, so a stranger still hears nothing;
+- it replies to the address the Probe came from;
+- it does NOT move the session's return address;
+- it does NOT count as activity for the idle timeout, nor against the uplink rate limit;
+- it answers at most 20 Probes per session per second.
+
+The reply is the request's size, so it amplifies nothing; the per-session cap bounds what anybody
+holding a session id could reflect at another address.
+
 ## MTU arithmetic
 
 Unchanged. The handshake grew; Data did not, so the per-packet overhead is the same 37 bytes and
