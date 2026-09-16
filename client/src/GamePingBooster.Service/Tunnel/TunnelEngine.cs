@@ -460,7 +460,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
         try
         {
             SetState(TunnelState.Connecting, "Preparing...");
-            var phases = new ConnectTimer();
+            var phases = new PhaseTimer();
 
             // The licence gate, before anything is created and before a packet is sent. An
             // expired subscription is a refusal the relay would make anyway; making it here as
@@ -502,9 +502,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             phases.Mark("relays");
 
             SetState(TunnelState.Connecting, "Creating the virtual adapter...");
-            _adapter = WintunAdapter.Create(_config.AdapterName, log: _log);
-            _adapter.StartSession();
-            _log($"Virtual adapter '{_config.AdapterName}' is ready, interface index {_adapter.InterfaceIndex}");
+            _adapter = OpenAdapter();
             phases.Mark("adapter");
 
             // Pin the relay to the physical adapter BEFORE installing any route into the tunnel.
@@ -549,23 +547,25 @@ internal sealed class TunnelEngine : IAsyncDisposable
             _error = ex.Message;
             SetState(TunnelState.Faulted, "Connection failed");
             _log($"Connection failed: {ex}");
+            // The adapter goes too: it may be the reason, and the next connect should start from a new one.
             await TeardownAsync().ConfigureAwait(false);
             throw;
         }
     }
 
     /// <summary>
-    /// Where a connect's time went, for one log line: "5.1 s (profile 40 ms, relays 2.8 s, adapter 1.4 s,
-    /// routing 12 ms, start 30 ms)". Each mark closes the phase since the previous one. Written because
-    /// the only way to find the 27 seconds netsh cost was reading gaps between unrelated log lines.
+    /// Where a connect's or a disconnect's time went, for one log line: "5.1 s (profile 40 ms, relays 2.8 s,
+    /// adapter 1.4 s, routing 12 ms, start 30 ms)". Each mark closes the phase since the previous one.
+    /// Written because the only way to find the 27 seconds netsh cost was reading gaps between unrelated
+    /// log lines.
     /// </summary>
-    private sealed class ConnectTimer
+    private sealed class PhaseTimer
     {
         private readonly long _started = System.Diagnostics.Stopwatch.GetTimestamp();
         private long _last;
         private readonly List<(string Name, TimeSpan Took)> _phases = [];
 
-        public ConnectTimer() => _last = _started;
+        public PhaseTimer() => _last = _started;
 
         public void Mark(string name)
         {
@@ -2362,14 +2362,21 @@ internal sealed class TunnelEngine : IAsyncDisposable
     {
         if (_state == TunnelState.Disconnected) return;
         SetState(TunnelState.Disconnected, "Disconnecting...");
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        await TeardownAsync().ConfigureAwait(false);
-        _log($"Disconnect took {System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} ms.");
+        var phases = new PhaseTimer();
+        await TeardownAsync(phases, keepAdapter: true).ConfigureAwait(false);
+        _log($"Disconnect took {phases}.");
         SetState(TunnelState.Disconnected, reason ?? "Not connected");
     }
 
-    /// <summary>Tears everything down in reverse order. Must never throw.</summary>
-    private async Task TeardownAsync()
+    /// <summary>
+    /// Tears everything down in reverse order. Must never throw. <paramref name="phases"/>, when given, is
+    /// marked after each step - how a disconnect's time is split in the log.
+    ///
+    /// <paramref name="keepAdapter"/> ends the adapter's session and leaves the adapter itself for the next
+    /// connect - see <see cref="OpenAdapter"/>. Every route has been removed by then, and an adapter with no
+    /// session carries nothing.
+    /// </summary>
+    private async Task TeardownAsync(PhaseTimer? phases = null, bool keepAdapter = false)
     {
         // Measured for one relay on one connect. Keeping it would have the UI reporting an
         // in-game ping for a tunnel that no longer exists, and after a failover to a relay at a
@@ -2383,6 +2390,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             _watcher.Dispose();
             _watcher = null;
         }
+        phases?.Mark("watcher");
 
         try
         {
@@ -2393,10 +2401,12 @@ internal sealed class TunnelEngine : IAsyncDisposable
             _log($"Error removing routes (deleting the adapter will clean up the rest): {ex.Message}");
         }
         _routes = null;
+        phases?.Mark("routes");
 
         if (_tunnel is not null) LogGameDestinations(_tunnel);
         _tunnel?.Dispose();
         _tunnel = null;
+        phases?.Mark("tunnel");
 
         if (_supervisor is not null)
         {
@@ -2405,6 +2415,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             catch (OperationCanceledException) { }
             _supervisor = null;
         }
+        phases?.Mark("supervisor");
 
         if (_gamePingProbe is not null)
         {
@@ -2413,6 +2424,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             catch (OperationCanceledException) { }
             _gamePingProbe = null;
         }
+        phases?.Mark("game ping probe");
 
         // Its last act is writing the match summary, so it is awaited rather than abandoned.
         if (_spikeRecorder is not null)
@@ -2423,11 +2435,19 @@ internal sealed class TunnelEngine : IAsyncDisposable
             _spikeRecorder = null;
             _recorder = null;
         }
+        phases?.Mark("spike recorder");
 
         // Deleting the adapter comes last, and it is also the safety brake: any route still
-        // pointing at it disappears along with it.
-        _adapter?.Dispose();
-        _adapter = null;
+        // pointing at it disappears along with it. The session and the adapter are timed apart:
+        // keeping the adapter between connects would save the second and not the first.
+        _adapter?.EndSession();
+        phases?.Mark("adapter session");
+        if (!keepAdapter)
+        {
+            _adapter?.Dispose();
+            _adapter = null;
+            phases?.Mark("adapter removal");
+        }
 
         if (_cts is not null)
         {
@@ -2435,6 +2455,69 @@ internal sealed class TunnelEngine : IAsyncDisposable
             _cts.Dispose();
             _cts = null;
         }
+        phases?.Mark("rest");
+    }
+
+    /// <summary>
+    /// The virtual adapter for a connect, with a session open: the one kept from the last connect when there
+    /// is one, a new one otherwise.
+    ///
+    /// KEPT BETWEEN CONNECTS, because deleting and creating it was most of what a reconnect cost. On
+    /// 2026-09-17 removing it took 717 of a disconnect's 726 ms, and creating one straight after a removal
+    /// took 1.3 to 1.9 s against 0.4 s on a fresh machine - Windows still tidying up the last one, and at
+    /// worst refusing the name with error 2 until it had. It goes when nothing will need it soon: when the
+    /// app closes (<see cref="ReleaseIdleAdapter"/>), when a connect fails, and when the service stops.
+    ///
+    /// A kept adapter that will not open a session - disabled in Network Connections, or gone - is replaced
+    /// rather than failing the connect.
+    /// </summary>
+    private WintunAdapter OpenAdapter()
+    {
+        if (_adapter is { } kept)
+        {
+            try
+            {
+                kept.StartSession();
+                _log($"Virtual adapter '{kept.Name}' reused, interface index {kept.InterfaceIndex}.");
+                return kept;
+            }
+            catch (Exception ex)
+            {
+                _log($"The kept virtual adapter could not be used ({ex.Message}) - creating a new one.");
+                kept.Dispose();
+                _adapter = null;
+            }
+        }
+
+        var adapter = WintunAdapter.Create(_config.AdapterName, log: _log);
+        try
+        {
+            adapter.StartSession();
+        }
+        catch
+        {
+            adapter.Dispose();
+            throw;
+        }
+        _log($"Virtual adapter '{_config.AdapterName}' is ready, interface index {adapter.InterfaceIndex}");
+        return adapter;
+    }
+
+    /// <summary>
+    /// Removes the kept adapter when no tunnel is using it. Called when the app disconnects from the service:
+    /// with the window closed nobody is about to press Connect, and an adapter left in Network Connections
+    /// all day reads as the booster still doing something to the network. A tunnel still up - the app
+    /// crashed rather than closed - keeps it.
+    /// </summary>
+    public void ReleaseIdleAdapter()
+    {
+        if (_adapter is not { } adapter) return;
+        if (_state is not (TunnelState.Disconnected or TunnelState.Faulted) || _tunnel is not null) return;
+
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        _adapter = null;
+        adapter.Dispose();
+        _log($"Virtual adapter removed, the app has closed ({System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} ms).");
     }
 
     // -------------------------------------------------------------- status

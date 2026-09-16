@@ -96,6 +96,8 @@ internal sealed class WintunAdapter : IDisposable
     /// </summary>
     public void StartSession(uint capacity = 4 * 1024 * 1024)
     {
+        if (_disposed) throw new ObjectDisposedException(Name);
+        if (_session != nint.Zero) throw new InvalidOperationException("A session is already open on this adapter.");
         if (capacity < WintunInterop.MinRingCapacity || capacity > WintunInterop.MaxRingCapacity ||
             (capacity & (capacity - 1)) != 0)
         {
@@ -109,6 +111,17 @@ internal sealed class WintunAdapter : IDisposable
             throw new Win32Exception(Marshal.GetLastPInvokeError(), "WintunStartSession failed.");
         }
         _readEvent = WintunInterop.WintunGetReadWaitEvent(_session);
+
+        // Looked up again on every session, not only at creation: an adapter kept between connects can be
+        // given a new index if Windows re-enumerated it (disabled and enabled in Network Connections, say),
+        // and every route is installed by index.
+        var luid = Luid;
+        if (WinApi.ConvertInterfaceLuidToIndex(in luid, out var index) != 0)
+        {
+            EndSession();
+            throw new InvalidOperationException("The virtual adapter is no longer known to Windows.");
+        }
+        InterfaceIndex = index;
     }
 
     /// <summary>
@@ -172,16 +185,24 @@ internal sealed class WintunAdapter : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// Closes the ring buffer, leaving the adapter in place. Safe to call more than once; Dispose calls it
+    /// too. The read-wait event belongs to the session and goes with it.
+    /// </summary>
+    public void EndSession()
+    {
+        if (_session == nint.Zero) return;
+        WintunInterop.WintunEndSession(_session);
+        _session = nint.Zero;
+        _readEvent = nint.Zero;
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
 
-        if (_session != nint.Zero)
-        {
-            WintunInterop.WintunEndSession(_session);
-            _session = nint.Zero;
-        }
+        EndSession();
         if (_adapter != nint.Zero)
         {
             // Closing the adapter also deletes every route pointing at it, so the user's

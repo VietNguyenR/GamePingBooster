@@ -78,6 +78,16 @@ internal sealed class PipeServer
 
                 _writer = null;
                 _log("UI disconnected.");
+
+                // The app has closed (or crashed). The adapter kept between connects has no reason to stay.
+                try
+                {
+                    _engine.ReleaseIdleAdapter();
+                }
+                catch (Exception ex)
+                {
+                    _log($"Could not remove the idle virtual adapter: {ex.Message}");
+                }
             }
             catch (OperationCanceledException)
             {
