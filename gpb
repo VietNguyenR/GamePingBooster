@@ -250,6 +250,13 @@ relay_ssh() {
     # which on a host with MaxAuthTries 3 and four keys loaded fails before it ever gets there.
     [ -z "$key" ] || set -- -i "$key" -o IdentitiesOnly=yes "$@"
     set -- -p "$port" "$@"
+    # A VPS that has never been deployed to is not in known_hosts, and the FIRST deploy is exactly
+    # when that is true. The question ssh would ask cannot be answered from here: stdin is carrying
+    # the tarball, and SSH_ASKPASS_REQUIRE=force hands the question to the askpass helper, which
+    # answers with the PASSWORD rather than "yes" - so ssh refuses and the deploy stops after its
+    # first line with nothing that names the cause. accept-new records the key of a host never seen
+    # before and still REFUSES one whose key has CHANGED, which is the half worth keeping.
+    set -- -o StrictHostKeyChecking=accept-new "$@"
     [ -z "$ssh_tty_flag" ] || set -- "$ssh_tty_flag" "$@"
     ssh "$@"
 }
@@ -414,6 +421,8 @@ entry_ssh() {
     set -- "$esuser@$(entry_field "$esname" HOST)" "$@"
     [ -z "$eskey" ] || set -- -i "$eskey" -o IdentitiesOnly=yes "$@"
     set -- -p "$esport" "$@"
+    # First deploy to a new box, same as relay_ssh - see the note there.
+    set -- -o StrictHostKeyChecking=accept-new "$@"
     [ -z "$ssh_tty_flag" ] || set -- "$ssh_tty_flag" "$@"
     ssh "$@"
 }
