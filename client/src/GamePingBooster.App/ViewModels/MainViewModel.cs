@@ -157,6 +157,19 @@ public sealed class MainViewModel : INotifyPropertyChanged
             // A refusal outranks everything else here. It is the reason Connect is dead, and a
             // line saying "signed in, licence valid until..." next to a button that will not
             // work is worse than no line at all.
+            //
+            // Except when this machine is still signed in. The service's refusal then says "sign
+            // in again", which is how paying customers ended up signing out and in: the token had
+            // only run out, or been cleared while a plan lapsed, and TokenRefresher replaces it
+            // on its own the moment the licence server agrees. Say that instead, or what the last
+            // attempt was told - a real "no active subscription" still comes through that way.
+            var expired = !HasToken || TokenExpiresAt is not { } until || until <= DateTimeOffset.UtcNow;
+            if (LicenceBlocked && expired && RefreshTokenStore.Exists())
+            {
+                return !string.IsNullOrEmpty(LicenceNotice)
+                    ? LicenceNotice!
+                    : "Renewing the licence... If your plan has ended, renew it on the website and it is picked up here.";
+            }
             if (LicenceBlocked) return LicenceRefusal!;
             if (!string.IsNullOrEmpty(LicenceNotice)) return LicenceNotice!;
             if (!HasToken) return "Not signed in";
@@ -172,10 +185,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
             // Renewal happens on its own at half of remaining life, so an expiry hours away is
             // normal and not something to alarm anybody about. Only say something when it is
             // close enough that the renewal has evidently not been happening.
+            //
+            // No date otherwise. This expiry is the TOKEN's - a day away and moved forward by every
+            // renewal - and "valid until tomorrow" was read as the plan ending tomorrow, then as a
+            // trial gaining a day each time somebody signed in again. The plan's real end is on
+            // the Account screen, which asks the licence server for it.
             var left = expiry - DateTimeOffset.UtcNow;
-            if (left <= TimeSpan.Zero) return "Licence expired - sign in again";
+            if (left <= TimeSpan.Zero) return "Licence expired - renewing it automatically";
             if (left < TimeSpan.FromHours(2)) return $"Licence expires in {left.TotalMinutes:F0} min";
-            return $"Signed in, licence valid until {expiry.LocalDateTime:g}";
+            return "Signed in";
         }
     }
 

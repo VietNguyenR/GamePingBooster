@@ -41,21 +41,22 @@ public partial class App : Application
             var window = new MainWindow { DataContext = vm };
             window.Attach(_pipe);
             desktop.MainWindow = window;
-            // Renews the licence token on its own, at half of its remaining life. It reads what
-            // it needs from the view model rather than holding its own copy, so there is one
-            // answer to "what does this client believe" and it is the one on screen.
+            // Renews the licence token on its own, at half of its remaining life. It takes the
+            // licence URL and device key from the status push directly, not from the view model,
+            // which only sees a status once the UI thread gets round to it - see TokenRefresher.
             //
             // Harmless on a self-hosted installation: with no licence URL and no refresh token
             // it never sends anything, it just sleeps.
             _refresher = new TokenRefresher(
                 _pipe,
-                () => vm.LicenceUrl,
-                () => vm.DevicePublicKey,
                 // Marshalled: the refresher reports from its own loop, and raising
                 // PropertyChanged off the UI thread breaks Avalonia's bindings in ways that
                 // surface much later and somewhere else.
                 message => Dispatcher.UIThread.Post(() => vm.LicenceNotice = message));
             _pipe.StatusReceived += _refresher.OnStatus;
+            // Coming back to the app - typically from the payment page - asks again at once when
+            // there is no usable token, rather than waiting out the refusal backoff.
+            window.Activated += (_, _) => _refresher.Nudge();
 
             // Fetches the game list and hands it to the service. In the UI because only the UI
             // holds the credential the licence server asks for - see ProfileSync.

@@ -18,7 +18,8 @@ namespace GamePingBooster.App.Services;
 /// the file is useless if copied to another machine or another account, which is the same
 /// property the device key relies on.
 ///
-/// An unreadable file is deleted without ceremony. A refresh token is replaceable by signing in
+/// A file that will not decrypt is deleted without ceremony; one that merely cannot be read
+/// right now is left alone. A refresh token is replaceable by signing in
 /// again - keeping a corrupt one, or refusing to start over it, would turn a self-healing
 /// situation into a support case. The device key is the opposite and is treated the opposite way.
 /// </summary>
@@ -45,10 +46,33 @@ public static class RefreshTokenStore
             var text = System.Text.Encoding.UTF8.GetString(raw);
             return string.IsNullOrWhiteSpace(text) ? null : text;
         }
-        catch (Exception)
+        catch (CryptographicException)
         {
+            // The file is there and will never decrypt: corrupt, or wrapped for another Windows
+            // account. That, and only that, is worth deleting.
             Clear();
             return null;
+        }
+        catch (Exception)
+        {
+            // Everything else is this moment, not the file: an antivirus scan or a Save holding
+            // it open, a sharing violation. Deleting it used to turn a lock that cleared in a
+            // second into a sign-out - and TokenRefresher calls this on every pass of its loop.
+            // Report no credential for now and read it again next time.
+            return null;
+        }
+    }
+
+    /// <summary>Whether a credential is stored, readable or not. Tells "not signed in" from "could not read it just now".</summary>
+    public static bool Exists()
+    {
+        try
+        {
+            return File.Exists(FilePath);
+        }
+        catch (Exception)
+        {
+            return false;
         }
     }
 

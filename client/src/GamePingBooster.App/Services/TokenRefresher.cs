@@ -57,9 +57,24 @@ public sealed class TokenRefresher : IAsyncDisposable
     private static readonly TimeSpan MinRefreshGap = TimeSpan.FromMinutes(5);
 
     private readonly PipeClient _pipe;
-    private readonly Func<string?> _licenceUrl;
-    private readonly Func<string?> _devicePublicKey;
-    private readonly Action<string> _report;
+    private readonly Action<string?> _report;
+
+    /// <summary>
+    /// The licence server and this machine's device key, from the status push itself.
+    ///
+    /// Taken here and NOT read from the view model, which is how it used to be done - and that
+    /// cost every app start an hour of licence. The view model applies a status by posting to the
+    /// UI thread, so when OnStatus woke the loop the view model had not seen that status yet: the
+    /// loop read a null licence URL, decided there was nothing to refresh and slept MaxSleep, and
+    /// no later status woke it because the expiry had not changed. The service logs showed it as
+    /// every renewal landing exactly one hour after the app opened. A token that had run out while
+    /// the app was closed therefore stayed expired for that hour, and paying customers signed out
+    /// and in again to get past it.
+    ///
+    /// Volatile: written on the pipe's read thread, read by the loop.
+    /// </summary>
+    private volatile string? _licenceUrl;
+    private volatile string? _devicePublicKey;
     private readonly CancellationTokenSource _cts = new();
     private readonly SemaphoreSlim _wake = new(0, 1);
 
@@ -94,16 +109,52 @@ public sealed class TokenRefresher : IAsyncDisposable
     /// </summary>
     private volatile bool _askedThisSession;
 
-    public TokenRefresher(PipeClient pipe, Func<string?> licenceUrl, Func<string?> devicePublicKey,
-        Action<string> report)
+    /// <summary>
+    /// Whether any status has arrived. The first one arms a refresh even when the service holds NO
+    /// token: its expiry is null, which equals the initial <see cref="_expiry"/>, and the
+    /// changed-expiry test alone used to let it pass unnoticed. That was the machine whose token
+    /// had been cleared - a trial that ran out, a 402 - and whose owner then paid: the refresh
+    /// token on disk was good again, but nothing ever asked, so they had to sign in again.
+    /// </summary>
+    private bool _seenStatus;
+
+    /// <summary>When <see cref="Nudge"/> last armed a refresh, so window focus cannot become a poll.</summary>
+    private DateTimeOffset _lastNudge = DateTimeOffset.MinValue;
+    private static readonly TimeSpan NudgeGap = TimeSpan.FromMinutes(1);
+
+    /// <param name="report">
+    /// A line for the licence notice, or null to clear it. A successful renewal clears it rather
+    /// than saying "valid until": that date is the token's, a day away, and customers read it as
+    /// the end of what they paid for.
+    /// </param>
+    public TokenRefresher(PipeClient pipe, Action<string?> report)
     {
         _pipe = pipe;
-        _licenceUrl = licenceUrl;
-        _devicePublicKey = devicePublicKey;
         _report = report;
     }
 
     public void Start() => _loop ??= Task.Run(() => LoopAsync(_cts.Token));
+
+    /// <summary>
+    /// Asks straight away when this machine has no usable token but is signed in. Called when the
+    /// main window is brought forward: somebody who has just paid on the website and comes back to
+    /// the app finds it working, instead of waiting out a backoff or signing in again. Nothing
+    /// happens while the token is still good, and at most once a minute otherwise.
+    ///
+    /// Grants nothing by itself: the licence server decides, and signs no token past the end of
+    /// the subscription.
+    /// </summary>
+    public void Nudge()
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (_expiry is { } expiry && expiry > now) return;
+        if (now - _lastNudge < NudgeGap) return;
+        if (!RefreshTokenStore.Exists()) return;
+
+        _lastNudge = now;
+        _due = now;
+        try { _wake.Release(); } catch (SemaphoreFullException) { }
+    }
 
     /// <summary>
     /// Called on every status push. Only a CHANGED expiry wakes the loop - the service pushes a
@@ -111,13 +162,31 @@ public sealed class TokenRefresher : IAsyncDisposable
     /// </summary>
     public void OnStatus(StatusMessage status)
     {
+        // Before the unchanged-expiry return, so a licence URL changed in Settings is picked up too.
+        _licenceUrl = status.LicenceUrl;
+        _devicePublicKey = status.DevicePublicKey;
+
         var expiry = status.TokenExpiresAt is { } unix
             ? DateTimeOffset.FromUnixTimeSeconds(unix)
             : (DateTimeOffset?)null;
 
-        if (expiry == _expiry) return;
+        if (_seenStatus && expiry == _expiry) return;
+        _seenStatus = true;
         _expiry = expiry;
-        _due = _askedThisSession ? DueFor(expiry) : DateTimeOffset.UtcNow;
+
+        if (!_askedThisSession)
+        {
+            _due = DateTimeOffset.UtcNow;
+        }
+        else if (expiry is not null)
+        {
+            _due = DueFor(expiry);
+        }
+        // else: the token was just cleared - by a 402, or by signing out. Leave the deadline the
+        // loop armed. It used to be DueFor(null), which is null, and that ended renewal for the
+        // life of the process: after a 402 the account was never asked again, so paying did not
+        // bring the app back until somebody signed in again. Signing out needs no special case -
+        // the refresh token is gone, and TryRefreshAsync stands down when it finds that.
 
         // Release only if nothing is already pending, hence the (0, 1) semaphore: this is called
         // from the pipe's read loop and must never block or throw.
@@ -210,7 +279,7 @@ public sealed class TokenRefresher : IAsyncDisposable
     private TimeSpan NextDelay()
     {
         // Nothing to refresh: there is no token, or no server to ask. Sleep until told otherwise.
-        if (_due is not { } due || string.IsNullOrWhiteSpace(_licenceUrl())) return MaxSleep;
+        if (_due is not { } due || string.IsNullOrWhiteSpace(_licenceUrl)) return MaxSleep;
         if (RefreshTokenStore.Load() is null) return MaxSleep;
 
         var wait = due - DateTimeOffset.UtcNow;
@@ -224,9 +293,17 @@ public sealed class TokenRefresher : IAsyncDisposable
     /// </summary>
     private async Task TryRefreshAsync(CancellationToken ct)
     {
-        var url = _licenceUrl();
-        var deviceKey = _devicePublicKey();
+        var url = _licenceUrl;
+        var deviceKey = _devicePublicKey;
         var refresh = RefreshTokenStore.Load();
+
+        if (refresh is null && RefreshTokenStore.Exists())
+        {
+            // Signed in, but the file could not be read this moment - see RefreshTokenStore.Load.
+            // Keep the backoff the caller armed and try again; standing down here would leave the
+            // licence to run out with a perfectly good credential on disk.
+            return;
+        }
 
         if (string.IsNullOrWhiteSpace(url) || string.IsNullOrWhiteSpace(deviceKey) || refresh is null)
         {
@@ -255,10 +332,12 @@ public sealed class TokenRefresher : IAsyncDisposable
             var renewed = DateTimeOffset.FromUnixTimeSeconds(result.ExpiresAt);
             _due = DueFor(renewed);
 
-            _report($"Licence renewed, valid until {renewed.LocalDateTime:g}.");
+            // Cleared, not "valid until": see the constructor. Whatever a failed attempt said is no
+            // longer true either.
+            _report(null);
 
-            // Said AFTER the renewal line, not before: the notice is one property and the last
-            // writer wins, and a broken clock is the more useful of the two to be looking at.
+            // Said AFTER clearing, not before: the notice is one property and the last writer
+            // wins, and a broken clock is worth looking at even when renewal worked.
             WarnIfClockIsWrong(client.ClockSkew);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
