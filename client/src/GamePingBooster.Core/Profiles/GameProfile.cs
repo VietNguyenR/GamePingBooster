@@ -150,6 +150,13 @@ public sealed class RelayEntry
     [JsonPropertyName("entries")] public List<RelayEntryPoint> Entries { get; set; } = [];
 
     /// <summary>
+    /// "off", "record" or "on": what entry switching does on a connection to this relay, as the operator set
+    /// it in /admin/relays. Absent from older profiles and self-hosted relays, which is "record" - see
+    /// <see cref="EntrySwitching"/>, which also says why config.json can override it.
+    /// </summary>
+    [JsonPropertyName("entrySwitching")] public string? EntrySwitching { get; set; }
+
+    /// <summary>
     /// Set only on a path <see cref="RelayPaths.Expand"/> made from an entry: the id of the relay
     /// behind it. Never read from a profile and never written to one.
     /// </summary>

@@ -266,11 +266,64 @@ internal sealed class PipeServer
                 break;
             }
 
+            // The connection-quality upload. The records are nobody's secret - they were written to be
+            // sent away and carry no addresses - so reading them over a pipe open to BuiltinUsers gives
+            // nothing away. The ids of an acknowledgement are held to their shape, because they become
+            // file names.
+            case "quality-outbox":
+            {
+                var reply = _engine.Snapshot();
+                reply.AckVerb = "quality-outbox";
+                if (!_engine.QualitySharing)
+                {
+                    reply.CommandError = "Connection-quality sharing is switched off.";
+                }
+                else if (_engine.QualityInMatch)
+                {
+                    reply.CommandError = "A match is being recorded - records are sent between matches.";
+                }
+                else
+                {
+                    var (items, pending) = QualityOutbox.Take(OutboxBatch, OutboxBatchChars);
+                    reply.QualityOutbox = items;
+                    reply.QualityPending = pending;
+                }
+                await PushAsync(reply).ConfigureAwait(false);
+                break;
+            }
+
+            case "quality-ack":
+            {
+                var removed = QualityOutbox.Acknowledge(cmd.QualityIds ?? []);
+                if (removed > 0) _log($"Connection quality: {removed} record(s) uploaded and removed from the queue.");
+                var reply = _engine.Snapshot();
+                reply.AckVerb = "quality-ack";
+                await PushAsync(reply).ConfigureAwait(false);
+                break;
+            }
+
+            case "set-quality-sharing":
+            {
+                var error = cmd.Enabled is { } enabled
+                    ? _engine.SetQualitySharing(enabled)
+                    : "Say whether sharing is on or off.";
+                if (error is not null) _log($"set-quality-sharing rejected: {error}");
+                var reply = _engine.Snapshot();
+                reply.AckVerb = "set-quality-sharing";
+                reply.CommandError = error;
+                await PushAsync(reply).ConfigureAwait(false);
+                break;
+            }
+
             default:
                 _log($"Unsupported verb: {cmd.Verb}");
                 break;
         }
     }
+
+    /// <summary>Records per quality-outbox reply, and roughly how much JSON: one pipe line carries them.</summary>
+    private const int OutboxBatch = 20;
+    private const int OutboxBatchChars = 400_000;
 
     /// <summary>Sends a status snapshot once a second while a UI is attached.</summary>
     private async Task PushPeriodicallyAsync(CancellationToken ct)

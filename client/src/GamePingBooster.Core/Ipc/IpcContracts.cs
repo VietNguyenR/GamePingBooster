@@ -117,6 +117,33 @@ public sealed class CommandMessage
     /// hold them even briefly.
     /// </summary>
     [JsonPropertyName("profile")] public string? Profile { get; set; }
+
+    // ------------------------------------------------------------ connection quality
+    //
+    // Three verbs for the spike recorder's automatic upload. The SERVICE records and keeps an outbox;
+    // the UI uploads, because only the UI holds the credential the licence server asks for - the
+    // same split as set-profile, the other way round.
+    //
+    //   quality-outbox       -> a status with AckVerb "quality-outbox" and QualityOutbox filled,
+    //                           or CommandError when sharing is off or a match is in progress
+    //   quality-ack          -> the listed records were accepted (or refused for good); delete them
+    //   set-quality-sharing  -> turn the upload on or off for this installation
+    //
+    // Nothing here is a secret. The records carry no addresses of any kind - see QualityFile - and
+    // the pipe is open to BuiltinUsers, which is fine for data that was written to be sent away.
+
+    /// <summary>quality-ack: the ids of the records to remove from the outbox. 32 hex characters each.</summary>
+    [JsonPropertyName("qualityIds")] public List<string>? QualityIds { get; set; }
+
+    /// <summary>set-quality-sharing: whether this installation sends connection quality after each match.</summary>
+    [JsonPropertyName("enabled")] public bool? Enabled { get; set; }
+}
+
+/// <summary>One record waiting in the service's outbox, as the JSON the licence server receives.</summary>
+public sealed class QualityOutboxItem
+{
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
+    [JsonPropertyName("json")] public string Json { get; set; } = "";
 }
 
 /// <summary>State the service pushes up to the UI (on request, and on every change).</summary>
@@ -331,6 +358,22 @@ public sealed class StatusMessage
     /// profile.
     /// </summary>
     [JsonPropertyName("profileUpdatedAt")] public long? ProfileUpdatedAt { get; set; }
+
+    /// <summary>
+    /// Whether this installation sends connection quality after each match, or null from a service
+    /// too old to record it - which the UI reads as "there is nothing to upload", not as consent.
+    /// Additive, so no contract version bump.
+    /// </summary>
+    [JsonPropertyName("qualitySharing")] public bool? QualitySharing { get; set; }
+
+    /// <summary>
+    /// quality-outbox only: the records to upload, oldest first, a batch at a time. Null on every
+    /// other status - it would be a lot to push once a second for no reader.
+    /// </summary>
+    [JsonPropertyName("qualityOutbox")] public List<QualityOutboxItem>? QualityOutbox { get; set; }
+
+    /// <summary>quality-outbox only: how many records were still waiting, this batch included.</summary>
+    [JsonPropertyName("qualityPending")] public int? QualityPending { get; set; }
 
     /// <summary>Error detail when State is Faulted.</summary>
     ///

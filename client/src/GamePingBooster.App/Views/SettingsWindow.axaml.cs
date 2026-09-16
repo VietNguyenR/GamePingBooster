@@ -88,6 +88,14 @@ public partial class SettingsWindow : SurfaceWindow
         _awaitingReply = true;
         try
         {
+            // Its own verb, sent first and not awaited for a verdict: it is a single switch the
+            // service saves on its own, and the relay save below still decides whether this window
+            // reports success.
+            if (vm.QualitySharingChanged)
+            {
+                await _pipe.SendAsync(new CommandMessage { Verb = "set-quality-sharing", Enabled = vm.QualitySharing });
+            }
+
             await _pipe.SendAsync(new CommandMessage
             {
                 Verb = "set-relay",

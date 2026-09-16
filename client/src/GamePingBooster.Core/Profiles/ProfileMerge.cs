@@ -20,12 +20,18 @@ public static class ProfileMerge
     ///
     /// Games are taken in order and the first copy of an id wins, for the same reason: callers pass
     /// the newest first.
+    ///
+    /// The primary is the newest profile that NAMES A RELAY. A profile with none - one sealed locally
+    /// by push-profile to test a game, which is how VALORANT was tried on 2026-09-15 - is newer than the
+    /// real ones the moment it is written, and taking its empty list would leave the service with
+    /// nothing to connect to: "The profile declares no relays", on a machine whose other profiles
+    /// list three.
     /// </summary>
     public static ProfileBundle Merge(IReadOnlyList<ProfileBundle> bundles)
     {
         if (bundles.Count == 0) throw new ArgumentException("There is no profile to merge.", nameof(bundles));
 
-        var primary = bundles[0];
+        var primary = bundles.FirstOrDefault(b => b.Relays.Count > 0) ?? bundles[0];
         var merged = new ProfileBundle
         {
             SchemaVersion = bundles.Max(b => b.SchemaVersion),

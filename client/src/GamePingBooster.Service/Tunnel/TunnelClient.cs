@@ -16,12 +16,20 @@ namespace GamePingBooster.Service.Tunnel;
 /// </summary>
 internal sealed class TunnelClient : IDisposable
 {
-    private readonly IPEndPoint _relayEndpoint;
+    /// <summary>Where the tunnel sends: the relay, or an entry in front of it. Changes only in <see cref="MoveTo"/>.</summary>
+    private IPEndPoint _relayEndpoint;
     private readonly TunnelAuth _auth;
     private readonly ulong _clientId;
     private readonly Action<string> _log;
 
-    private Socket? _socket;
+    /// <summary>
+    /// Volatile because <see cref="MoveTo"/> replaces it under the pump threads, which read it for every
+    /// packet. See there for why they carry on over the swap rather than stopping.
+    /// </summary>
+    private volatile Socket? _socket;
+
+    /// <summary>Set first thing in <see cref="Dispose"/>: the one socket failure the pump threads must end on.</summary>
+    private volatile bool _disposing;
     private WintunAdapter? _adapter;
     private Thread? _uplinkThread;
     private Thread? _downlinkThread;
@@ -54,6 +62,22 @@ internal sealed class TunnelClient : IDisposable
 
     private long _lastReportedDrops;
     private int _keepaliveTicks;
+
+    /// <summary>
+    /// The spike recorder listening to this tunnel, or null. Read by the downlink thread for every
+    /// ICMP packet and every pong, hence volatile rather than locked.
+    /// </summary>
+    private volatile IQualitySink? _qualitySink;
+
+    /// <summary>The ICMP id every spike-recorder echo on this tunnel carries. Random so two tunnels never share one.</summary>
+    private readonly ushort _qualityEchoId = (ushort)Random.Shared.Next(1, ushort.MaxValue);
+
+    // The game's own packet timing, for the recorder. Each pair is written by exactly one pump thread
+    // and read-and-reset by the recorder, so a read can occasionally lose one update to a race. That is
+    // a quarter second's longest gap under-reported by one packet on a diagnostic, and not worth a lock
+    // on the packet path.
+    private long _lastUpUdpAt, _maxUpGap, _upUdpPackets;
+    private long _lastDownUdpAt, _maxDownGap, _downUdpPackets;
 
     /// <summary>
     /// The echo currently in flight through the live tunnel, or null when none is.
@@ -181,13 +205,7 @@ internal sealed class TunnelClient : IDisposable
     /// </summary>
     public async Task<GpbProtocol.HandshakeResult> HandshakeAsync(int attempts, CancellationToken ct)
     {
-        _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp)
-        {
-            // Do not fragment: if the MTU is wrong we want to know immediately, not silently crawl.
-            DontFragment = true,
-            ReceiveBufferSize = 4 * 1024 * 1024,
-            SendBufferSize = 4 * 1024 * 1024,
-        };
+        _socket = NewSocket();
         _socket.Connect(_relayEndpoint);
 
         var buffer = new byte[GpbProtocol.MaxPacketLen];
@@ -542,6 +560,7 @@ internal sealed class TunnelClient : IDisposable
 
         while (!ct.IsCancellationRequested)
         {
+            Socket? current = null;
             try
             {
                 var len = _adapter!.ReceivePacket(packet);
@@ -571,8 +590,16 @@ internal sealed class TunnelClient : IDisposable
                 // game traffic rather than the discovery chatter that was burying it.
                 Destinations.Note(packet.AsSpan(0, len));
 
+                // UDP only: the game's own stream. The lobby's TCP connection shares the tunnel and
+                // goes quiet for seconds at a time, which would read as a frozen game.
+                if (len >= IcmpEcho.Ipv4HeaderLen && packet[9] == 17)
+                {
+                    NoteCadence(ref _lastUpUdpAt, ref _maxUpGap, ref _upUdpPackets);
+                }
+
                 var wireLen = GpbProtocol.WriteData(wire, _sessionId, packet.AsSpan(0, len));
-                _socket!.Send(wire.AsSpan(0, wireLen), SocketFlags.None);
+                current = _socket;
+                current!.Send(wire.AsSpan(0, wireLen), SocketFlags.None);
                 Interlocked.Increment(ref _packetsSent);
             }
             catch (SocketException ex) when (ex.SocketErrorCode == SocketError.MessageSize)
@@ -589,12 +616,16 @@ internal sealed class TunnelClient : IDisposable
             }
             catch (SocketException ex) when (ex.SocketErrorCode is SocketError.Interrupted or SocketError.OperationAborted)
             {
-                // Normal shutdown - see the matching case in DownlinkLoop.
-                return;
+                // Normal shutdown - see the matching case in DownlinkLoop - or a MoveTo swapping the
+                // socket under this send, in which case the next packet goes out on the new one. A socket
+                // closed with nothing to replace it is neither, and ends the loop - and so does a failure
+                // before any socket was touched (current still null): that is the adapter, not a move, and
+                // carrying on would spin on it.
+                if (_disposing || ct.IsCancellationRequested || current is null || ReferenceEquals(current, _socket)) return;
             }
             catch (ObjectDisposedException)
             {
-                return;
+                if (_disposing || ct.IsCancellationRequested || current is null || ReferenceEquals(current, _socket)) return;
             }
             catch (Exception ex)
             {
@@ -611,9 +642,11 @@ internal sealed class TunnelClient : IDisposable
 
         while (!ct.IsCancellationRequested)
         {
+            Socket? current = null;
             try
             {
-                var n = _socket!.Receive(buffer, SocketFlags.None);
+                current = _socket;
+                var n = current!.Receive(buffer, SocketFlags.None);
                 if (n < 1) continue;
 
                 var (version, type) = GpbProtocol.ParseHeader(buffer[0]);
@@ -646,6 +679,22 @@ internal sealed class TunnelClient : IDisposable
                                 break;
                             }
 
+                            // The spike recorder's echoes, consumed for the same reason as the probe
+                            // above. Tested on the protocol byte first, so the game's UDP never pays
+                            // for more than one comparison.
+                            if (ip.Length >= IcmpEcho.Ipv4HeaderLen && ip[9] == 1 &&
+                                _qualitySink is { } sink &&
+                                IcmpEcho.TryReadQualityReply(ip, _qualityEchoId, out var qualitySequence, out var expired))
+                            {
+                                sink.OnEcho(qualitySequence, expired, Stopwatch.GetTimestamp());
+                                break;
+                            }
+
+                            if (ip.Length >= IcmpEcho.Ipv4HeaderLen && ip[9] == 17)
+                            {
+                                NoteCadence(ref _lastDownUdpAt, ref _maxDownGap, ref _downUdpPackets);
+                            }
+
                             if (_adapter!.SendPacket(ip))
                             {
                                 Interlocked.Increment(ref _packetsReceived);
@@ -668,6 +717,7 @@ internal sealed class TunnelClient : IDisposable
                             _lastRttMs = (now - stamp) * 1000.0 / Stopwatch.Frequency;
                             Interlocked.Exchange(ref _lastPongTicks, (long)now);
                             Interlocked.Increment(ref _pongsReceived);
+                            _qualitySink?.OnPong(_lastRttMs, Stopwatch.GetTimestamp());
                         }
                         break;
                 }
@@ -683,11 +733,15 @@ internal sealed class TunnelClient : IDisposable
                 // operation was interrupted by a call to WSACancelBlockingCall") puts a scary
                 // line in the middle of every reconnect and sends whoever reads the log next
                 // hunting a fault that is not there.
-                return;
+                //
+                // MoveTo ends a Receive the same way when it retires the old socket, and then this loop
+                // must not end: the new socket is already in _socket, with the relay answering on it. The
+                // same socket still in _socket means nothing replaced it, and reading it again would spin.
+                if (_disposing || ct.IsCancellationRequested || ReferenceEquals(current, _socket)) return;
             }
             catch (ObjectDisposedException)
             {
-                return;
+                if (_disposing || ct.IsCancellationRequested || ReferenceEquals(current, _socket)) return;
             }
             catch (Exception ex)
             {
@@ -734,6 +788,157 @@ internal sealed class TunnelClient : IDisposable
         }
     }
 
+    // ------------------------------------------------------------ spike recorder
+
+    /// <summary>The recorder receiving pongs and echo answers, or null. See <see cref="IQualitySink"/>.</summary>
+    internal IQualitySink? QualitySink
+    {
+        get => _qualitySink;
+        set => _qualitySink = value;
+    }
+
+    private static void NoteCadence(ref long lastAt, ref long maxGap, ref long packets)
+    {
+        var now = Stopwatch.GetTimestamp();
+        var previous = lastAt;
+        lastAt = now;
+        Interlocked.Increment(ref packets);
+        if (previous != 0 && now - previous > Volatile.Read(ref maxGap)) Volatile.Write(ref maxGap, now - previous);
+    }
+
+    /// <summary>Reads and resets the game-packet timing. See <see cref="Cadence"/>.</summary>
+    internal Cadence TakeCadence()
+    {
+        var upPackets = Interlocked.Exchange(ref _upUdpPackets, 0);
+        var upGap = Interlocked.Exchange(ref _maxUpGap, 0);
+        var downPackets = Interlocked.Exchange(ref _downUdpPackets, 0);
+        var downGap = Interlocked.Exchange(ref _maxDownGap, 0);
+        return new Cadence(
+            upPackets, upGap * 1000.0 / Stopwatch.Frequency, Interlocked.Read(ref _lastUpUdpAt),
+            downPackets, downGap * 1000.0 / Stopwatch.Frequency, Interlocked.Read(ref _lastDownUdpAt));
+    }
+
+    /// <summary>
+    /// One extra keepalive, for the recorder. Counted as a sent ping so <see cref="LossRatio"/> keeps
+    /// comparing like with like. Its pong reaches the recorder through <see cref="QualitySink"/>.
+    /// </summary>
+    internal void SendQualityPing()
+    {
+        var socket = _socket;
+        if (socket is null || _sessionId == 0) return;
+        try
+        {
+            socket.Send(GpbProtocol.BuildPing(_sessionId, (ulong)_clock.ElapsedTicks), SocketFlags.None);
+            Interlocked.Increment(ref _pingsSent);
+        }
+        catch (SocketException)
+        {
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+    }
+
+    /// <summary>
+    /// One ICMP echo through the tunnel for the recorder, carrying this tunnel's quality id. The
+    /// answer - reply or time-exceeded - arrives through <see cref="QualitySink"/>.
+    ///
+    /// Safe beside the pump threads: a UDP send is one datagram, and the socket takes concurrent ones.
+    /// </summary>
+    internal void SendQualityEcho(IPAddress target, ushort sequence, byte ttl)
+    {
+        var socket = _socket;
+        if (socket is null || _sessionId == 0) return;
+
+        Span<byte> inner = stackalloc byte[IcmpEcho.Ipv4HeaderLen + IcmpEcho.IcmpHeaderLen + 32];
+        Span<byte> wire = stackalloc byte[GpbProtocol.DataHeaderLen + inner.Length];
+        var innerLen = IcmpEcho.Build(inner, Session.ClientIp, target, _qualityEchoId, sequence, 32, ttl);
+        var wireLen = GpbProtocol.WriteData(wire, _sessionId, inner[..innerLen]);
+        try
+        {
+            socket.Send(wire[..wireLen], SocketFlags.None);
+        }
+        catch (SocketException)
+        {
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+    }
+
+    // ------------------------------------------------------------ ways into the relay
+
+    /// <summary>Where this tunnel is sending right now: the relay, or the entry in front of it.</summary>
+    internal IPEndPoint Endpoint => _relayEndpoint;
+
+    /// <summary>The relay's id for this session, for probes down the other ways in. Zero before the handshake.</summary>
+    internal ulong SessionId => _sessionId;
+
+    /// <summary>
+    /// Moves this tunnel to another way into the SAME relay - an entry in front of it, or the relay itself
+    /// when it came in through an entry - with no handshake, while the pumps keep running.
+    ///
+    /// Nothing about the session changes, which is why the game notices nothing. relayd keys a session by
+    /// its id, not by where it comes from, and moves its return address to wherever the latest Ping or
+    /// Data arrived from. The inner address, and with it the relay's NAT mapping and the address the game
+    /// server sees, stay exactly as they were. What moves is only the stretch between this PC and relayd.
+    /// Pointed at another relay this would be a session id that relay has never issued, and silence.
+    ///
+    /// The order is what keeps it clean. The new socket goes into <see cref="_socket"/> first, so the very
+    /// next game packet leaves by the new way and turns the relay's return path round with it; the old
+    /// socket is then closed - WITHOUT a Disconnect, which would end the session it shares - and the
+    /// downlink thread, woken out of its Receive, carries on reading the new one. The ping after it turns
+    /// the return path round even in a quarter second the game sends nothing. Whatever was already on its
+    /// way back down the old way is lost: a round trip's worth of packets, against minutes on a bad road.
+    ///
+    /// The caller pins the new address to the physical adapter first. See RouteManager.PinDoorRoutes.
+    /// </summary>
+    internal void MoveTo(IPEndPoint endpoint)
+    {
+        if (_sessionId == 0) throw new InvalidOperationException("The tunnel has no session to move.");
+
+        var fresh = NewSocket();
+        try
+        {
+            fresh.Connect(endpoint);
+        }
+        catch
+        {
+            fresh.Dispose();
+            throw;
+        }
+
+        var old = _socket;
+        _socket = fresh;
+        _relayEndpoint = endpoint;
+        old?.Dispose();
+
+        // Disposed while this ran - a disconnect racing a move. The pumps are already gone; leave no socket behind them.
+        if (_disposing)
+        {
+            fresh.Dispose();
+            return;
+        }
+
+        try
+        {
+            fresh.Send(GpbProtocol.BuildPing(_sessionId, (ulong)_clock.ElapsedTicks), SocketFlags.None);
+            Interlocked.Increment(ref _pingsSent);
+        }
+        catch (SocketException)
+        {
+            // The next game packet or keepalive turns the return path round instead.
+        }
+    }
+
+    private static Socket NewSocket() => new(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp)
+    {
+        // Do not fragment: if the MTU is wrong we want to know immediately, not silently crawl.
+        DontFragment = true,
+        ReceiveBufferSize = 4 * 1024 * 1024,
+        SendBufferSize = 4 * 1024 * 1024,
+    };
+
     /// <summary>
     /// Logs the drop breakdown, but only when it has changed. A healthy tunnel stays silent, so
     /// the mere appearance of this line in a log is itself the signal.
@@ -755,6 +960,8 @@ internal sealed class TunnelClient : IDisposable
 
     public void Dispose()
     {
+        _disposing = true;
+
         // One last account before the counters go with the object.
         ReportDrops();
 

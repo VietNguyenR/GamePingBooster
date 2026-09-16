@@ -13,6 +13,7 @@ public partial class App : Application
     private PipeClient? _pipe;
     private TokenRefresher? _refresher;
     private ProfileSync? _profileSync;
+    private QualityUploader? _quality;
     private UpdateChecker? _updates;
     private SystemTray? _tray;
 
@@ -68,6 +69,10 @@ public partial class App : Application
             // fetch that races the connection reports a failure nobody needs to see.
             _pipe.StatusReceived += OnFirstStatus;
 
+            // Sends the service's connection-quality records between matches. See QualityUploader.
+            _quality = new QualityUploader(_pipe);
+            _pipe.StatusReceived += _quality.OnStatus;
+
             void OnFirstStatus(Core.Ipc.StatusMessage status)
             {
                 _pipe.StatusReceived -= OnFirstStatus;
@@ -75,6 +80,11 @@ public partial class App : Application
                     ? DateTimeOffset.FromUnixTimeSeconds(unix)
                     : (DateTimeOffset?)null;
                 _ = _profileSync.SyncAsync(status.LicenceUrl, status.DevicePublicKey, false, written);
+
+                if (QualityNotice.ShouldShow(status))
+                {
+                    Dispatcher.UIThread.Post(() => vm.LicenceNotice = QualityNotice.Text);
+                }
             }
 
             // The catch-all: closing the main window is handled in MainWindow.OnClosing,
@@ -114,6 +124,7 @@ public partial class App : Application
             // the button - the app never rearranges the machine's routing on its own at startup.
             _pipe.Start();
             _refresher.Start();
+            _quality.Start();
 
             // Checks GitHub for a newer release now and then, and puts a line in the menu when
             // there is one. Marshalled for the same reason as the refresher's messages.
@@ -162,6 +173,7 @@ public partial class App : Application
             _tray?.Dispose();
 
             if (_refresher is not null) await _refresher.DisposeAsync();
+            if (_quality is not null) await _quality.DisposeAsync();
             if (_updates is not null) await _updates.DisposeAsync();
             if (_pipe is not null) await _pipe.DisposeAsync();
         }

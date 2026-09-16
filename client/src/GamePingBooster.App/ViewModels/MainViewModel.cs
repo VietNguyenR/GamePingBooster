@@ -539,6 +539,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </summary>
     public StatusMessage? LastStatus { get; private set; }
 
+    /// <summary>Whether the service sends connection quality after each match; null from a service too old to.</summary>
+    public bool? QualitySharing { get; private set; }
+
     private void OnStatus(StatusMessage status) => Dispatcher.UIThread.Post(() =>
     {
         LastStatus = status;
@@ -566,6 +569,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         LicenceUrl = status.LicenceUrl;
         LicenceRefusal = status.LicenceRefusal;
         ProfileSource = status.ProfileSource;
+        QualitySharing = status.QualitySharing;
         DevicePublicKey = status.DevicePublicKey;
         HasToken = status.HasToken;
         TokenExpiresAt = status.TokenExpiresAt is { } unix

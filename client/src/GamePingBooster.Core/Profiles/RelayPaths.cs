@@ -39,6 +39,8 @@ public static class RelayPaths
                     Endpoint = entry.Endpoint,
                     // The forwarder signs nothing; the relay behind it answers the handshake.
                     PublicKey = relay.PublicKey,
+                    // A setting of the relay, not of the road to it.
+                    EntrySwitching = relay.EntrySwitching,
                     ViaRelayId = relay.Id,
                 });
             }
@@ -51,6 +53,25 @@ public static class RelayPaths
     /// with the same answer are one relayd, and share one session there.
     /// </summary>
     public static string RelayIdOf(RelayEntry path) => path.ViaRelayId ?? path.Id;
+
+    /// <summary>
+    /// Every way into one relay - the relay itself, then each entry in front of it - or none when the
+    /// profile has no such relay.
+    ///
+    /// These are the only paths a tunnel may move between while a game runs. The game server sees the
+    /// address the relay sends from, and every one of these ends at the same relayd and the same session,
+    /// so moving between them changes nothing the server can see. Moving to another RELAY changes that
+    /// address, and the match drops.
+    /// </summary>
+    public static List<RelayEntry> DoorsOf(IEnumerable<RelayEntry> relays, string relayId)
+    {
+        var relay = relays.FirstOrDefault(r => r.ViaRelayId is null && r.Id.Equals(relayId, StringComparison.OrdinalIgnoreCase));
+        if (relay is null) return [];
+
+        var doors = new List<RelayEntry> { relay };
+        doors.AddRange(Expand([relay]));
+        return doors;
+    }
 
     /// <summary>
     /// How much faster than the player's own connection a path must be to count as helping.

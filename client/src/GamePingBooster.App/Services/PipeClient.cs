@@ -83,13 +83,28 @@ public sealed class PipeClient : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// One writer at a time. Several parts of the app send on their own schedules - the profile sync,
+    /// the token renewer, the connection-quality upload, the window - and two WriteLineAsync calls
+    /// overlapping on one StreamWriter can interleave into a line the service cannot parse.
+    /// </summary>
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
+
     public async Task SendAsync(CommandMessage command)
     {
         var writer = _writer;
         if (writer is null) throw new InvalidOperationException("Not connected to the background service.");
 
         var json = JsonSerializer.Serialize(command, IpcJsonContext.Default.CommandMessage);
-        await writer.WriteLineAsync(json).ConfigureAwait(false);
+        await _writeLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await writer.WriteLineAsync(json).ConfigureAwait(false);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
     }
 
     public Task ConnectTunnelAsync(string? relayId = null, string? gameId = null)

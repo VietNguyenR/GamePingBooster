@@ -1,9 +1,11 @@
-﻿using System.Net.Http;
+﻿using System.Buffers;
+using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
+using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Protocol;
 
 namespace GamePingBooster.App.Services;
@@ -133,6 +135,79 @@ public sealed class LicenceClient : IDisposable
 
             using var response = await _http.SendAsync(request, t).ConfigureAwait(false);
             return await ReadAsync(response, LicenceJsonContext.Default.DiagnosticResult, t).ConfigureAwait(false);
+        });
+
+    /// <summary>
+    /// Uploads a batch of connection-quality records - match summaries and spikes - and returns which
+    /// the server kept and which it refused for good. Both lists can be removed from the queue: a
+    /// refused record would be refused again.
+    ///
+    /// This IS background telemetry, and unlike SendDiagnosticAsync it runs on a timer. The owner
+    /// decided that on 2026-09-15; what keeps it honest is what the records hold (no addresses, no
+    /// traceroute - see QualityFile in the service) and the switch in Settings. The lag report, which
+    /// does carry a traceroute, still only ever goes up from its consent dialog.
+    ///
+    /// The records are sent as the service wrote them, byte for byte, spliced into the body rather
+    /// than parsed into types: the app has no reason to understand them, and a field the service adds
+    /// later reaches the server without a new app.
+    /// </summary>
+    public Task<QualityUploadResult> SendQualityAsync(string refreshToken, string? devicePublicKey,
+        IReadOnlyList<QualityOutboxItem> items, CancellationToken ct) =>
+        WithDeadline(TimeSpan.FromSeconds(30), ct, async t =>
+        {
+            var buffer = new ArrayBufferWriter<byte>(64 * 1024);
+            using (var writer = new Utf8JsonWriter(buffer))
+            {
+                writer.WriteStartObject();
+                if (devicePublicKey is not null) writer.WriteString("devicePublicKey", devicePublicKey);
+                if (UpdateChecker.CurrentVersion() is { } version) writer.WriteString("appVersion", version);
+                // This PC's clock at the moment of sending. Every time in the records was read from the
+                // same clock, so the server can measure how far off it is and correct them all - a
+                // clock a minute out otherwise files one player's spike into another ten minutes.
+                writer.WriteString("clientTime", DateTimeOffset.UtcNow);
+                writer.WriteStartArray("records");
+                foreach (var item in items)
+                {
+                    writer.WriteStartObject();
+                    writer.WriteString("id", item.Id);
+                    writer.WritePropertyName("data");
+                    writer.WriteRawValue(item.Json);
+                    writer.WriteEndObject();
+                }
+                writer.WriteEndArray();
+                writer.WriteEndObject();
+            }
+
+            using var content = new ByteArrayContent(buffer.WrittenSpan.ToArray());
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            using var request = new HttpRequestMessage(HttpMethod.Post, "quality") { Content = content };
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshToken);
+
+            using var response = await _http.SendAsync(request, t).ConfigureAwait(false);
+
+            // 429 is the account's daily allowance running out part-way through the batch, and the body
+            // still names what was stored before it did. Thrown away with the status, those records stay
+            // queued, go up again, are refused again as over the allowance, and push newer ones out.
+            if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+            {
+                QualityUploadResult? partial = null;
+                try
+                {
+                    partial = await response.Content
+                        .ReadFromJsonAsync(LicenceJsonContext.Default.QualityUploadResult, t).ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    // Not the upload's answer - a proxy's page, say. Falls through to the plain 429.
+                }
+                if (partial is not null)
+                {
+                    partial.Limited = true;
+                    return partial;
+                }
+            }
+
+            return await ReadAsync(response, LicenceJsonContext.Default.QualityUploadResult, t).ConfigureAwait(false);
         });
 
     public void Dispose() => _http.Dispose();
@@ -491,6 +566,16 @@ public sealed class DiagnosticResult
     [JsonPropertyName("id")] public string Id { get; set; } = "";
 }
 
+/// <summary>What POST /quality answers: the record ids it stored, and the ids it will never store.</summary>
+public sealed class QualityUploadResult
+{
+    [JsonPropertyName("accepted")] public List<string> Accepted { get; set; } = [];
+    [JsonPropertyName("rejected")] public List<string> Rejected { get; set; } = [];
+
+    /// <summary>The server stopped part-way because the account's daily allowance is spent (a 429). Not in the JSON.</summary>
+    [JsonIgnore] public bool Limited { get; set; }
+}
+
 /// <summary>Source-generated JSON: the App is published with Native AOT, like the service.</summary>
 [JsonSourceGenerationOptions(DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(ExchangeRequest))]
@@ -502,4 +587,5 @@ public sealed class DiagnosticResult
 [JsonSerializable(typeof(ErrorResponse))]
 [JsonSerializable(typeof(DiagnosticRequest))]
 [JsonSerializable(typeof(DiagnosticResult))]
+[JsonSerializable(typeof(QualityUploadResult))]
 public partial class LicenceJsonContext : JsonSerializerContext;

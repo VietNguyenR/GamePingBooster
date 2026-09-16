@@ -109,6 +109,7 @@ Source: "{#Root}\client\native\wintun\wintun.dll"; DestDir: "{app}"; Flags: igno
 ; by shipping its file here and nothing else.
 Source: "{#Root}\profiles\pubg-vn.json"; DestDir: "{app}\profiles"; Flags: ignoreversion
 Source: "{#Root}\profiles\cs2-vn.json"; DestDir: "{app}\profiles"; Flags: ignoreversion
+Source: "{#Root}\profiles\valorant-vn.json"; DestDir: "{app}\profiles"; Flags: ignoreversion
 
 [Dirs]
 ; The service writes its configuration and logs here, as LocalSystem. Nothing is placed in it at

@@ -84,6 +84,41 @@ public sealed class ServiceConfig
     /// </summary>
     [JsonPropertyName("routeWithoutGame")] public bool RouteWithoutGame { get; set; }
 
+    /// <summary>
+    /// Whether the connection-quality records the spike recorder writes are also queued for upload,
+    /// which the app then sends to the licence server between matches.
+    ///
+    /// ON unless switched off, and a config.json written before the setting existed reads as on: the
+    /// owner decided on 2026-09-15 that an opt-in nobody ticks produces no data, and the players who
+    /// most need a fix are the ones who never report. What makes that acceptable is what the records
+    /// hold - no addresses of any kind, see QualityFile - and that the switch is in Settings.
+    /// Off, nothing is queued and the queue is emptied; the local record is kept either way.
+    /// </summary>
+    [JsonPropertyName("shareQuality")] public bool ShareQuality { get; set; } = true;
+
+    /// <summary>
+    /// Automatic moves between the ways into the relay in use - the relay itself and the entries in front
+    /// of it - while a game runs, FOR THIS MACHINE. See DoorSwitchPolicy and TunnelEngine.MoveToDoor.
+    ///
+    ///   "off"     the other ways are not probed at all
+    ///   "record"  they are probed, and every move the policy WOULD make goes into the connection-quality
+    ///             record with what both ways did in the minute after
+    ///   "on"      the moves are made
+    ///
+    /// An override. Unset, the relay's own setting from the profile decides - set per relay in /admin/relays,
+    /// which is how moves reach everybody - and without one, "record". Anything unrecognised reads as
+    /// "record": a typo must neither switch the probes off nor switch moving on. See Core's EntrySwitching.
+    ///
+    /// UNSET BY DEFAULT, and never written back while unset. The service saves this file on its own - every
+    /// time a player opens a different game - and a default of "record" written into every config.json on
+    /// the first match would be indistinguishable from somebody choosing it: no later release and no
+    /// server-side setting could then turn moves on for anybody. Unset behaves as "record"; only a value
+    /// somebody typed pins this machine.
+    /// </summary>
+    [JsonPropertyName("entrySwitching")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? EntrySwitching { get; set; }
+
     public static string DefaultDirectory =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "GamePingBooster");
 

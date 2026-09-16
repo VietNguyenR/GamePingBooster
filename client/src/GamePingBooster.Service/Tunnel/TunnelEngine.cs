@@ -35,6 +35,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
     private CancellationTokenSource? _cts;
     private Task? _supervisor;
     private Task? _gamePingProbe;
+    private Task? _spikeRecorder;
 
     /// <summary>
     /// In-game ping measured directly against the server the game chose, smoothed; negative when
@@ -86,6 +87,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
         _log = log;
         _device = DeviceIdentity.LoadOrCreate(log);
         _token = TokenStore.Load(log);
+        QualityOutbox.Enabled = config.ShareQuality;
         if (_token is not null)
         {
             log($"Licence token loaded, expires {TokenStore.ExpiryOf(_token):u}.");
@@ -502,6 +504,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             // Pin the relay to the physical adapter BEFORE installing any route into the tunnel.
             _routes = new RouteManager();
             _routes.PinRelayRoute(endpoint.Address);
+            PinDoors();
 
             _routes.ConfigureAdapter(_adapter.InterfaceIndex, session.ClientIp, prefixLength: 24, session.Mtu);
             _tunnel.StartPumping(_adapter, token);
@@ -525,6 +528,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
 
             StartSupervisor(token);
             StartGamePingProbe(token);
+            StartSpikeRecorder(token);
 
             SetState(TunnelState.Connected,
                 _watcher.IsGameRunning
@@ -1198,6 +1202,10 @@ internal sealed class TunnelEngine : IAsyncDisposable
         // drop this one on its first pass.
         _idleSinceTick = 0;
 
+        // Nor does a move asked for, or made, on the last connection carry over to this one.
+        _pendingDoorMove = null;
+        _movedFromDoor = null;
+
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
         try
         {
@@ -1224,7 +1232,16 @@ internal sealed class TunnelEngine : IAsyncDisposable
                 }
 
                 var silence = tunnel.SinceLastPong;
-                if (silence < SilenceBeforeDead) continue;
+                if (silence < SilenceBeforeDead)
+                {
+                    // Here and nowhere else, so a move between ways into the relay can never run beside a
+                    // reconnect: this loop is the only thing that ever replaces or moves the tunnel.
+                    if (MovedBackAfterSilence(tunnel, silence)) continue;
+                    if (Interlocked.Exchange(ref _pendingDoorMove, null) is { } door) MoveToDoor(tunnel, door, rollback: false);
+                    continue;
+                }
+                _pendingDoorMove = null;
+                _movedFromDoor = null;
 
                 _log($"No answer from the relay for {silence.TotalSeconds:F0}s - reconnecting.");
                 await ReconnectAsync(ct).ConfigureAwait(false);
@@ -1252,6 +1269,265 @@ internal sealed class TunnelEngine : IAsyncDisposable
 
     private void StartGamePingProbe(CancellationToken ct) =>
         _gamePingProbe = Task.Run(() => ProbeGamePingAsync(ct), ct);
+
+    /// <summary>
+    /// Starts the recorder that finds spikes while they happen and says where on the path each one
+    /// was. See <see cref="SpikeRecorder"/>. It follows the engine through reconnects on its own, by
+    /// reading <see cref="SpikeContext"/> every quarter second.
+    /// </summary>
+    private void StartSpikeRecorder(CancellationToken ct)
+    {
+        var recorder = new SpikeRecorder(SpikeContext, _log, RequestDoorMove);
+        _recorder = recorder;
+        _spikeRecorder = Task.Run(() => recorder.RunAsync(ct), ct);
+    }
+
+    private volatile SpikeRecorder? _recorder;
+
+    /// <summary>A match is being recorded, so the connection-quality upload must wait.</summary>
+    public bool QualityInMatch => _recorder?.InMatch ?? false;
+
+    public bool QualitySharing => _config.ShareQuality;
+
+    /// <summary>
+    /// Turns the connection-quality upload on or off for this installation, and says why when it
+    /// could not be saved. Off also empties the queue - nothing already recorded is sent afterwards.
+    /// </summary>
+    public string? SetQualitySharing(bool enabled)
+    {
+        var previous = _config.ShareQuality;
+        _config.ShareQuality = enabled;
+        try
+        {
+            _config.Save();
+        }
+        catch (Exception ex)
+        {
+            _config.ShareQuality = previous;
+            return $"Could not save the setting: {ex.Message}";
+        }
+
+        QualityOutbox.Enabled = enabled;
+        _log(enabled
+            ? "Connection-quality sharing switched on: match summaries and spikes are sent between matches."
+            : "Connection-quality sharing switched off: nothing more is queued, and the queue was emptied.");
+        StatusChanged?.Invoke(Snapshot());
+        return null;
+    }
+
+    private SpikeRecorder.Context SpikeContext()
+    {
+        var relay = _relay;
+        var relayAddress = relay is not null && IPEndPoint.TryParse(relay.Endpoint, out var endpoint)
+            ? endpoint.Address
+            : null;
+        var path = _path;
+        var gameRunning = _config.RouteWithoutGame || (_watcher?.IsGameRunning ?? false);
+        // A path through an entry is a RelayEntry whose Id is the entry's and ViaRelayId the relay's.
+        // Recorded as the relay plus the entry, never as the entry alone: that split one relay's
+        // spikes across as many rows as it has entries, and hid an incident on it.
+        var relayId = relay is null ? null : RelayPaths.RelayIdOf(relay);
+        var entryId = relay?.ViaRelayId is null ? null : relay.Id;
+        var switching = _switching;
+        var doors = relay is not null && _tunnel is not null && switching != EntrySwitchingMode.Off ? DoorsBeside(relay) : [];
+        return new SpikeRecorder.Context(_tunnel, relayId, entryId, relay?.Name, relayAddress,
+            path?.Landmark, path?.RegionName, _game?.Id, gameRunning, doors, switching == EntrySwitchingMode.On);
+    }
+
+    // ------------------------------------------------------------ moving between ways into the relay
+
+    /// <summary>The way into the relay the switch policy asked for, until the supervisor's next pass takes it.</summary>
+    private string? _pendingDoorMove;
+
+    /// <summary>This connection's entry-switching mode, decided in <see cref="PinDoors"/>. Read by the recorder's thread.</summary>
+    private volatile EntrySwitchingMode _switching = EntrySwitchingMode.Record;
+
+    /// <summary>The way the tunnel was on before its last move, while that move is young enough to undo. Supervisor only.</summary>
+    private string? _movedFromDoor;
+    private long _movedAtTick;
+
+    /// <summary>How long after a move silence on the new way sends the tunnel back, and how much silence that takes.</summary>
+    private static readonly TimeSpan MoveBackWithin = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan MoveBackSilence = TimeSpan.FromSeconds(3);
+
+    /// <summary>
+    /// Undoes a move whose new way went silent. The policy only moves onto a way that answered nine probes in ten
+    /// for the last thirty seconds, so this is rare - but the alternative is the supervisor's own rule, fifteen
+    /// seconds of silence and then a reconnect, and a reconnect takes the game routes down and drops the match.
+    /// Going back to the way the tunnel just came from keeps it.
+    /// </summary>
+    private bool MovedBackAfterSilence(TunnelClient tunnel, TimeSpan silence)
+    {
+        if (_movedFromDoor is not { } previous) return false;
+        if (Environment.TickCount64 - _movedAtTick > MoveBackWithin.TotalMilliseconds)
+        {
+            _movedFromDoor = null;
+            return false;
+        }
+        if (silence < MoveBackSilence) return false;
+
+        _movedFromDoor = null;
+        _log($"Entry switching: nothing has answered for {silence.TotalSeconds:F0} s since the move - going back to " +
+             $"{previous} rather than waiting for the tunnel to be given up for dead.");
+        MoveToDoor(tunnel, previous, rollback: true);
+        return true;
+    }
+
+    /// <summary>The relay whose ways in are all pinned to the physical adapter, or null. See <see cref="PinDoors"/>.</summary>
+    private volatile string? _doorsPinnedRelayId;
+
+    // DoorsBeside's cache, touched only by the recorder's thread: one list object per relay, way and profile,
+    // which is also how the recorder tells that its probes need rebuilding.
+    private RelayEntry? _doorsFor;
+    private object? _doorsProfile;
+    private string? _doorsPinnedFor;
+    private IReadOnlyList<DoorProbes.Door> _doors = [];
+
+    /// <summary>
+    /// The ways into the current relay the tunnel is NOT using - its entries, or the relay itself when the
+    /// tunnel came in through an entry. Empty until they are pinned, so a probe never takes a game route.
+    /// </summary>
+    private IReadOnlyList<DoorProbes.Door> DoorsBeside(RelayEntry relay)
+    {
+        var profile = _profile;
+        var pinned = _doorsPinnedRelayId;
+        if (ReferenceEquals(relay, _doorsFor) && ReferenceEquals(profile, _doorsProfile) && pinned == _doorsPinnedFor)
+        {
+            return _doors;
+        }
+
+        var doors = new List<DoorProbes.Door>();
+        var relayId = RelayPaths.RelayIdOf(relay);
+        if (profile is not null && string.Equals(pinned, relayId, StringComparison.OrdinalIgnoreCase))
+        {
+            foreach (var door in RelayPaths.DoorsOf(profile.Relays, relayId))
+            {
+                if (door.Id.Equals(relay.Id, StringComparison.OrdinalIgnoreCase)) continue;
+                if (IPEndPoint.TryParse(door.Endpoint, out var endpoint) &&
+                    endpoint.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                {
+                    doors.Add(new DoorProbes.Door(door.Id, endpoint));
+                }
+            }
+        }
+
+        _doorsFor = relay;
+        _doorsProfile = profile;
+        _doorsPinnedFor = pinned;
+        _doors = doors;
+        return doors;
+    }
+
+    /// <summary>
+    /// Pins every way into the relay in use to the physical adapter - the one the tunnel uses is pinned
+    /// already - so a probe down another one can never follow a game route into the tunnel. Never fatal:
+    /// a failure here only means the other ways go unmeasured on this connection.
+    /// </summary>
+    private void PinDoors()
+    {
+        var routes = _routes;
+        var relay = _relay;
+        var profile = _profile;
+        _doorsPinnedRelayId = null;
+        if (routes is null || relay is null || profile is null) return;
+
+        try
+        {
+            var relayId = RelayPaths.RelayIdOf(relay);
+
+            // Decided once per connection, here: this machine's config.json if it says, else the relay's
+            // setting from the profile, else "record". A change made in /admin/relays reaches a player with
+            // the next profile the app fetches and takes effect on the connect after it - never mid-match.
+            var (mode, source) = EntrySwitching.Resolve(_config.EntrySwitching,
+                profile.Relays.FirstOrDefault(r => r.Id.Equals(relayId, StringComparison.OrdinalIgnoreCase))?.EntrySwitching);
+            _switching = mode;
+
+            var doors = mode != EntrySwitchingMode.Off ? RelayPaths.DoorsOf(profile.Relays, relayId) : [];
+            if (doors.Count < 2)
+            {
+                routes.PinDoorRoutes([]);
+                return;
+            }
+
+            var addresses = doors
+                .Select(d => IPEndPoint.TryParse(d.Endpoint, out var endpoint) ? endpoint.Address : null)
+                .OfType<IPAddress>()
+                .Where(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                .Distinct()
+                .ToList();
+            routes.PinDoorRoutes(addresses);
+            _doorsPinnedRelayId = relayId;
+
+            _log($"Entry switching ({(mode == EntrySwitchingMode.On ? "on" : "record only")}, from {source}): {relay.Name} has " +
+                 $"{doors.Count} ways in ({string.Join(", ", doors.Select(d => d.Id))}); the ones not in use are probed " +
+                 "while a game runs.");
+        }
+        catch (Exception ex)
+        {
+            _log($"Entry switching: could not pin the ways into {relay.Name} ({ex.Message}) - they are not measured on this connection.");
+        }
+    }
+
+    /// <summary>
+    /// The recorder's switch policy asking for a move. Only noted here; the supervisor makes it on its next
+    /// pass, the one place a tunnel is ever replaced or moved. False when it will not be made at all.
+    /// </summary>
+    private bool RequestDoorMove(GamePingBooster.Core.Quality.DoorDecision decision)
+    {
+        if (_switching != EntrySwitchingMode.On || _state != TunnelState.Connected) return false;
+        Volatile.Write(ref _pendingDoorMove, decision.To);
+        return true;
+    }
+
+    /// <summary>
+    /// Moves the live tunnel to another way into the SAME relay, with the game running. See TunnelClient.MoveTo
+    /// for why the game server sees nothing change, and why moving to another relay would drop the match -
+    /// which is why the target is looked up among this relay's ways in and nowhere else.
+    /// </summary>
+    private void MoveToDoor(TunnelClient tunnel, string doorId, bool rollback)
+    {
+        var current = _relay;
+        var routes = _routes;
+        var profile = _profile;
+        // Connected, and still this tunnel: a disconnect that got in first has already removed every route,
+        // and a pin added now would outlive it.
+        if (_state != TunnelState.Connected || current is null || routes is null || profile is null ||
+            !ReferenceEquals(tunnel, _tunnel)) return;
+
+        var relayId = RelayPaths.RelayIdOf(current);
+        var target = RelayPaths.DoorsOf(profile.Relays, relayId)
+            .FirstOrDefault(d => d.Id.Equals(doorId, StringComparison.OrdinalIgnoreCase));
+        if (target is null)
+        {
+            _log($"Entry switching: {doorId} is no longer a way into {current.Name} - staying where the tunnel is.");
+            return;
+        }
+        if (target.Id.Equals(current.Id, StringComparison.OrdinalIgnoreCase)) return;
+
+        try
+        {
+            var endpoint = ParseEndpoint(target.Endpoint);
+            routes.PinRelayRoute(endpoint.Address);
+            tunnel.MoveTo(endpoint);
+            _relay = target;
+
+            // The in-game reading was taken down the old way.
+            ForgetDirectPing();
+
+            // Remembered so a way that goes silent right after the move is left again before the supervisor
+            // gives the whole tunnel up - see MovedBackAfterSilence. A move back is not itself undone.
+            _movedFromDoor = rollback ? null : current.Id;
+            _movedAtTick = Environment.TickCount64;
+
+            _log($"Entry switching: moved from {current.Name} [{current.Id}] to {target.Name} [{target.Id}] - the same " +
+                 "relay and session, so the game server sees no change.");
+            SetState(TunnelState.Connected, $"Connected to {target.Name} - moved off {current.Name} for a better route");
+        }
+        catch (Exception ex)
+        {
+            _log($"Entry switching: could not move to {target.Name} ({ex.Message}) - staying on {current.Name}.");
+        }
+    }
 
     /// <summary>
     /// Measures the in-game ping against the server the game is actually on, once a second.
@@ -1593,6 +1869,9 @@ internal sealed class TunnelEngine : IAsyncDisposable
                     _tunnel = client;
                     ResetThroughputBaseline();
 
+                    // A failover to another relay brings other ways in with it, and leaves the old ones behind.
+                    PinDoors();
+
                     if (previousIp is not null && session.ClientIp.Equals(previousIp))
                     {
                         // Same address, but for two very different reasons - say which, because
@@ -1924,6 +2203,16 @@ internal sealed class TunnelEngine : IAsyncDisposable
             _gamePingProbe = null;
         }
 
+        // Its last act is writing the match summary, so it is awaited rather than abandoned.
+        if (_spikeRecorder is not null)
+        {
+            _cts?.Cancel();
+            try { await _spikeRecorder.ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+            _spikeRecorder = null;
+            _recorder = null;
+        }
+
         // Deleting the adapter comes last, and it is also the safety brake: any route still
         // pointing at it disappears along with it.
         _adapter?.Dispose();
@@ -2010,6 +2299,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             // and right after somebody has copied a profile in by hand. A missing file is null,
             // which the UI reads as "never" - correct on a machine that has never signed in.
             ProfileUpdatedAt = OldestSealedProfileWrite()?.ToUnixTimeSeconds(),
+            QualitySharing = _config.ShareQuality,
         };
     }
 

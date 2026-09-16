@@ -78,6 +78,8 @@ internal static class Program
         CheckData(root.GetProperty("data"));
         CheckPing(root.GetProperty("ping"));
         CheckPong(root.GetProperty("pong"));
+        CheckProbe(root.GetProperty("probe"));
+        CheckProbeReply(root.GetProperty("probeReply"));
         CheckDisconnect(root.GetProperty("disconnect"));
         CheckCryptoP256(root.GetProperty("cryptoP256"));
         CheckHandshakeReqToken(root.GetProperty("handshakeReqToken"));
@@ -213,6 +215,48 @@ internal static class Program
             GamePingBooster.Core.Profiles.RelayPaths.WorthTryingEntries(68, 62), "the margin is max(5 ms, 10%)");
         Check("entries: 8 ms better is",
             !GamePingBooster.Core.Profiles.RelayPaths.WorthTryingEntries(68, 60), "the margin is max(5 ms, 10%)");
+
+        // The ways a tunnel may move between mid-match: one relay and the entries in front of it, never another relay.
+        var doors = GamePingBooster.Core.Profiles.RelayPaths.DoorsOf(bundle.Relays, "SG-1");
+        Check("doors: a relay's ways in are itself, then its entries",
+            doors.Select(d => d.Id).SequenceEqual(["sg-1", "sg-1-vn"]), string.Join(", ", doors.Select(d => d.Id)));
+        Check("doors: every way in ends at that relay",
+            doors.All(d => GamePingBooster.Core.Profiles.RelayPaths.RelayIdOf(d) == "sg-1"),
+            "a move between two of them would change the address the game server sees, and drop the match");
+        Check("doors: an entry's id names no relay",
+            GamePingBooster.Core.Profiles.RelayPaths.DoorsOf(bundle.Relays, "sg-1-vn").Count == 0,
+            "a tunnel on an entry would look up ways into a relay that does not exist");
+        Check("doors: a relay with no entries has one way in",
+            GamePingBooster.Core.Profiles.RelayPaths.DoorsOf(bundle.Relays, "sg-2").Count == 1,
+            $"got {GamePingBooster.Core.Profiles.RelayPaths.DoorsOf(bundle.Relays, "sg-2").Count}");
+
+        // Entry switching, set per relay by the licence server and overridable per machine.
+        var switching = System.Text.Json.JsonSerializer.Deserialize("""
+            {"relays":[
+              {"id":"sg-2","name":"SG licensed 2","endpoint":"206.189.150.52:51820","entrySwitching":"on",
+               "entries":[{"id":"sg-2-vn","endpoint":"222.255.184.166:51820"}]},
+              {"id":"sg-4","name":"SG licensed 4","endpoint":"178.128.122.35:51820"}]}
+            """, GamePingBooster.Core.Profiles.ProfileJsonContext.Default.ProfileBundle)!;
+        Check("switching: a relay's setting is read under that exact name",
+            switching.Relays[0].EntrySwitching == "on", $"got {switching.Relays[0].EntrySwitching ?? "null"}");
+        Check("switching: a relay without one has none", switching.Relays[1].EntrySwitching is null,
+            switching.Relays[1].EntrySwitching ?? "");
+        Check("switching: a path through an entry carries its relay's setting",
+            GamePingBooster.Core.Profiles.RelayPaths.Expand(switching.Relays)[0].EntrySwitching == "on",
+            "a tunnel that came in through the entry would fall back to record");
+
+        static string Resolved(string? local, string? relay)
+        {
+            var (mode, source) = GamePingBooster.Core.Profiles.EntrySwitching.Resolve(local, relay);
+            return $"{mode}/{source}";
+        }
+        Check("switching: unset locally, the relay decides", Resolved(null, "on") == "On/the relay's setting", Resolved(null, "on"));
+        Check("switching: the relay can switch it off for everybody", Resolved(null, "off") == "Off/the relay's setting", Resolved(null, "off"));
+        Check("switching: config.json wins over the relay", Resolved("record", "on") == "Record/config.json", Resolved("record", "on"));
+        Check("switching: config.json can turn it on before the relay does", Resolved(" ON ", null) == "On/config.json", Resolved(" ON ", null));
+        Check("switching: a typo in config.json is record, not the relay's on", Resolved("onn", "on") == "Record/config.json", Resolved("onn", "on"));
+        Check("switching: neither says, record", Resolved(null, null) == "Record/the default", Resolved(null, null));
+        Check("switching: nonsense from the server is record", Resolved(null, "sometimes") == "Record/the default", Resolved(null, "sometimes"));
     }
 
     /// <summary>
@@ -428,6 +472,37 @@ internal static class Program
         Check("TryReadPong session id", readSid == sid, $"got 0x{readSid:x16}");
         Check("TryReadPong stamp", readStamp == stamp,
             $"got 0x{readStamp:x16} - every latency number in the UI, including relay selection, would be fiction");
+    }
+
+    private static void CheckProbe(JsonElement v)
+    {
+        var expected = Hex(v.GetProperty("packetHex").GetString()!);
+        var sid = HexToUInt64(v.GetProperty("sessionIdHex").GetString()!);
+        var stamp = v.GetProperty("stamp").GetUInt64();
+
+        Check("BuildProbe", GpbProtocol.BuildProbe(sid, stamp).AsSpan().SequenceEqual(expected),
+            "the relay would drop this client's probes, and no other way into it could ever be measured");
+    }
+
+    private static void CheckProbeReply(JsonElement v)
+    {
+        var pkt = Hex(v.GetProperty("packetHex").GetString()!);
+        var sid = HexToUInt64(v.GetProperty("sessionIdHex").GetString()!);
+        var stamp = v.GetProperty("stamp").GetUInt64();
+
+        if (!GpbProtocol.TryReadProbeReply(pkt, out var readSid, out var readStamp))
+        {
+            Fail("TryReadProbeReply", "every answer would be ignored, so every other way into the relay reads as dead");
+            return;
+        }
+        Check("TryReadProbeReply session id", readSid == sid, $"got 0x{readSid:x16}");
+        Check("TryReadProbeReply stamp", readStamp == stamp,
+            $"got 0x{readStamp:x16} - an entry would be timed against the wrong clock and switched to on fiction");
+
+        var pong = pkt.ToArray();
+        pong[0] = (byte)((pong[0] & 0xf0) | GpbProtocol.TypePong);
+        Check("TryReadProbeReply refuses a Pong", !GpbProtocol.TryReadProbeReply(pong, out _, out _),
+            "a keepalive answer would be read as a probe answer on another path");
     }
 
     private static void CheckDisconnect(JsonElement v)

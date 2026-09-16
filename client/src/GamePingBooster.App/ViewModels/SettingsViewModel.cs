@@ -20,12 +20,31 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private readonly bool _alreadyConfigured;
 
     public SettingsViewModel(IEnumerable<string>? currentEndpoints, bool alreadyConfigured,
-        string? currentLicenceUrl = "https://gamepingbooster.com")
+        string? currentLicenceUrl = "https://gamepingbooster.com", bool? qualitySharing = null)
     {
         _endpoints = string.Join(Environment.NewLine, currentEndpoints ?? []);
         _alreadyConfigured = alreadyConfigured;
         _licenceUrl = currentLicenceUrl ?? string.Empty;
+        _initialQualitySharing = qualitySharing;
+        _qualitySharing = qualitySharing ?? true;
     }
+
+    /// <summary>
+    /// Whether connection quality is sent after each match. Read back from the service, which owns
+    /// the setting; hidden entirely when talking to a service too old to have it.
+    /// </summary>
+    private readonly bool? _initialQualitySharing;
+    private bool _qualitySharing;
+    public bool QualitySharing
+    {
+        get => _qualitySharing;
+        set { if (Set(ref _qualitySharing, value)) Saved = false; }
+    }
+
+    public bool ShowQualitySharing => _initialQualitySharing is not null;
+
+    /// <summary>Only sent when it moved, so saving relay settings never touches it by accident.</summary>
+    public bool QualitySharingChanged => _initialQualitySharing is { } initial && initial != QualitySharing;
 
     /// <summary>
     /// Where to sign in. Empty means self-hosted, which is the default.

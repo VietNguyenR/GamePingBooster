@@ -26,6 +26,16 @@ public static class GpbProtocol
     /// </summary>
     public const byte TypeDataEncrypted = 0x7;
 
+    /// <summary>
+    /// A round trip on a path the session is NOT using - another way into the same relay, an entry
+    /// or the direct road, timed while the game keeps running on the current one. relayd answers
+    /// with <see cref="TypeProbeReply"/> and, unlike after a Ping, leaves the session's return address
+    /// where it was: a Ping down a second path would drag the game's traffic onto it. See
+    /// docs/PROTOCOL-v3.md. A relay older than this drops it, and the path simply goes unmeasured.
+    /// </summary>
+    public const byte TypeProbe = 0x8;
+    public const byte TypeProbeReply = 0x9;
+
     /// <summary>Self-hosted mode: one shared key, as in v1 and v2.</summary>
     public const byte AuthModePsk = 0;
 
@@ -64,6 +74,7 @@ public static class GpbProtocol
 
     public const int DataHeaderLen = 9;
     public const int PingLen = 17;
+    public const int ProbeLen = 17;
     public const int DisconnectLen = 9;
     public const int MaxPacketLen = 2048;
 
@@ -285,6 +296,25 @@ public static class GpbProtocol
         sessionId = 0;
         stamp = 0;
         if (pkt.Length != PingLen) return false;
+        sessionId = BinaryPrimitives.ReadUInt64BigEndian(pkt.Slice(1, 8));
+        stamp = BinaryPrimitives.ReadUInt64BigEndian(pkt.Slice(9, 8));
+        return true;
+    }
+
+    /// <summary>A Probe: a Ping's 17 bytes under its own type, safe to send down any path into the session's relay.</summary>
+    public static byte[] BuildProbe(ulong sessionId, ulong stamp) => BuildPingLike(TypeProbe, sessionId, stamp);
+
+    /// <summary>
+    /// Reads a ProbeReply. Unlike <see cref="TryReadPong"/> it checks the version and type itself: a
+    /// probe socket has no dispatch in front of it, and a Pong read as a reply would time nothing real.
+    /// </summary>
+    public static bool TryReadProbeReply(ReadOnlySpan<byte> pkt, out ulong sessionId, out ulong stamp)
+    {
+        sessionId = 0;
+        stamp = 0;
+        if (pkt.Length != ProbeLen) return false;
+        var (version, type) = ParseHeader(pkt[0]);
+        if (version != Version || type != TypeProbeReply) return false;
         sessionId = BinaryPrimitives.ReadUInt64BigEndian(pkt.Slice(1, 8));
         stamp = BinaryPrimitives.ReadUInt64BigEndian(pkt.Slice(9, 8));
         return true;

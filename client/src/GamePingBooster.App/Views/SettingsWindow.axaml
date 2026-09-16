@@ -71,6 +71,13 @@
                  Text="Only if you have an account. Leave blank to run entirely on your own relays with the key above - that is the normal setup. Filling this in adds an Account button, and the game list comes from there too." />
     </StackPanel>
 
+    <StackPanel IsVisible="{Binding ShowQualitySharing}">
+      <CheckBox IsChecked="{Binding QualitySharing}" Foreground="#ababab" FontSize="13"
+                Content="Send connection quality after each match" />
+      <TextBlock Classes="hint"
+                 Text="Ping, lag spikes and which part of the path each one came from - your network, the route to the relay, the relay, or the game server - plus the relay and game used. No IP addresses and nothing about other programs. Sent between matches, never during one." />
+    </StackPanel>
+
     <Border Background="#7F1D1D" CornerRadius="8" Padding="12"
             IsVisible="{Binding HasError}">
       <TextBlock Text="{Binding Error}" Foreground="#FEE2E2" FontSize="12" TextWrapping="Wrap" />
