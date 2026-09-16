@@ -292,6 +292,17 @@ internal sealed class PipeServer
                 break;
             }
 
+            // Read-only, and nothing in it is secret: names, process names and region names, never a
+            // range. Asked for by the "Supported games" window when it opens.
+            case "games":
+            {
+                var reply = _engine.Snapshot();
+                reply.AckVerb = "games";
+                reply.Games = _engine.SupportedGames();
+                await PushAsync(reply).ConfigureAwait(false);
+                break;
+            }
+
             case "quality-ack":
             {
                 var removed = QualityOutbox.Acknowledge(cmd.QualityIds ?? []);

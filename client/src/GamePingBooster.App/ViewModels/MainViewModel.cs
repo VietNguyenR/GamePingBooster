@@ -322,6 +322,19 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    private int _gameCount;
+    public int GameCount
+    {
+        get => _gameCount;
+        private set
+        {
+            if (!Set(ref _gameCount, value)) return;
+            Raise(nameof(GameText));
+            Raise(nameof(HasGames));
+            Raise(nameof(GameTextBrush));
+        }
+    }
+
     private string? _relayName;
     public string? RelayName
     {
@@ -425,9 +438,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string RelayText => RelayName ?? "-";
     public string RouteText => ActiveRoutes > 0 ? $"{ActiveRoutes} ranges" : "-";
 
-    public string GameText => GameName is null
-        ? "-"
-        : GameRunning ? $"{GameName} is running" : $"{GameName} is not open";
+    /// <summary>
+    /// The game being played, or how many are supported. A count and not the names: the line has
+    /// to stay one short line however many games the profile grows to.
+    /// </summary>
+    /// <summary>Whether the Game line opens the supported games list: only when there is a list.</summary>
+    public bool HasGames => GameCount > 0;
+
+    private static readonly IBrush LinkBrush = new SolidColorBrush(Color.FromRgb(0x60, 0xA5, 0xFA));
+    private static readonly IBrush ValueBrush = new SolidColorBrush(Color.FromRgb(0xab, 0xab, 0xab));
+
+    /// <summary>Blue when the Game line can be clicked, the usual grey when it cannot.</summary>
+    public IBrush GameTextBrush => HasGames ? LinkBrush : ValueBrush;
+
+    public string GameText => GameName is not null
+        ? GameRunning ? $"{GameName} is running" : $"{GameName} is not open"
+        : GameCount > 0 ? $"No game open - {GameCount} supported" : "-";
 
     /// <summary>
     /// Packet counters. Not cosmetic: when the tunnel connects but traffic does not flow, the
@@ -581,6 +607,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         LossRatio = status.LossRatio;
         GameRunning = status.GameRunning;
         GameName = status.GameName;
+        GameCount = status.GameCount;
         RelayName = status.RelayName;
         RelayEndpoints = status.RelayEndpoints;
         Configured = status.Configured;

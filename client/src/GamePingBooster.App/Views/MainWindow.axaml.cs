@@ -28,6 +28,16 @@ public partial class MainWindow : SurfaceWindow
     /// <summary>The sign-in window fetches the game list as soon as it has a credential.</summary>
     public void AttachProfileSync(ProfileSync sync) => _profileSync = sync;
 
+    /// <summary>Opens the supported games list, from the menu or from the Game line.</summary>
+    private async void OnGamesClick(object? sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainViewModel vm || _pipe is null) return;
+
+        var dialog = new GamesWindow();
+        dialog.Attach(_pipe, vm.GameRunning ? vm.GameName : null);
+        await dialog.ShowDialog(this);
+    }
+
     private async void OnSettingsClick(object? sender, RoutedEventArgs e)
     {
         if (DataContext is not MainViewModel vm || _pipe is null) return;

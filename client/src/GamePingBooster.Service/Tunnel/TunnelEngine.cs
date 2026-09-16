@@ -2271,9 +2271,11 @@ internal sealed class TunnelEngine : IAsyncDisposable
             GameRegionName = _path?.RegionName,
             LossRatio = _tunnel?.LossRatio,
             GameRunning = _watcher?.IsGameRunning ?? false,
-            // The game being played, or every game that would be when none is: there is no selector,
-            // so naming the one relays happened to be measured for would read as a choice nobody made.
-            GameName = (_watcher?.IsGameRunning ?? false) ? _game?.Name : GamesLabelOrNull,
+            // The game being played, or - when none is - the only one there is. With several there is
+            // no selector, so naming the one relays happened to be measured for would read as a choice
+            // nobody made; the UI says how many instead of listing them all.
+            GameName = (_watcher?.IsGameRunning ?? false) ? _game?.Name : OnlyGameName,
+            GameCount = _profile?.Games.Count ?? 0,
             ActiveRoutes = _routes?.ActiveRouteCount ?? 0,
             PacketsSent = _tunnel?.PacketsSent ?? 0,
             PacketsReceived = _tunnel?.PacketsReceived ?? 0,
@@ -2556,11 +2558,44 @@ internal sealed class TunnelEngine : IAsyncDisposable
         }
     }
 
-    /// <summary>Every game in the profile by name, "PUBG / Counter-Strike 2", or null without a profile.</summary>
-    private string? GamesLabelOrNull =>
-        _profile is { Games.Count: > 0 } profile ? string.Join(" / ", profile.Games.Select(g => g.Name)) : null;
+    /// <summary>
+    /// Every game in the loaded profile, for the "Supported games" window: running first, then the one
+    /// last played, then by name. Empty without a profile.
+    ///
+    /// Running is looked up here rather than read from the watcher, which only exists while the tunnel
+    /// is up - a player checking whether the app recognises their game has usually not connected yet.
+    /// One process lookup per name, once per request; the window asks when it opens and when the game
+    /// being played changes, not on a timer.
+    /// </summary>
+    public List<SupportedGame> SupportedGames()
+    {
+        var profile = _profile;
+        if (profile is null) return [];
 
-    private string GamesLabel => GamesLabelOrNull ?? "the game";
+        return profile.Games
+            .Select(game => new SupportedGame
+            {
+                Id = game.Id,
+                Name = game.Name,
+                ProcessNames = [.. game.ProcessNames],
+                Regions = [.. game.Regions.Select(r => r.Name).Where(n => n.Length > 0)],
+                Running = GameProcessWatcher.FindRunning(game.ProcessNames) is not null,
+                LastPlayed = game.Id.Equals(_config.LastGameId, StringComparison.OrdinalIgnoreCase),
+            })
+            .OrderByDescending(g => g.Running)
+            .ThenByDescending(g => g.LastPlayed)
+            .ThenBy(g => g.Name, StringComparer.CurrentCultureIgnoreCase)
+            .ToList();
+    }
+
+    /// <summary>The profile's game when it has exactly one, else null.</summary>
+    private string? OnlyGameName => _profile is { Games.Count: 1 } profile ? profile.Games[0].Name : null;
+
+    /// <summary>
+    /// What "waiting for ... to start" waits for. It used to name every game joined with " / ",
+    /// which stopped fitting the window once several games were supported.
+    /// </summary>
+    private string GamesLabel => OnlyGameName ?? (_profile is { Games.Count: > 1 } ? "a supported game" : "the game");
 
     private RelayEntry FindRelay(string? id)
     {

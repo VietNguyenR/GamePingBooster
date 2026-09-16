@@ -1,0 +1,95 @@
+<views:SurfaceWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:GamePingBooster.App.ViewModels"
+        xmlns:views="using:GamePingBooster.App.Views"
+        x:Class="GamePingBooster.App.Views.GamesWindow"
+        x:DataType="vm:GamesViewModel"
+        Title="Supported games"
+        Width="420" Height="520"
+        MinWidth="380" MinHeight="360"
+        WindowStartupLocation="CenterOwner">
+
+  <views:SurfaceWindow.Styles>
+    <Style Selector="TextBox">
+      <Setter Property="Background" Value="#242424" />
+      <Setter Property="Foreground" Value="#ababab" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="10,8" />
+      <Setter Property="FontSize" Value="13" />
+    </Style>
+    <Style Selector="Button">
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="16,8" />
+    </Style>
+  </views:SurfaceWindow.Styles>
+
+  <Grid RowDefinitions="Auto,*">
+
+    <!--
+      A spacer, not a title bar - see SurfaceWindow for why there is no title bar to draw.
+      It keeps the content clear of the caption buttons and gives somewhere to drag.
+    -->
+    <Border Grid.Row="0" Height="34" Background="Transparent"
+            PointerPressed="OnTitleBarPressed" />
+
+    <Grid Grid.Row="1" RowDefinitions="Auto,Auto,*,Auto" Margin="24,4,24,24">
+
+      <StackPanel Grid.Row="0" Spacing="2">
+        <TextBlock Text="Supported games" Foreground="#F8FAFC" FontSize="18" FontWeight="Bold" />
+        <TextBlock Foreground="#787878" FontSize="12" TextWrapping="Wrap"
+                   Text="Detected automatically - just open the game. Nothing to choose here." />
+      </StackPanel>
+
+      <Grid Grid.Row="1" ColumnDefinitions="*,Auto" Margin="0,16,0,0">
+        <TextBox Grid.Column="0" Name="SearchBox"
+                 Text="{Binding Query}" PlaceholderText="Search by game or process name"
+                 IsVisible="{Binding ShowSearch}" />
+        <TextBlock Grid.Column="1" Text="{Binding CountText}"
+                   Foreground="#787878" FontSize="12" VerticalAlignment="Center" Margin="12,0,0,0" />
+      </Grid>
+
+      <!-- The list scrolls inside the window; the window never grows with it. -->
+      <Border Grid.Row="2" Background="#242424" CornerRadius="12" Margin="0,12,0,0"
+              Padding="0">
+        <Grid>
+          <ScrollViewer HorizontalScrollBarVisibility="Disabled" IsVisible="{Binding !IsEmpty}">
+            <ItemsControl ItemsSource="{Binding Visible}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="vm:GameRow">
+                  <Border BorderBrush="#2e2e2e" BorderThickness="0,0,0,1" Padding="16,12">
+                    <StackPanel Spacing="3">
+                      <Grid ColumnDefinitions="*,Auto">
+                        <TextBlock Grid.Column="0" Text="{Binding Name}"
+                                   Foreground="#E2E8F0" FontSize="14" FontWeight="SemiBold"
+                                   TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Name}" />
+                        <Border Grid.Column="1" Background="#14532D" CornerRadius="6" Padding="8,2"
+                                Margin="8,0,0,0" VerticalAlignment="Center" IsVisible="{Binding HasBadge}">
+                          <TextBlock Text="{Binding Badge}" Foreground="#BBF7D0" FontSize="11" />
+                        </Border>
+                      </Grid>
+                      <TextBlock Text="{Binding Regions}" IsVisible="{Binding HasRegions}"
+                                 Foreground="#ababab" FontSize="12" TextWrapping="Wrap" />
+                      <TextBlock Text="{Binding Processes}"
+                                 Foreground="#787878" FontSize="11" FontFamily="Consolas,Cascadia Mono,monospace"
+                                 TextWrapping="Wrap" />
+                    </StackPanel>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </ScrollViewer>
+
+          <TextBlock Text="{Binding EmptyText}" IsVisible="{Binding IsEmpty}"
+                     Foreground="#787878" FontSize="12" TextWrapping="Wrap"
+                     HorizontalAlignment="Center" VerticalAlignment="Center"
+                     TextAlignment="Center" Margin="24" />
+        </Grid>
+      </Border>
+
+      <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+        <Button Content="Close" Click="OnCloseClick" Background="#333333" Foreground="#E2E8F0" />
+      </StackPanel>
+    </Grid>
+  </Grid>
+</views:SurfaceWindow>

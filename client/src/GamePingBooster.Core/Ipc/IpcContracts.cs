@@ -32,7 +32,7 @@ public sealed class CommandMessage
 
     /// <summary>
     /// "connect" | "disconnect" | "status" | "reload-profile" | "set-relay" | "set-token" |
-    /// "set-profile"
+    /// "set-profile" | "games"
     /// </summary>
     [JsonPropertyName("verb")] public string Verb { get; set; } = "status";
 
@@ -146,6 +146,28 @@ public sealed class QualityOutboxItem
     [JsonPropertyName("json")] public string Json { get; set; } = "";
 }
 
+/// <summary>
+/// One game the loaded profile supports, for the "Supported games" window. What a player needs to
+/// recognise it and to tell support why it was not detected - never an address or a range.
+/// </summary>
+public sealed class SupportedGame
+{
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
+    [JsonPropertyName("name")] public string Name { get; set; } = "";
+
+    /// <summary>The process names detection looks for, as the profile lists them.</summary>
+    [JsonPropertyName("processNames")] public List<string> ProcessNames { get; set; } = [];
+
+    /// <summary>Display names of the game's server regions.</summary>
+    [JsonPropertyName("regions")] public List<string> Regions { get; set; } = [];
+
+    /// <summary>One of its processes is running right now.</summary>
+    [JsonPropertyName("running")] public bool Running { get; set; }
+
+    /// <summary>The game this machine last played - see ServiceConfig.LastGameId.</summary>
+    [JsonPropertyName("lastPlayed")] public bool LastPlayed { get; set; }
+}
+
 /// <summary>State the service pushes up to the UI (on request, and on every change).</summary>
 public sealed class StatusMessage
 {
@@ -247,7 +269,15 @@ public sealed class StatusMessage
 
     /// <summary>Whether a game process is running - this drives route install/removal.</summary>
     [JsonPropertyName("gameRunning")] public bool GameRunning { get; set; }
+    /// <summary>
+    /// The game being played. When none is, the only game in the profile if there is exactly one,
+    /// otherwise null - see <see cref="GameCount"/>. Never a list: every supported game joined into
+    /// one string grew with each game added and no longer fit the window.
+    /// </summary>
     [JsonPropertyName("gameName")] public string? GameName { get; set; }
+
+    /// <summary>How many games the loaded profile supports. 0 without a profile.</summary>
+    [JsonPropertyName("gameCount")] public int GameCount { get; set; }
 
     /// <summary>Number of routes currently installed in the Windows routing table.</summary>
     [JsonPropertyName("activeRoutes")] public int ActiveRoutes { get; set; }
@@ -371,6 +401,13 @@ public sealed class StatusMessage
     /// other status - it would be a lot to push once a second for no reader.
     /// </summary>
     [JsonPropertyName("qualityOutbox")] public List<QualityOutboxItem>? QualityOutbox { get; set; }
+
+    /// <summary>
+    /// games only: every game in the loaded profile - running first, then the last one played, then by
+    /// name. Null on every other status, for the same reason as <see cref="QualityOutbox"/>: a list that
+    /// grows with each game has no business in a once-a-second heartbeat. Additive, so no contract bump.
+    /// </summary>
+    [JsonPropertyName("games")] public List<SupportedGame>? Games { get; set; }
 
     /// <summary>quality-outbox only: how many records were still waiting, this batch included.</summary>
     [JsonPropertyName("qualityPending")] public int? QualityPending { get; set; }
