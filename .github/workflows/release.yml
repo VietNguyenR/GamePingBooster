@@ -135,18 +135,12 @@ jobs:
         # packages the public example profiles instead; swap in the real ones before this step
         # (e.g. from a secret) if a release needs to ship real IPs.
         #
-        # One per file the installer lists (installer/GamePingBooster.iss). Missing one does not fail
-        # here - it fails in Inno Setup as "Compile aborted", which is how v0.2.3 was lost.
+        # The logic lives in gpb.ps1, so ./gpb release rehearses exactly this before a tag exists. It
+        # reads the list from installer/GamePingBooster.iss; see the verb for why.
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($game in 'pubg', 'cs2') {
-            $real = "profiles\$game-vn.json"
-            $example = "profiles\$game-vn.example.json"
-            if (-not (Test-Path $real)) {
-              Write-Warning "$real not present (expected - it's gitignored). Using $example instead."
-              Copy-Item $example $real
-            }
-          }
+          .\gpb.ps1 release-profiles
+          if ($LASTEXITCODE -ne 0) { throw "gpb.ps1 release-profiles failed" }
 
       - name: Build client and package the installer
         # Reuses gpb.ps1's own `installer` verb end to end: it Native-AOT publishes both the

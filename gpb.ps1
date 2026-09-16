@@ -26,7 +26,8 @@
         .\gpb.ps1 test                every test on both sides
         .\gpb.ps1 publish             Native AOT build and install into ProgramData
         .\gpb.ps1 diag                collect a diagnostics bundle to send
-        .\gpb.ps1 installer [version] publish, then package a setup .exe (needs Inno Setup 6)
+        .\gpb.ps1 installer [version] build, then package a setup .exe (needs Inno Setup 6)
+        .\gpb.ps1 release-profiles    stand the committed example profiles in for missing real ones
         .\gpb.ps1 version [x.y.z]     show or set the version everything is stamped with
         .\gpb.ps1 reset               remove EVERYTHING this software installed, to test setup
 
@@ -104,6 +105,22 @@ function Add-VsWhereToPath {
     if ((Test-Path (Join-Path $p 'vswhere.exe')) -and ($env:PATH -notlike "*$p*")) {
         $env:PATH = "$p;$env:PATH"
     }
+}
+
+# The Native AOT build of both halves, into their own bin\Release publish folders and nowhere else.
+#
+# Split out of `publish` because `publish` also stops the running service and copies the build into
+# ProgramData - right for a developer, wrong for `installer`. The installer only needs the build, and
+# `./gpb release` rehearses the whole CI build on this machine before a tag is pushed: a rehearsal
+# that stopped the booster somebody is playing through, and replaced its binaries with a build from a
+# scratch checkout, would be a strange price for checking a release.
+function Invoke-AotPublish {
+    Add-VsWhereToPath
+    Say "Native AOT publish"
+    & dotnet publish (Join-Path $client 'src\GamePingBooster.Service\GamePingBooster.Service.csproj') -c Release -r win-x64 --nologo
+    if ($LASTEXITCODE -ne 0) { throw "publish failed" }
+    & dotnet publish (Join-Path $client 'src\GamePingBooster.App\GamePingBooster.App.csproj') -c Release -r win-x64 --nologo
+    if ($LASTEXITCODE -ne 0) { throw "publish failed" }
 }
 
 # Git's bash, found through git itself rather than through PATH. A bare `bash` on Windows 11 is
@@ -690,14 +707,9 @@ switch ($Verb.ToLowerInvariant()) {
     }
 
     'publish' {
-        Add-VsWhereToPath
         $null = Stop-Everything
         Start-Sleep -Milliseconds 500
-        Say "Native AOT publish"
-        & dotnet publish (Join-Path $client 'src\GamePingBooster.Service\GamePingBooster.Service.csproj') -c Release -r win-x64 --nologo
-        if ($LASTEXITCODE -ne 0) { throw "publish failed" }
-        & dotnet publish (Join-Path $client 'src\GamePingBooster.App\GamePingBooster.App.csproj') -c Release -r win-x64 --nologo
-        if ($LASTEXITCODE -ne 0) { throw "publish failed" }
+        Invoke-AotPublish
 
         $bin = Join-Path $programData 'bin'
         New-Item -ItemType Directory -Force -Path $bin | Out-Null
@@ -773,9 +785,10 @@ switch ($Verb.ToLowerInvariant()) {
         # Publish first. Packaging whatever happens to be lying in the publish folder is how an
         # installer ends up shipping last week's binary, and nothing about the result would say
         # so.
-        Say "Publishing before packaging"
-        & $PSCommandPath publish
-        if ($LASTEXITCODE -ne 0) { throw "publish failed" }
+        # The build only - not `publish`, which also stops the running service and installs into
+        # ProgramData. See Invoke-AotPublish.
+        Say "Building before packaging"
+        Invoke-AotPublish
 
         # Refuse early and name the missing file. Inno's own error for a missing source is a
         # line number in a .iss most people will never have read.
@@ -787,8 +800,12 @@ switch ($Verb.ToLowerInvariant()) {
             # and an installer that shipped without it produced an app that crashed on launch
             # with a TypeInitializationException naming neither the file nor the installer.
             'libSkiaSharp' = Join-Path $client 'src\GamePingBooster.App\bin\Release\net9.0-windows\win-x64\publish\libSkiaSharp.dll'
-            'the PUBG profile' = Join-Path $root 'profiles\pubg-vn.json'
-            'the CS2 profile'  = Join-Path $root 'profiles\cs2-vn.json'
+        }
+        # Every profile the installer ships, read from the .iss itself rather than listed again here,
+        # so a game added there is checked here without anyone remembering to.
+        $iss = Join-Path $root 'installer\GamePingBooster.iss'
+        foreach ($m in (Select-String -Path $iss -Pattern 'profiles\\([a-z0-9-]+-vn\.json)' -AllMatches).Matches) {
+            $required["the profile $($m.Groups[1].Value)"] = Join-Path $root "profiles\$($m.Groups[1].Value)"
         }
         foreach ($what in $required.Keys) {
             if (-not (Test-Path $required[$what])) {
@@ -865,6 +882,40 @@ switch ($Verb.ToLowerInvariant()) {
                 Write-Host "  relay test             Go tests"
                 Write-Host "  relay setup            first-time setup, explained"
             }
+        }
+    }
+
+    'release-profiles' {
+        # What a release build packages in place of the real profiles. profiles\<game>-vn.json hold
+        # live address ranges and are gitignored, so a CI checkout never has them; the committed
+        # <game>-vn.example.json stands in for each one that is missing.
+        #
+        # One implementation, called by .github/workflows/release.yml AND by ./gpb release's
+        # rehearsal, so the rehearsal cannot pass on logic the real build does not run.
+        #
+        # The list is READ from installer\GamePingBooster.iss, never typed. It used to be typed: v0.2.3
+        # was lost to a profile missing from it, and v0.2.6 to VALORANT being added to the installer
+        # and not to the list. A missing profile does not fail here by itself - it fails in Inno Setup
+        # as "Compile aborted" - so a game with no example fails HERE, by name.
+        $iss = Join-Path $root 'installer\GamePingBooster.iss'
+        $games = Select-String -Path $iss -Pattern 'profiles\\([a-z0-9-]+)-vn\.json' -AllMatches |
+            ForEach-Object { $_.Matches } | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+        if (-not $games) {
+            throw "Found no profiles\<game>-vn.json in $iss - has the Source line changed shape?"
+        }
+        foreach ($game in $games) {
+            $real = Join-Path $root "profiles\$game-vn.json"
+            $example = Join-Path $root "profiles\$game-vn.example.json"
+            if (Test-Path $real) {
+                Say "profiles\$game-vn.json present"
+                continue
+            }
+            if (-not (Test-Path $example)) {
+                throw ("The installer ships profiles\$game-vn.json, which is gitignored, and there is no " +
+                       "profiles\$game-vn.example.json committed to stand in for it. Add one - empty cidrs is fine.")
+            }
+            Warn "profiles\$game-vn.json not present (expected - it is gitignored). Using the example instead."
+            Copy-Item $example $real
         }
     }
 

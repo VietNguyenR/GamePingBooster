@@ -509,8 +509,10 @@ func buildPingLike(t byte, sid SessionID, stamp uint64) []byte {
 // id, the same opaque stamp echoed back. The difference is entirely in what the relay does with one -
 // it answers, and changes nothing about the session. See Server.handleProbe.
 
-func BuildProbe(sid SessionID, stamp uint64) []byte      { return buildPingLike(TypeProbe, sid, stamp) }
-func BuildProbeReply(sid SessionID, stamp uint64) []byte { return buildPingLike(TypeProbeReply, sid, stamp) }
+func BuildProbe(sid SessionID, stamp uint64) []byte { return buildPingLike(TypeProbe, sid, stamp) }
+func BuildProbeReply(sid SessionID, stamp uint64) []byte {
+	return buildPingLike(TypeProbeReply, sid, stamp)
+}
 
 // DecodePing reads the session id and timestamp out of a Ping, Pong, Probe or ProbeReply message.
 func DecodePing(pkt []byte) (SessionID, uint64, error) {

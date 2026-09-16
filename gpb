@@ -24,7 +24,8 @@
 #   ./gpb entry list             show the entries gpb.conf declares       (any OS)
 #   ./gpb entry setup            first-time setup, explained              (any OS)
 #   ./gpb test                   everything: Go, plus C# if the SDK is here
-#   ./gpb release x.y.z          bump VERSION, commit, push main and the tag  (any OS)
+#   ./gpb release x.y.z          rehearse the CI build on a clean checkout, then bump VERSION,
+#                                commit, push main and the tag                (Windows)
 #                                GitHub Actions then builds and publishes the release
 #
 #   ./gpb dev                    build and start the service and UI       (Windows)
@@ -913,6 +914,137 @@ version_gt() {
     }'
 }
 
+# The rehearsal: the build .github/workflows/release.yml will run, run here first, on exactly what
+# is about to be tagged, while nothing has been pushed and a failure costs nothing.
+#
+# Why it exists: a release that fails in CI still burns its version. The tag is public the moment it
+# is pushed, releases here are immutable, and the fix is always "release the next number". v0.2.3
+# and v0.2.6 were both lost to a profile the installer listed and a clean checkout did not have -
+# and both built perfectly on this machine, because this machine had the file.
+#
+# So it does not build in this tree. It builds in a git worktree of HEAD, which holds only what is
+# committed: no gitignored real profiles, no untracked file that was never added, no stale bin\ -
+# the same starting point as the CI checkout. And it runs the same verbs CI runs (release-profiles,
+# installer, relay\deploy.ps1 -PackageOnly), not a copy of them, so the two cannot drift apart.
+#
+# What it cannot rehearse, and says so: GitHub itself - the runner image, choco, gh. wintun.dll is
+# copied from this tree rather than downloaded, but the pinned download URL is checked.
+release_rehearse() {
+    rr_ver=$1
+
+    [ "$is_windows" -eq 1 ] || die "a release is rehearsed before it is tagged, and the rehearsal builds the Windows installer.
+    Run ./gpb release from Windows (Git Bash or PowerShell)."
+    need powershell "It ships with Windows; make sure C:/Windows/System32/WindowsPowerShell/v1.0 is on PATH."
+    need cygpath "It ships with Git for Windows."
+    need curl "It ships with Git for Windows."
+
+    rr_dir=$(mktemp -d)
+    rr_src="$rr_dir/src"
+    rr_log="$rr_dir/rehearsal.log"
+    : > "$rr_log"
+
+    # MSBuild and the .NET build server stay resident after a build and keep files in obj\ open,
+    # which makes the worktree impossible to remove afterwards. Nothing here benefits from them.
+    MSBUILDDISABLENODEREUSE=1
+    DOTNET_CLI_USE_MSBUILD_SERVER=0
+    export MSBUILDDISABLENODEREUSE DOTNET_CLI_USE_MSBUILD_SERVER
+
+    trap 'release_rehearse_cleanup keep' INT TERM HUP
+
+    printf '\n'
+    say "Rehearsing the release build on a clean checkout of HEAD (several minutes)"
+
+    rr_step "checkout of HEAD, committed files only" \
+        git worktree add --detach --quiet "$rr_src" HEAD || release_rehearse_failed
+    rr_win=$(cygpath -w "$rr_src")
+
+    # What the release commit will say. Written in the worktree only; this tree is untouched.
+    printf '%s' "$rr_ver" > "$rr_src/VERSION"
+
+    rr_step "wintun download CI will fetch still exists" rr_wintun_url || release_rehearse_failed
+    rr_step "wintun.dll (copied from this tree)" rr_wintun_copy || release_rehearse_failed
+    rr_step "release-profiles" rr_ps release-profiles || release_rehearse_failed
+    rr_step "installer" rr_ps installer || release_rehearse_failed
+    rr_step "  GamePingBooster-Setup-$rr_ver.exe exists" \
+        test -f "$rr_src/installer/dist/GamePingBooster-Setup-$rr_ver.exe" || release_rehearse_failed
+    rr_step "relay package" rr_relay_package || release_rehearse_failed
+    rr_step "  gpb-relay.tar.gz exists" test -f "$rr_src/relay/gpb-relay.tar.gz" || release_rehearse_failed
+
+    trap - INT TERM HUP
+    release_rehearse_cleanup
+    say "Rehearsal passed - CI will build the same thing from the same files"
+}
+
+rr_step() {
+    printf '    %-48s' "$1"
+    shift
+    printf '\n==== %s\n' "$*" >> "$rr_log"
+    if "$@" >> "$rr_log" 2>&1; then
+        printf 'ok\n'
+        return 0
+    fi
+    printf 'FAILED\n'
+    return 1
+}
+
+rr_in_src() { ( cd "$rr_src" && "$@" ); }
+
+rr_ps() { rr_in_src powershell -NoProfile -ExecutionPolicy Bypass -File "$rr_win\\gpb.ps1" "$@"; }
+
+rr_relay_package() {
+    rr_in_src powershell -NoProfile -ExecutionPolicy Bypass -File "$rr_win\\relay\\deploy.ps1" -PackageOnly
+}
+
+rr_wintun_url() {
+    rr_wv=$(sed -n 's/^ *WINTUN_VERSION: *"\([^"]*\)".*/\1/p' "$rr_src/.github/workflows/release.yml")
+    [ -n "$rr_wv" ] || { echo "WINTUN_VERSION not found in release.yml"; return 1; }
+    echo "https://www.wintun.net/builds/wintun-$rr_wv.zip"
+    curl -sfIL -o /dev/null "https://www.wintun.net/builds/wintun-$rr_wv.zip"
+}
+
+rr_wintun_copy() {
+    [ -f "$root/client/native/wintun/wintun.dll" ] || {
+        echo "client/native/wintun/wintun.dll is missing here - see client/native/wintun/README.md"
+        return 1
+    }
+    mkdir -p "$rr_src/client/native/wintun"
+    cp "$root/client/native/wintun/wintun.dll" "$rr_src/client/native/wintun/wintun.dll"
+}
+
+# Removes the worktree. With "keep", the log is left behind for reading.
+release_rehearse_cleanup() {
+    [ -n "${rr_dir:-}" ] || return 0
+    if [ -d "$rr_src" ]; then
+        git -C "$root" worktree remove --force "$rr_src" >/dev/null 2>&1 || {
+            rm -rf "$rr_src" 2>/dev/null || warn "could not remove $(cygpath -w "$rr_src") - delete it by hand."
+            git -C "$root" worktree prune
+        }
+    fi
+    if [ "${1:-}" = keep ]; then return 0; fi
+    rm -rf "$rr_dir"
+    rr_dir=
+}
+
+release_rehearse_failed() {
+    trap - INT TERM HUP
+    printf '\n' >&2
+    warn "The last lines of the log:"
+    tail -n 40 "$rr_log" | sed 's/^/      /' >&2
+    printf '\n' >&2
+    # The v0.2.6 shape: a file that exists here, was never committed, and so is not in the release.
+    rr_untracked=$(git -C "$root" status --porcelain --untracked-files=normal | sed -n 's/^?? //p')
+    if [ -n "$rr_untracked" ]; then
+        warn "Untracked here, so NOT in the release - if the failure names one of these, commit it:"
+        printf '%s\n' "$rr_untracked" | sed 's/^/      /' >&2
+        printf '\n' >&2
+    fi
+    rr_keep_log=$(cygpath -w "$rr_log")
+    release_rehearse_cleanup keep
+    die "the release build failed in rehearsal. Nothing was committed, tagged or pushed, and the version is not spent.
+    Full log: $rr_keep_log
+    Fix it, commit, and run ./gpb release $rr_ver again."
+}
+
 # ./gpb release x.y.z - everything a release needs, in the one order that works.
 #
 # Why a command and not a page of instructions: releases on this repository are IMMUTABLE, so the
@@ -923,8 +1055,9 @@ version_gt() {
 # .github/workflows/release.yml create the release, and this is that, with every precondition the
 # workflow would reject checked here first, while nothing has been pushed yet.
 #
-# Everything is checked before anything is changed, the plan is shown, and one "y" is asked for:
-# the last step is the one that cannot be taken back.
+# Everything is checked before anything is changed - including a rehearsal of the whole CI build on a
+# clean checkout (release_rehearse) - the plan is shown, and one "y" is asked for: the last step is
+# the one that cannot be taken back.
 #
 # Safe to run again after a failure part way. A push that fails leaves a release commit (and maybe a
 # local tag) behind; running the same command again recognises them and carries on from there.
@@ -1007,6 +1140,11 @@ release() {
         fi
     fi
 
+    # ------------------------------------------------------------------ rehearsal
+    # Last of the checks because it is the slow one: there is no point building for ten minutes to
+    # then be told main is behind origin.
+    release_rehearse "$rel_ver"
+
     # ------------------------------------------------------------------ the plan
     printf '\n'
     say "Release $rel_tag"
@@ -1017,6 +1155,7 @@ release() {
         git log --oneline origin/main..HEAD | sed 's/^/                           /'
     fi
     printf '\n'
+    printf '    0. (passed)          rehearsal: the CI build, installer and relay package, clean checkout\n'
     if [ "$rel_resume" = 1 ]; then
         printf '    1. (done already)    VERSION = %s, commit "release: %s"\n' "$rel_ver" "$rel_tag"
     else

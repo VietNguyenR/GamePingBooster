@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "generatedUtc": "2026-09-16T00:00:00Z",
+  "note": "Example profile. It shows the shape and is enough to start the client, but it routes nothing - generate a real one with tools/profile-builder after capturing a few VALORANT sessions. The licensed client receives the real ranges from the licence server.",
+  "games": [
+    {
+      "id": "valorant",
+      "name": "VALORANT",
+      "processNames": ["VALORANT-Win64-Shipping.exe"],
+      "lobbyAddresses": [],
+      "regions": [
+        {
+          "id": "as6507",
+          "name": "AS6507 network",
+          "source": "as6507",
+          "note": "Empty. Riot's game servers sit in AS6507; fill this in from captured sessions, not from the whole AS.",
+          "cidrs": [],
+          "landmarks": []
+        }
+      ]
+    }
+  ],
+  "relays": []
+}
