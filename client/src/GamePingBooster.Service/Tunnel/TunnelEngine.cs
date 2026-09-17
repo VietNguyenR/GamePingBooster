@@ -5,6 +5,7 @@ using System.Net.Sockets;
 using System.Text.Json;
 using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Profiles;
+using GamePingBooster.Service.Discovery;
 using GamePingBooster.Service.Native;
 using GamePingBooster.Service.Network;
 using System.Security.Cryptography;
@@ -33,6 +34,13 @@ internal sealed class TunnelEngine : IAsyncDisposable
     private TunnelClient? _tunnel;
     private RouteManager? _routes;
     private GameProcessWatcher? _watcher;
+
+    // Servers the running game uses that the profile lacks, found from ETW while the tunnel carries
+    // none of the game's UDP and sent to the licence server - see GameDestinationRecorder and
+    // DiscoveryUploader. Null when config.json switches it off. Follows the watcher, so it only
+    // watches while connected.
+    private readonly GameDestinationRecorder? _discovery;
+    private readonly DiscoveryUploader? _discoveryUploader;
     private CancellationTokenSource? _cts;
     private Task? _supervisor;
     private Task? _gamePingProbe;
@@ -89,6 +97,15 @@ internal sealed class TunnelEngine : IAsyncDisposable
         _device = DeviceIdentity.LoadOrCreate(log);
         _token = TokenStore.Load(log);
         QualityOutbox.Enabled = config.ShareQuality;
+        if (config.DiscoverDestinations != false)
+        {
+            // Sent under the connection-quality switch, and only by a licensed, signed-in installation:
+            // the report is authenticated with this device's licence token and key.
+            _discoveryUploader = new DiscoveryUploader(
+                () => _config.LicenceUrl, () => _token, _device.Key, () => _config.ShareQuality, log);
+            _discovery = new GameDestinationRecorder(
+                () => _tunnel?.Destinations.UdpPackets, _discoveryUploader.WhyNotSend, _discoveryUploader.Report, log);
+        }
         if (_token is not null)
         {
             log($"Licence token loaded, expires {TokenStore.ExpiryOf(_token):u}.");
@@ -2251,6 +2268,10 @@ internal sealed class TunnelEngine : IAsyncDisposable
                     : ProfileMerge.FindByProcess(_profile?.Games ?? [], processName);
                 if (detected is null) return;
 
+                // Before anything below can return early: discovery does not depend on routes or
+                // on the tunnel being up, and it ignores a game it is already recording.
+                _discovery?.GameStarted(detected);
+
                 if (!ReferenceEquals(detected, _game))
                 {
                     SwitchGame(detected);
@@ -2280,6 +2301,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             else
             {
                 _log("The game exited - removing routes, other traffic returns to the normal path.");
+                _discovery?.GameStopped();
                 if (_adapter is not null) _routes?.RemoveGameRoutes(_adapter.InterfaceIndex);
                 // Do not claim Connected while a reconnect is still in progress.
                 if (_tunnel is not null)
@@ -2464,6 +2486,8 @@ internal sealed class TunnelEngine : IAsyncDisposable
             _watcher.Dispose();
             _watcher = null;
         }
+        // Nothing watches the game after this, so nothing would tell discovery it exited.
+        _discovery?.GameStopped();
         phases?.Mark("watcher");
 
         try
@@ -2988,6 +3012,8 @@ internal sealed class TunnelEngine : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await TeardownAsync().ConfigureAwait(false);
+        _discovery?.Dispose();
+        _discoveryUploader?.Dispose();
         _device.Dispose();
     }
 }

@@ -93,8 +93,29 @@ public sealed class ServiceConfig
     /// most need a fix are the ones who never report. What makes that acceptable is what the records
     /// hold - no addresses of any kind, see QualityFile - and that the switch is in Settings.
     /// Off, nothing is queued and the queue is emptied; the local record is kept either way.
+    ///
+    /// The same switch covers server discovery (DiscoverDestinations), which DOES send an address: a game
+    /// server's, never the player's. Disclosed beside connection quality in the privacy policy.
     /// </summary>
     [JsonPropertyName("shareQuality")] public bool ShareQuality { get; set; } = true;
+
+    /// <summary>
+    /// Whether the service looks for game servers the profile lacks, from ETW, while a game runs and the
+    /// tunnel carries none of its UDP - see GameDestinationRecorder - and sends what it finds to the
+    /// licence server (DiscoveryUploader). Sending also needs <see cref="ShareQuality"/>, a licence server
+    /// and a token; without them it does not even listen. Nothing it finds is written to disk or logged.
+    ///
+    /// ON unless switched off. A switch in this file and not in Settings: it is not a preference a
+    /// player has a reason to hold, it is the way to take a new kernel-event consumer out of the
+    /// picture if a machine ever shows a problem with it.
+    ///
+    /// Nullable and never written while unset, for the reason EntrySwitching gives: the service saves
+    /// this file on its own, and a default written into every config.json could no longer be told
+    /// apart from somebody choosing it - a later release could not change the default for anyone.
+    /// </summary>
+    [JsonPropertyName("discoverDestinations")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? DiscoverDestinations { get; set; }
 
     /// <summary>
     /// Automatic moves between the ways into the relay in use - the relay itself and the entries in front

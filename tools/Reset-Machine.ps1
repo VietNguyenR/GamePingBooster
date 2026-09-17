@@ -264,6 +264,14 @@ foreach ($adapter in $adapters) {
     Warn "adapter   : $($adapter.Name) [$($adapter.InterfaceDescription)] ifIndex $($adapter.ifIndex), $($adapter.Status)"
 }
 
+# ETW sessions outlive the process that started them: a service killed mid-game leaves destination
+# discovery's session running until reboot. gpb-etwwatch's is listed for the same reason.
+$etwSessions = @('GamePingBooster-Discovery', 'GamePingBooster-EtwWatch') | Where-Object {
+    & logman.exe query $_ -ets *> $null
+    $LASTEXITCODE -eq 0
+}
+foreach ($session in $etwSessions) { Warn "ETW       : session $session" }
+
 # pnputil has no machine-readable output on Windows 10 and its labels are localised, so this
 # matches the English ones. On a non-English Windows the driver simply will not be found, which
 # shows up as "the driver is still in the driver store" rather than as a wrong answer.
@@ -465,6 +473,13 @@ foreach ($stray in $strays) {
     Warn "left alone: $($stray.DestinationPrefix) via $($stray.NextHop) on ifIndex $($stray.ifIndex)"
     Note "  If that is one of ours, remove it with:"
     Note "  netsh interface ipv4 delete route $($stray.DestinationPrefix) interface=$($stray.ifIndex)"
+}
+
+if ($etwSessions) {
+    Say "Stopping ETW sessions"
+    foreach ($session in $etwSessions) {
+        Step "logman stop $session -ets" { & logman.exe stop $session -ets | Out-Null }
+    }
 }
 
 # ---------------------------------------------------------------- adapter and driver

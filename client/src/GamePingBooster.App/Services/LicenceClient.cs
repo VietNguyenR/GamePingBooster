@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
 using GamePingBooster.Core.Ipc;
+using GamePingBooster.Core.Net;
 using GamePingBooster.Core.Protocol;
 
 namespace GamePingBooster.App.Services;

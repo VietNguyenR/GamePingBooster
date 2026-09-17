@@ -12,7 +12,8 @@ public static class QualityNotice
 {
     public const string Text =
         "The app now sends connection quality after each match - ping, lag spikes and which part of the " +
-        "path they came from, no IP addresses - so lag can be fixed at its source. Turn it off in Settings.";
+        "path they came from, none of your addresses - and the address of any game server we do not cover yet, " +
+        "so lag can be fixed at its source. Turn it off in Settings.";
 
     private static string MarkerPath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),

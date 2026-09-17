@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Reflection;
 using System.Text.Json.Serialization;
+using GamePingBooster.Core.Net;
 
 namespace GamePingBooster.App.Services;
 

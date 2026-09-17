@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>gpb-etwwatch</AssemblyName>
+    <RootNamespace>GamePingBooster.EtwWatch</RootNamespace>
+
+    <!-- A developer tool, never shipped. It compiles the service's own ETW code (below), which the
+         service publishes with Native AOT, so the analyzer runs here too. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+    <EnableAotAnalyzer>true</EnableAotAnalyzer>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\GamePingBooster.Core\GamePingBooster.Core.csproj" />
+  </ItemGroup>
+
+  <!-- The ETW code is the service's, compiled in here rather than copied, so this tool keeps
+       measuring exactly what players' machines run. Only the parts with no service dependencies:
+       GameDestinationRecorder stays out. -->
+  <ItemGroup>
+    <Compile Include="..\GamePingBooster.Service\Discovery\EtwNative.cs" Link="Discovery\EtwNative.cs" />
+    <Compile Include="..\GamePingBooster.Service\Discovery\KernelNetworkTrace.cs" Link="Discovery\KernelNetworkTrace.cs" />
+    <Compile Include="..\GamePingBooster.Service\Discovery\FlowTable.cs" Link="Discovery\FlowTable.cs" />
+    <Compile Include="..\GamePingBooster.Service\Discovery\SelfTest.cs" Link="Discovery\SelfTest.cs" />
+    <Compile Include="..\GamePingBooster.Service\Discovery\Destinations.cs" Link="Discovery\Destinations.cs" />
+  </ItemGroup>
+
+</Project>

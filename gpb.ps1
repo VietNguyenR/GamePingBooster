@@ -14,6 +14,8 @@
         .\gpb.ps1 capture [game] [udp|tcp|all]  watch for the game and collect server addresses
                                       (udp); tcp/all also report which lobby/login connections
                                       never answered, into tcp-sessions.txt - never the profile
+        .\gpb.ps1 etw [game]          PROTOTYPE, run next to capture: the same discovery through ETW,
+                                      no Wireshark - reports what it found and what it cost
         .\gpb.ps1 profile [game]      rebuild that game's profile from what was captured
         .\gpb.ps1 push-profile <game> [remove]  seal that local profile into the running service,
                                       to test a game the licence server does not serve yet
@@ -530,6 +532,51 @@ switch ($Verb.ToLowerInvariant()) {
 
         Push-Location $builder
         try { & (Join-Path $builder 'Capture-GameTraffic.ps1') @captureArgs } finally { Pop-Location }
+    }
+
+    'etw' {
+        # ./gpb etw [game]: server discovery from ETW instead of a packet capture. A prototype, run
+        # next to `./gpb capture` in the same match so the two can be compared - see the header of
+        # client\src\GamePingBooster.EtwWatch\Program.cs. It writes only its own report file, never
+        # the observed or landmark lists.
+        $game = Get-GpbGame $root $Arg1
+
+        $principal = New-Object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())
+        if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw "ETW network events need Administrator rights. Run ./gpb etw from an Administrator terminal."
+        }
+
+        $project = Join-Path $client 'src\GamePingBooster.EtwWatch\GamePingBooster.EtwWatch.csproj'
+        Say "Building gpb-etwwatch"
+        & dotnet build $project --nologo -v quiet
+        if ($LASTEXITCODE -ne 0) { throw "Build failed." }
+
+        # The exe, not `dotnet run`: Ctrl+C has to reach the tool, which reports on the way out,
+        # rather than the dotnet host in front of it.
+        $exe = Join-Path $client 'src\GamePingBooster.EtwWatch\bin\Debug\net9.0-windows\gpb-etwwatch.exe'
+
+        # Named observed-etw-* so the .gitignore glob that keeps capture output out of the
+        # repository covers it too: it is the same kind of data.
+        $report = Join-Path $builder "observed-etw-$($game.Id).txt"
+
+        # Every path passed, as for capture - a default would be PUBG's.
+        $probePort = 0
+        if ($null -ne $game.ProbePort) { $probePort = [int]$game.ProbePort }
+        $etwArgs = @(
+            '--process', $game.WatchProcess,
+            '--game-id', $game.Id,
+            '--game-name', $game.Name,
+            '--probe-port', $probePort,
+            '--observed', $game.ObservedPath,
+            '--profile', $game.ProfilePath,
+            '--report', $report
+        )
+        if ($game.LandmarkPath) { $etwArgs += @('--landmarks', $game.LandmarkPath) }
+
+        Say "Watching $($game.Name) through ETW - $($game.WatchProcess).exe"
+        Write-Host "    report -> $report" -ForegroundColor DarkGray
+        & $exe @etwArgs
+        if ($LASTEXITCODE -ne 0) { throw "gpb-etwwatch exited with $LASTEXITCODE." }
     }
 
     'profile' {

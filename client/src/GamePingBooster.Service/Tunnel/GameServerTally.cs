@@ -52,6 +52,15 @@ internal sealed class GameServerTally
     private readonly object _gate = new();
     private long _untrackedPackets;
     private long _unparsedPackets;
+    private long _udpPackets;
+
+    /// <summary>
+    /// UDP packets the game has sent into this tunnel, since the tunnel was created. Never cleared,
+    /// unlike everything else here, so a reader can take differences: destination discovery reads it
+    /// to tell a match on the tunnel from one that is not. Only game routes carry UDP into the
+    /// adapter - the lobby is TCP - so this counts the match and nothing else.
+    /// </summary>
+    public long UdpPackets => Interlocked.Read(ref _udpPackets);
 
     /// <summary>
     /// Notes one outbound inner packet. Called from the uplink thread for every packet, so it
@@ -77,6 +86,7 @@ internal sealed class GameServerTally
         if (headerLen < 20 || packet.Length < headerLen) return;
 
         var protocol = packet[9];
+        if (protocol == 17) Interlocked.Increment(ref _udpPackets);
         var destination = BinaryPrimitives.ReadUInt32BigEndian(packet.Slice(16, 4));
 
         // Port lives in the transport header, which is only there for UDP and TCP, and only if

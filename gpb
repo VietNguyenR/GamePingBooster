@@ -33,6 +33,8 @@
 #                                the game comes from tools/profile-builder/games.json, which
 #                                says which process to watch and which files to write
 #                                also show which lobby/login connections never answered
+#   ./gpb etw [game]             PROTOTYPE: capture's discovery via ETW    (Windows)
+#                                run next to capture, needs Administrator
 #   ./gpb profile [game]         rebuild that game's profile              (Windows)
 #   ./gpb push-profile <game> [remove]  seal that local profile into the     (Windows)
 #                                running service, to test a game the licence server lacks
@@ -1262,7 +1264,7 @@ case "$verb" in
 
     release) release "$@" ;;
 
-    dev | capture | profile | push-profile | check | lag | logs | status | stop | publish | diag | installer | reset | version)
+    dev | capture | etw | profile | push-profile | check | lag | logs | status | stop | publish | diag | installer | reset | version)
         delegate "$verb" "$@"
         ;;
 

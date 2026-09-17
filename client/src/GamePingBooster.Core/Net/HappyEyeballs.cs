@@ -1,7 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 
-namespace GamePingBooster.App.Services;
+namespace GamePingBooster.Core.Net;
 
 /// <summary>
 /// Connects to a host by racing its addresses, the way every browser does (RFC 8305, "Happy
