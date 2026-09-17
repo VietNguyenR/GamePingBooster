@@ -127,14 +127,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             if (!Set(ref _update, value)) return;
             Raise(nameof(HasUpdate));
-            Raise(nameof(UpdateMenuText));
+            Raise(nameof(UpdateFooterText));
         }
     }
 
     public bool HasUpdate => Update is not null;
 
-    /// <summary>The last line of the menu, and only there when a newer release exists.</summary>
-    public string UpdateMenuText => Update is null ? "" : $"Update to latest version (v{Update.Version})";
+    /// <summary>The footer line, and only there when a newer release exists.</summary>
+    public string UpdateFooterText => Update is null ? "" : $"New version v{Update.Version} available";
 
     /// <summary>
     /// The last thing the renewer had to say, if anything.

@@ -169,6 +169,14 @@ Filename: "{sys}\netsh.exe"; \
 Filename: "{app}\{#UiExe}"; Description: "Start {#AppName}"; \
   Flags: nowait postinstall skipifsilent runasoriginaluser
 
+; The in-app update runs setup with /SILENT /RELAUNCH=1, and the entry above is skipped in silent
+; mode - so without this the app would close for the update and never come back. Keyed on its own
+; switch rather than on silent mode, so a silent install somebody scripts by hand still starts
+; nothing. runasoriginaluser works because the app starts setup unelevated and setup raises the
+; UAC prompt itself; see UpdateInstaller.
+Filename: "{app}\{#UiExe}"; \
+  Flags: nowait runasoriginaluser; Check: ShouldRelaunch
+
 [UninstallRun]
 ; Exact reverse of the install, and every step tolerates already being done - an uninstall that
 ; fails leaves the user stuck with software they have asked to remove.
@@ -188,6 +196,12 @@ Filename: "{sys}\sc.exe"; Parameters: "delete {#ServiceName}"; \
   Flags: runhidden waituntilterminated; RunOnceId: "DeleteService"
 
 [Code]
+// True when the in-app updater started this setup and wants the app back afterwards.
+function ShouldRelaunch(): Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+end;
+
 
 function ServiceStopped(): Boolean;
 var

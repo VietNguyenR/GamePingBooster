@@ -62,10 +62,20 @@
       <Setter Property="Background" Value="#111111" />
       <Setter Property="BorderBrush" Value="#242424" />
     </Style>
-    <!-- The update line: the one menu item that should catch the eye. -->
-    <Style Selector="MenuItem.update">
-      <Setter Property="Foreground" Value="#60A5FA" />
-      <Setter Property="FontWeight" Value="SemiBold" />
+    <!-- The update line under the licence line: small, but the one blue thing at the bottom. -->
+    <Style Selector="Button.update">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="HorizontalAlignment" Value="Center" />
+      <Setter Property="Cursor" Value="Hand" />
+    </Style>
+    <Style Selector="Button.update:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+    <Style Selector="Button.update:pointerover TextBlock">
+      <Setter Property="Foreground" Value="#93C5FD" />
     </Style>
   </views:SurfaceWindow.Styles>
 
@@ -103,10 +113,6 @@
             <MenuItem Header="Report lag" Click="OnReportLagClick" />
             <MenuItem Header="Open logs folder" Click="OnLogsClick" />
             <MenuItem Header="About" Click="OnAboutClick" />
-            <!-- Only there when UpdateChecker has found a newer release. -->
-            <Separator Background="#242424" IsVisible="{Binding HasUpdate}" />
-            <MenuItem Classes="update" Header="{Binding UpdateMenuText}" Click="OnUpdateClick"
-                      IsVisible="{Binding HasUpdate}" />
           </MenuFlyout>
         </Button.Flyout>
       </Button>
@@ -180,7 +186,7 @@
     </StackPanel>
 
     <!-- Primary action -->
-    <Grid Grid.Row="3" ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto">
+    <Grid Grid.Row="3" ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto,Auto">
 
       <!-- First run: there is no relay yet, so say so instead of offering a button that
            could only fail. -->
@@ -236,7 +242,15 @@
                  Foreground="{Binding LicenceBrush}" FontSize="11"
                  Margin="0,10,0,0" />
 
-
+      <!-- Only there when UpdateChecker has found a newer release. Opens UpdateWindow, which asks
+           before it disconnects or installs anything. -->
+      <Button Grid.Row="4" Grid.ColumnSpan="2" Classes="update" Margin="0,10,0,0"
+              Click="OnUpdateClick" IsVisible="{Binding HasUpdate}">
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <TextBlock Text="{Binding UpdateFooterText}" Foreground="#ababab" FontSize="11" />
+          <TextBlock Text="Update →" Foreground="#60A5FA" FontSize="11" FontWeight="SemiBold" />
+        </StackPanel>
+      </Button>
     </Grid>
   </Grid>
   </Grid>

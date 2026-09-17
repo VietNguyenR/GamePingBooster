@@ -170,16 +170,23 @@ public partial class MainWindow : SurfaceWindow
     }
 
     /// <summary>
-    /// Opens the release page of the newer version. The URL comes from UpdateChecker, which only
-    /// ever hands over a page of this project's GitHub releases.
+    /// The footer's update line. Installs from inside the app when the release carries a setup .exe
+    /// with a digest; otherwise opens its release page, which is what every release before this
+    /// feature offered.
     /// </summary>
-    private void OnUpdateClick(object? sender, RoutedEventArgs e)
+    private async void OnUpdateClick(object? sender, RoutedEventArgs e)
     {
-        if (DataContext is not MainViewModel { Update: { } update }) return;
+        if (DataContext is not MainViewModel { Update: { } update } vm) return;
 
-        // Through BrowserLauncher, so the same broken default-browser setting that once blocked
-        // sign-in cannot also block somebody from reaching the update that might fix it.
-        Services.BrowserLauncher.TryOpen(update.Url);
+        if (!update.CanInstall)
+        {
+            // Through BrowserLauncher, so the same broken default-browser setting that once blocked
+            // sign-in cannot also block somebody from reaching the update that might fix it.
+            BrowserLauncher.TryOpen(update.Url);
+            return;
+        }
+
+        await new UpdateWindow(update, vm).ShowDialog(this);
     }
 
     // ------------------------------------------------------------ minimise to tray

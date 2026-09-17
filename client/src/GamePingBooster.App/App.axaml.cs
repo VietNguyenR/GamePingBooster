@@ -127,7 +127,7 @@ public partial class App : Application
             _refresher.Start();
             _quality.Start();
 
-            // Checks GitHub for a newer release now and then, and puts a line in the menu when
+            // Checks GitHub for a newer release now and then, and puts a line in the footer when
             // there is one. Marshalled for the same reason as the refresher's messages.
             _updates = new UpdateChecker(update => Dispatcher.UIThread.Post(() => vm.Update = update));
             _updates.Start();

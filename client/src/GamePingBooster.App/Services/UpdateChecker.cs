@@ -9,8 +9,8 @@ namespace GamePingBooster.App.Services;
 
 /// <summary>
 /// Looks for a newer release on GitHub now and then, and says so. It never downloads or installs
-/// anything: finding one adds a line to the menu, and the person clicks through to the releases
-/// page if they want it.
+/// anything itself: finding one puts a line in the main window's footer, and UpdateInstaller does
+/// the rest only when the person presses it.
 ///
 /// Why GitHub's API rather than something on the licence server: the release page IS where the
 /// installer lives - ./gpb release publishes it there - so asking anything else would be a second
@@ -116,7 +116,39 @@ public sealed class UpdateChecker : IAsyncDisposable
         var latest = (release.TagName ?? "").Trim().TrimStart('v', 'V');
         if (!IsNewer(latest, currentVersion!)) return null;
 
-        return new AvailableUpdate(latest, SafeReleaseUrl(release.HtmlUrl));
+        var installer = FindInstaller(release, latest);
+        return new AvailableUpdate(latest, SafeReleaseUrl(release.HtmlUrl),
+            installer?.Url, installer?.Sha256, installer?.Size);
+    }
+
+    /// <summary>
+    /// The setup .exe of this release and its SHA-256, or null when either is missing or not what
+    /// it should be - in which case the update falls back to opening the release page.
+    ///
+    /// Everything is checked against what ./gpb release publishes rather than trusted: the name is
+    /// exactly GamePingBooster-Setup-{version}.exe, the URL is a download from THIS repository's
+    /// tag, and the digest is GitHub's own sha256 of the uploaded file. The file is run elevated,
+    /// so a response that does not match all three is not something to download.
+    /// </summary>
+    internal static (string Url, string Sha256, long Size)? FindInstaller(GitHubRelease release, string version)
+    {
+        var name = $"GamePingBooster-Setup-{version}.exe";
+        var urlPrefix = $"https://github.com/{Repository}/releases/download/v{version}/";
+
+        var asset = release.Assets?.FirstOrDefault(a => string.Equals(a.Name, name, StringComparison.Ordinal));
+        if (asset?.BrowserDownloadUrl is not { } url ||
+            !url.Equals(urlPrefix + name, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        const string scheme = "sha256:";
+        if (asset.Digest is not { } digest || !digest.StartsWith(scheme, StringComparison.Ordinal)) return null;
+        var hex = digest[scheme.Length..];
+        if (hex.Length != 64 || !hex.All(Uri.IsHexDigit)) return null;
+
+        if (asset.Size <= 0) return null;
+        return (url, hex.ToLowerInvariant(), asset.Size);
     }
 
     /// <summary>
@@ -198,8 +230,20 @@ public sealed class UpdateChecker : IAsyncDisposable
     }
 }
 
-/// <summary>A newer release: its version without the leading "v", and the page to open.</summary>
-public sealed record AvailableUpdate(string Version, string Url);
+/// <summary>
+/// A newer release: its version without the leading "v", the page to open, and - when the release
+/// carries a setup .exe with a digest - where to download it and what it must hash to.
+/// </summary>
+public sealed record AvailableUpdate(
+    string Version,
+    string Url,
+    string? InstallerUrl = null,
+    string? InstallerSha256 = null,
+    long? InstallerSize = null)
+{
+    /// <summary>Whether it can be installed from inside the app, or only reached on its page.</summary>
+    public bool CanInstall => InstallerUrl is not null && InstallerSha256 is not null;
+}
 
 public sealed class GitHubRelease
 {
@@ -207,6 +251,17 @@ public sealed class GitHubRelease
     [JsonPropertyName("html_url")] public string? HtmlUrl { get; set; }
     [JsonPropertyName("draft")] public bool Draft { get; set; }
     [JsonPropertyName("prerelease")] public bool Prerelease { get; set; }
+    [JsonPropertyName("assets")] public List<GitHubAsset>? Assets { get; set; }
+}
+
+public sealed class GitHubAsset
+{
+    [JsonPropertyName("name")] public string? Name { get; set; }
+    [JsonPropertyName("browser_download_url")] public string? BrowserDownloadUrl { get; set; }
+    [JsonPropertyName("size")] public long Size { get; set; }
+
+    /// <summary>"sha256:&lt;hex&gt;", computed by GitHub when the file was uploaded.</summary>
+    [JsonPropertyName("digest")] public string? Digest { get; set; }
 }
 
 /// <summary>Source-generated, because reflection-based JSON is what Native AOT trims away.</summary>
