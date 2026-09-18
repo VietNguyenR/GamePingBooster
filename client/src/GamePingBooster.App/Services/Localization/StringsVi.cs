@@ -179,6 +179,7 @@ internal static class StringsVi
         ["svc.connectedWaiting"] = "Đã kết nối tới {0} - đang chờ {1} khởi động",
         ["svc.connectedWaitingAny"] = "Đã kết nối tới {0} - đang chờ bạn mở một game được hỗ trợ",
         ["svc.movedRelay"] = "Đã kết nối tới {0} - chuyển khỏi {1} để đi đường tốt hơn",
+        ["svc.rescanMoved"] = "Đã kết nối tới {0} - chuyển từ {1} giữa hai trận, nhanh hơn {2} ms",
         ["svc.reconnecting"] = "Đang kết nối lại qua {0} (lần {1}) - traffic đang đi đường mạng thường",
         ["svc.reconnected"] = "Đã kết nối lại tới {0}",
         ["svc.accelerating"] = "Đang tăng tốc {0} qua {1}",

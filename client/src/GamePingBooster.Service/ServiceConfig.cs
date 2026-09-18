@@ -146,6 +146,16 @@ public sealed class ServiceConfig
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? EntrySwitching { get; set; }
 
+    /// <summary>
+    /// Re-measuring every relay and entry in the gap after a match, and moving to a clearly faster one before
+    /// the next - see TunnelEngine.RescanBetweenMatchesAsync. Only on automatic relay choice: a relay picked
+    /// from the list is never left. Unset means on; false is the way to stop it on one machine. Never written
+    /// while unset, for the reason EntrySwitching gives.
+    /// </summary>
+    [JsonPropertyName("rescanBetweenMatches")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? RescanBetweenMatches { get; set; }
+
     public static string DefaultDirectory =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "GamePingBooster");
 

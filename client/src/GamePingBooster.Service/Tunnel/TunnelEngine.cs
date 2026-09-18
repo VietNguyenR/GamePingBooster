@@ -25,7 +25,7 @@ namespace GamePingBooster.Service.Tunnel;
 ///   4. Assign IP and MTU to the virtual adapter, start both pump threads
 ///   5. Only install the game IP routes once the game is actually running
 /// </summary>
-internal sealed class TunnelEngine : IAsyncDisposable
+internal sealed partial class TunnelEngine : IAsyncDisposable
 {
     private readonly ServiceConfig _config;
     private readonly Action<string> _log;
@@ -542,8 +542,9 @@ internal sealed class TunnelEngine : IAsyncDisposable
             SetState(TunnelState.Connecting, new StatusText("svc.measuring", "Measuring relays..."));
             ResetThroughputBaseline();
             _choiceAtConnect = RelayChoice;
-            (_relay, _tunnel) = await SelectRelayAsync(string.IsNullOrWhiteSpace(relayId) ? RelayChoice : relayId, psk, token)
-                .ConfigureAwait(false);
+            var preferred = string.IsNullOrWhiteSpace(relayId) ? RelayChoice : relayId;
+            _chosenByHandAtConnect = preferred;
+            (_relay, _tunnel) = await SelectRelayAsync(preferred, psk, token).ConfigureAwait(false);
             var endpoint = ParseEndpoint(_relay.Endpoint);
             var session = _tunnel.Session;
             phases.Mark("relays");
@@ -646,6 +647,12 @@ internal sealed class TunnelEngine : IAsyncDisposable
 
     /// <summary>The choice this tunnel was connected with, so a change since can be told from a relay that did not answer.</summary>
     private volatile string? _choiceAtConnect;
+
+    /// <summary>
+    /// The relay this tunnel was connected to by hand - the app's choice, or one named in the connect command -
+    /// or null when it was chosen automatically. Nothing ever moves such a tunnel to another relay.
+    /// </summary>
+    private volatile string? _chosenByHandAtConnect;
 
     /// <summary>Each relay's last ICMP round trip, by relay id - null when it did not answer. Read and written under its own lock.</summary>
     private readonly Dictionary<string, double?> _relayPings = new(StringComparer.OrdinalIgnoreCase);
@@ -1489,6 +1496,8 @@ internal sealed class TunnelEngine : IAsyncDisposable
         // Nor does a move asked for, or made, on the last connection carry over to this one.
         _pendingDoorMove = null;
         _movedFromDoor = null;
+        _matchGap = new GamePingBooster.Core.Quality.MatchGap();
+        _moveFollow = null;
 
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
         try
@@ -1523,6 +1532,9 @@ internal sealed class TunnelEngine : IAsyncDisposable
                     // reconnect: this loop is the only thing that ever replaces or moves the tunnel.
                     if (MovedBackAfterSilence(tunnel, silence)) continue;
                     if (Interlocked.Exchange(ref _pendingDoorMove, null) is { } door) MoveToDoor(tunnel, door, rollback: false);
+
+                    // Awaited here, for the same reason: a move to another relay is a tunnel replaced.
+                    await WatchForMatchGapAsync(tunnel, ct).ConfigureAwait(false);
                     continue;
                 }
                 _pendingDoorMove = null;
@@ -1534,7 +1546,8 @@ internal sealed class TunnelEngine : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
-            // Normal shutdown.
+            // Normal shutdown. A move still being followed is written as far as it got.
+            FollowRelayMove("disconnected");
         }
     }
 
@@ -2409,6 +2422,8 @@ internal sealed class TunnelEngine : IAsyncDisposable
     /// Note what a reconnect to a DIFFERENT relay does to a lobby connection regardless: it leaves
     /// through a new address, which the lobby server sees as a stranger, and the game has to
     /// connect again. Nothing on this side can prevent that; it is why failover is a last resort.
+    /// The move between matches (RescanBetweenMatchesAsync) accepts it: the owner has disconnected
+    /// and reconnected in the PUBG lobby daily and the lobby comes back on its own.
     /// </summary>
     private void InstallLobbyRoutes()
     {

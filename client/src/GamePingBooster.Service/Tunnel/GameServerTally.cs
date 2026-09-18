@@ -62,6 +62,19 @@ internal sealed class GameServerTally
     /// </summary>
     public long UdpPackets => Interlocked.Read(ref _udpPackets);
 
+    private long _lastUdpAt;
+    private long _firstUdpAt;
+
+    /// <summary>When the game first sent UDP into this tunnel, as a Stopwatch timestamp, or 0 before it has.</summary>
+    public long FirstUdpAt => Interlocked.Read(ref _firstUdpAt);
+
+    /// <summary>
+    /// When the game last sent UDP into this tunnel, as a Stopwatch timestamp, or 0 before it ever has. The
+    /// move between matches reads it for how long the game has been silent to the second, which a counter
+    /// read every five seconds cannot say.
+    /// </summary>
+    public long LastUdpAt => Interlocked.Read(ref _lastUdpAt);
+
     /// <summary>
     /// Notes one outbound inner packet. Called from the uplink thread for every packet, so it
     /// stays cheap: a fixed-size header read and a dictionary lookup.
@@ -86,7 +99,13 @@ internal sealed class GameServerTally
         if (headerLen < 20 || packet.Length < headerLen) return;
 
         var protocol = packet[9];
-        if (protocol == 17) Interlocked.Increment(ref _udpPackets);
+        if (protocol == 17)
+        {
+            Interlocked.Increment(ref _udpPackets);
+            var sentAt = System.Diagnostics.Stopwatch.GetTimestamp();
+            Interlocked.Exchange(ref _lastUdpAt, sentAt);
+            if (Interlocked.Read(ref _firstUdpAt) == 0) Interlocked.CompareExchange(ref _firstUdpAt, sentAt, 0);
+        }
         var destination = BinaryPrimitives.ReadUInt32BigEndian(packet.Slice(16, 4));
 
         // Port lives in the transport header, which is only there for UDP and TCP, and only if

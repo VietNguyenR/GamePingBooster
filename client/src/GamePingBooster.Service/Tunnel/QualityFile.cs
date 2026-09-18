@@ -14,6 +14,23 @@ internal readonly record struct QualityMeta(
     string? LinkType);
 
 /// <summary>
+/// A move to another relay between matches and how the next match went, for <see cref="QualityFile.WriteRelayMove"/>.
+/// <paramref name="FollowEnded"/> says why following stopped: "held", "no-match" (none within ten minutes),
+/// "tunnel-replaced" or "disconnected".
+/// </summary>
+internal sealed record RelayMoveRecord(
+    DateTimeOffset AtUtc,
+    string From,
+    string To,
+    double MeasureSeconds,
+    double SilenceSeconds,
+    DoorStats FromStats,
+    DoorStats ToStats,
+    double? NextMatchAfterSeconds,
+    bool? StillSendingAfter90s,
+    string FollowEnded);
+
+/// <summary>
 /// The spike recorder's record: one JSON object per line, one file per day, under
 /// %ProgramData%\GamePingBooster\quality.
 ///
@@ -219,6 +236,49 @@ internal sealed class QualityFile(Action<string> log)
         w.WriteStartObject("after");
         DoorFigures(w, "from", afterFrom);
         DoorFigures(w, "to", afterTo);
+        w.WriteEndObject();
+
+        w.WriteEndObject();
+    });
+
+    /// <summary>
+    /// A move to another relay made between matches, and what the next match did after it - see
+    /// TunnelEngine.RescanBetweenMatchesAsync. Written as a <c>"switch"</c> with <c>"reason":"rescan"</c> so it
+    /// lands beside entry switching's moves on the admin page with no change there. <c>before</c> is each path's
+    /// median to the region's landmark when the choice was made; there is no <c>after</c> for the path left,
+    /// whose session ended with the move. <c>nextMatch</c> is the question the move is judged by: did the
+    /// game start sending on the new relay, how soon, and was it still sending 90 s later - a match that
+    /// failed to join stops.
+    /// </summary>
+    public void WriteRelayMove(RelayMoveRecord move, QualityMeta meta) => Append((w, id) =>
+    {
+        w.WriteStartObject();
+        w.WriteString("id", id);
+        w.WriteString("type", "switch");
+        w.WriteNumber("schema", Schema);
+        w.WriteString("utc", move.AtUtc);
+        WriteMeta(w, meta);
+
+        w.WriteString("mode", "on");
+        w.WriteBoolean("requested", true);
+        w.WriteBoolean("moved", true);
+        w.WriteString("from", move.From);
+        w.WriteString("to", move.To);
+        w.WriteString("reason", "rescan");
+        w.WriteNumber("windowSeconds", Round(move.MeasureSeconds));
+        w.WriteNumber("worseShare", 0);
+        w.WriteNumber("silenceSeconds", Round(move.SilenceSeconds));
+
+        w.WriteStartObject("before");
+        DoorFigures(w, "from", move.FromStats);
+        DoorFigures(w, "to", move.ToStats);
+        w.WriteEndObject();
+
+        w.WriteStartObject("nextMatch");
+        Number(w, "startedAfterSeconds", move.NextMatchAfterSeconds, 1);
+        if (move.StillSendingAfter90s is { } held) w.WriteBoolean("stillSendingAfter90s", held);
+        else w.WriteNull("stillSendingAfter90s");
+        w.WriteString("followEnded", move.FollowEnded);
         w.WriteEndObject();
 
         w.WriteEndObject();

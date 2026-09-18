@@ -79,6 +79,15 @@ internal static class Program
         AMoveToAFasterWayDoesNotBounceBack();
 
         Console.WriteLine();
+        Console.WriteLine("Between matches:");
+        AMatchEndingOpensOneGap();
+        AResultScreenTrickleIsNotAGap();
+        ALobbyBeforeAnyMatchIsNotAGap();
+        AMatchKeepsItsGapClosed();
+        TheGapIsTimedFromTheLastPacket();
+        RescanComparesMediansByAClearMargin();
+
+        Console.WriteLine();
         if (_failures == 0)
         {
             Console.WriteLine("All spike detector checks passed.");
@@ -672,6 +681,109 @@ internal static class Program
         w.Others = ["sg-2"];
         w.Run(DoorSwitchPolicy.CooldownTicks * 2, 44, 56);
         Check("a move to a way that stays faster is not undone", w.Decisions.Count == 1, $"{w.Decisions.Count} decision(s)");
+    }
+
+    // ------------------------------------------------------------------ between matches
+
+    /// <summary>The supervisor's five-second readings of the tunnel's game UDP count, at a given rate.</summary>
+    private sealed class Readings
+    {
+        private long _now = 1_000_000;
+        private long _packets;
+        public MatchGap Gap { get; } = new();
+        public List<long> FiredAtMs { get; } = [];
+        public long LastPacketAtMs { get; private set; } = -1;
+
+        public void Run(int seconds, double packetsPerSecond)
+        {
+            for (var elapsed = 0; elapsed < seconds; elapsed += 5)
+            {
+                _now += 5000;
+                var sent = (long)(packetsPerSecond * 5);
+                _packets += sent;
+                if (sent > 0) LastPacketAtMs = _now;
+                if (Gap.Feed(_now, _packets)) FiredAtMs.Add(_now);
+            }
+        }
+    }
+
+    private static void AMatchEndingOpensOneGap()
+    {
+        // 2026-09-18 20:02:41: a match at about 25 packets a second, then the lobby for 44 s.
+        var r = new Readings();
+        r.Run(600, 25);
+        r.Run(45, 0);
+        Check("a match ending opens the gap once", r.FiredAtMs.Count == 1, $"{r.FiredAtMs.Count} time(s)");
+        if (r.FiredAtMs.Count == 1)
+        {
+            var quiet = (r.FiredAtMs[0] - r.LastPacketAtMs) / 1000;
+            Check("  ...ten seconds after the last packet", quiet == 10, $"{quiet} s");
+        }
+        r.Run(3600, 0);
+        Check("  ...and an hour in the lobby after it does not open it again", r.FiredAtMs.Count == 1,
+            $"{r.FiredAtMs.Count} time(s)");
+    }
+
+    private static void AResultScreenTrickleIsNotAGap()
+    {
+        var r = new Readings();
+        r.Run(600, 25);
+        r.Run(60, 2);
+        Check("a result screen still trickling to the match's server is not a gap", r.FiredAtMs.Count == 0,
+            $"{r.FiredAtMs.Count} time(s)");
+        r.Run(20, 0);
+        Check("  ...leaving it is", r.FiredAtMs.Count == 1, $"{r.FiredAtMs.Count} time(s)");
+    }
+
+    private static void ALobbyBeforeAnyMatchIsNotAGap()
+    {
+        var r = new Readings();
+        r.Run(600, 0);
+        Check("a lobby before any match is not a gap", r.FiredAtMs.Count == 0, $"{r.FiredAtMs.Count} time(s)");
+    }
+
+    private static void AMatchKeepsItsGapClosed()
+    {
+        // Five-second readings never see a sub-second stall; a match that slows but keeps sending is still one.
+        var r = new Readings();
+        r.Run(300, 25);
+        r.Run(30, 3);
+        r.Run(300, 25);
+        Check("a match that slows down but keeps sending is not a gap", r.FiredAtMs.Count == 0, $"{r.FiredAtMs.Count} time(s)");
+    }
+
+    private static void TheGapIsTimedFromTheLastPacket()
+    {
+        // Readings every 5 s; the match's last packet 1.5 s after the reading at 1005 s.
+        var gap = new MatchGap();
+        long packets = 0;
+        for (long t = 1000_000; t <= 1005_000; t += 5000)
+        {
+            packets += 125;
+            gap.Feed(t, packets, t);
+        }
+        packets += 10;
+        gap.Feed(1010_000, packets, 1006_500);
+        var fired = gap.Feed(1015_000, packets, 1006_500);
+        var due = gap.DueInMs(1015_000);
+        Check("known exactly, the quiet counts from the last packet, not the reading before it",
+            !fired && due == 1_500, $"fired {fired}, due in {due} ms");
+        Check("  ...and completes the gap ten seconds after it", gap.Feed(1016_500, packets, 1006_500), "not fired");
+    }
+
+    private static void RescanComparesMediansByAClearMargin()
+    {
+        Check("eight answers give a median",
+            RescanScore.Median([44, 45, 43, 90, 44, 46, 44, 45]) is > 43.5 and < 45.5,
+            $"{RescanScore.Median([44, 45, 43, 90, 44, 46, 44, 45])}");
+        Check("one slow echo does not move the median", RescanScore.Median([44, 44, 44, 44, 44, 44, 44, 300]) == 44,
+            $"{RescanScore.Median([44, 44, 44, 44, 44, 44, 44, 300])}");
+        Check("three lost of eight is too few to compare", RescanScore.Median([44, null, 45, null, 44, 46, null, 45]) is null,
+            "scored");
+        Check("5 ms faster than 50 is worth moving", RescanScore.WorthMoving(50, 45), "not moved");
+        Check("4 ms faster than 50 is not", !RescanScore.WorthMoving(50, 46), "moved");
+        Check("9 ms faster than 80 is worth moving, 7 is not",
+            RescanScore.WorthMoving(80, 71) && !RescanScore.WorthMoving(80, 73), "wrong margin");
     }
 
     /// <summary>

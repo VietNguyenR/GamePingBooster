@@ -370,6 +370,31 @@ internal sealed class RouteManager
         }
     }
 
+    /// <summary>
+    /// Puts back any game or lobby route this manager holds that is no longer in Windows' table on the virtual
+    /// adapter, and returns how many it put back. The install methods skip a prefix they already hold, so a
+    /// route Windows dropped on its own - an address change on the adapter is the moment that might - would
+    /// otherwise stay missing while this manager believed it was in, and that game's traffic would go out
+    /// over the player's own connection with nothing said.
+    /// </summary>
+    public int RestoreRoutes(uint tunInterfaceIndex)
+    {
+        var present = IpHelper.ReadRoutes()
+            .Where(r => r.InterfaceIndex == tunInterfaceIndex)
+            .Select(r => new IpHelper.Prefix(r.DestinationAddress, r.DestinationPrefixLength))
+            .ToHashSet();
+
+        var restored = 0;
+        foreach (var prefix in _installedPrefixes.Concat(_lobbyPrefixes))
+        {
+            if (IpHelper.ParsePrefix(prefix) is not { } parsed || present.Contains(parsed)) continue;
+            AddRoute(prefix, tunInterfaceIndex, nextHop: null);
+            restored++;
+        }
+        if (restored > 0) _log?.Invoke($"Routing: {restored} route(s) had gone from the virtual adapter - put back.");
+        return restored;
+    }
+
     /// <summary>Removes the lobby's host routes, leaving game routes and the pinned relay route alone.</summary>
     public void RemoveLobbyRoutes(uint tunInterfaceIndex)
     {

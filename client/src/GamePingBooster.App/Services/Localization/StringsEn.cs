@@ -180,6 +180,7 @@ internal static class StringsEn
         ["svc.connectedWaiting"] = "Connected to {0} - waiting for {1} to start",
         ["svc.connectedWaitingAny"] = "Connected to {0} - waiting for a supported game to start",
         ["svc.movedRelay"] = "Connected to {0} - moved off {1} for a better route",
+        ["svc.rescanMoved"] = "Connected to {0} - moved from {1} between matches, {2} ms faster",
         ["svc.reconnecting"] = "Reconnecting via {0} (attempt {1}) - traffic is on the normal path",
         ["svc.reconnected"] = "Reconnected to {0}",
         ["svc.accelerating"] = "Accelerating {0} through {1}",

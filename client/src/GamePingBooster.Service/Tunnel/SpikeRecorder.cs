@@ -795,6 +795,12 @@ internal sealed class SpikeRecorder : IQualitySink
 
     // ------------------------------------------------------------------ reporting
 
+    /// <summary>What a record written now would say about the session - taken by the engine before a move changes it.</summary>
+    public QualityMeta CurrentMeta() => Meta(_context());
+
+    /// <summary>A move to another relay between matches, once its follow-up is over. See QualityFile.WriteRelayMove.</summary>
+    public void WriteRelayMove(RelayMoveRecord move, QualityMeta meta) => _file.WriteRelayMove(move, meta);
+
     private QualityMeta Meta(Context context) => new(
         AppVersion,
         context.GameId,
