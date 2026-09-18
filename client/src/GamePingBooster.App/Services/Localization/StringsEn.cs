@@ -183,6 +183,8 @@ internal static class StringsEn
         ["svc.reconnecting"] = "Reconnecting via {0} (attempt {1}) - traffic is on the normal path",
         ["svc.reconnected"] = "Reconnected to {0}",
         ["svc.accelerating"] = "Accelerating {0} through {1}",
+        ["svc.fixingClock"] = "Correcting the system clock...",
+        ["svc.clockWrong"] = "This PC's clock is {0} seconds off and could not be corrected automatically. Set the time in Settings > Time & language, then connect again.",
         ["svc.routeFailed"] = "Failed to update the routing table",
         ["svc.disconnecting"] = "Disconnecting...",
         ["svc.notConnected"] = "Not connected",
@@ -290,8 +292,10 @@ internal static class StringsEn
         ["notice.profileUnreachable"] = "Could not reach the licence server to update the game list ({0}).",
         ["notice.minutes.one"] = "1 minute",
         ["notice.minutes.many"] = "{0} minutes",
-        ["notice.clock.ahead"] = "This PC's clock is about {0} ahead of the licence server. Relays refuse a handshake more than {1} seconds out, so connecting will fail until the time is corrected - turn on Settings > Time & language > Set time automatically.",
-        ["notice.clock.behind"] = "This PC's clock is about {0} behind the licence server. Relays refuse a handshake more than {1} seconds out, so connecting will fail until the time is corrected - turn on Settings > Time & language > Set time automatically.",
+        ["notice.clock.ahead"] =
+            "This PC's clock is about {0} ahead of the licence server - relays refuse anything more than {1} seconds out. Press Connect: the time is corrected automatically first.",
+        ["notice.clock.behind"] =
+            "This PC's clock is about {0} behind the licence server - relays refuse anything more than {1} seconds out. Press Connect: the time is corrected automatically first.",
         ["notice.renewFailed"] = "Could not renew the licence: {0}",
         ["notice.clearFailed"] = "Could not clear the expired licence ({0}).",
         ["notice.renewUnreachable"] = "Could not reach the licence server ({0}). Will try again shortly.",
@@ -334,5 +338,6 @@ internal static class StringsEn
         ["lag.verdict.relay"] = "The path to the relay is the first bad rung{0}, while everything inside the country is clean. The fault is past the border - on the way out of the country, or at the relay's own front door.",
         ["lag.verdict.relay-udp"] = "The physical path to the relay is clean but the relay's own answers are not{0}. Both numbers are a round trip to the same machine over the same wire, so the difference is not the network - it is the relay process, or this PC's own scheduling. Running this once on a cable instead of Wi-Fi tells the two apart.",
         ["lag.verdict.game"] = "Everything up to the relay is clean and the game ping is not{0}, so the fault is past the relay - between it and the game server.",
+
     };
 }

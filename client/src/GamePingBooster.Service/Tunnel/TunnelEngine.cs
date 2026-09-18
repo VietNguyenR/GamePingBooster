@@ -471,6 +471,13 @@ internal sealed class TunnelEngine : IAsyncDisposable
 
     // -------------------------------------------------------------- connect
 
+    /// <summary>
+    /// Turns automatic time on with Cloudflare and keeps the clock inside the relays' window, on
+    /// every Connect. See ClockKeeper for what it changes and what it never does.
+    /// </summary>
+    private ClockKeeper Clock => _clockKeeper ??= new ClockKeeper(() => _config.LicenceUrl, _log);
+    private ClockKeeper? _clockKeeper;
+
     public async Task ConnectAsync(string? relayId, string? gameId, CancellationToken ct)
     {
         if (_state is TunnelState.Connected or TunnelState.Connecting) return;
@@ -483,6 +490,11 @@ internal sealed class TunnelEngine : IAsyncDisposable
         {
             SetState(TunnelState.Connecting, new StatusText("svc.preparing", "Preparing..."));
             var phases = new PhaseTimer();
+
+            // Started first and awaited just before the first handshake, so the measurement runs
+            // while the profile loads. See ClockKeeper: automatic time with Cloudflare is switched
+            // on every time, whatever the clock says.
+            var clockCheck = Clock.PrepareAsync(token);
 
             // The licence gate, before anything is created and before a packet is sent. An
             // expired subscription is a refusal the relay would make anyway; making it here as
@@ -511,6 +523,19 @@ internal sealed class TunnelEngine : IAsyncDisposable
             phases.Mark("profile");
             _game = ChooseGameForConnect(gameId);
             var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
+
+            // Every relay compares the handshake's timestamp with its own clock, so a clock outside
+            // the window fails every one of them, silently. Correct it BEFORE the first handshake.
+            if (await clockCheck.ConfigureAwait(false) is { } offset && offset.Duration() > ClockKeeper.CorrectAbove)
+            {
+                SetState(TunnelState.Connecting, new StatusText("svc.fixingClock", "Correcting the system clock..."));
+                var after = await Clock.CorrectAsync(offset, token).ConfigureAwait(false);
+                if (after is { } still && still.Duration() > GamePingBooster.Core.Protocol.GpbProtocol.HandshakeSkew)
+                {
+                    throw new ClockWrongException(still);
+                }
+            }
+            phases.Mark("clock");
 
             // Choose the relay before creating anything. Probing is pure UDP - no adapter, no
             // routes - so a relay that turns out to be unreachable costs nothing but a timeout.
@@ -567,8 +592,17 @@ internal sealed class TunnelEngine : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            _error = ex.Message;
-            SetState(TunnelState.Faulted, new StatusText("svc.connectFailed", "Connection failed"));
+            if (ex is ClockWrongException clock)
+            {
+                // Said in the detail line, in the person's language, rather than as a raw error.
+                _error = null;
+                SetState(TunnelState.Faulted, clock.Text);
+            }
+            else
+            {
+                _error = ex.Message;
+                SetState(TunnelState.Faulted, new StatusText("svc.connectFailed", "Connection failed"));
+            }
             _log($"Connection failed: {ex}");
             // The adapter goes too: it may be the reason, and the next connect should start from a new one.
             await TeardownAsync().ConfigureAwait(false);

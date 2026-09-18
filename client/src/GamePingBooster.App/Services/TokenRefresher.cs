@@ -236,10 +236,10 @@ public sealed class TokenRefresher : IAsyncDisposable
     /// would be crying about a clock that still works, and the one warning that matters would be
     /// read as more of the same.
     ///
-    /// Nothing is done about it automatically. Setting the system clock needs administrator
-    /// rights this process does not have, and a booster that silently moves the clock is not
-    /// something anybody asked for. Naming the cause is the whole job; without it the symptom is
-    /// six unreachable relays and a message about the network.
+    /// Nothing is done about it here: this process has no right to set the clock. The SERVICE
+    /// does it on every Connect - automatic time with Cloudflare, and a correction before the first
+    /// handshake when the clock is out - so the notice says the one thing to do: press Connect.
+    /// See ClockKeeper in the service.
     /// </summary>
     private void WarnIfClockIsWrong(TimeSpan? skew)
     {

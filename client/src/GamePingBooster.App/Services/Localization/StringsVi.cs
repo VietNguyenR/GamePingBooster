@@ -182,6 +182,8 @@ internal static class StringsVi
         ["svc.reconnecting"] = "Đang kết nối lại qua {0} (lần {1}) - traffic đang đi đường mạng thường",
         ["svc.reconnected"] = "Đã kết nối lại tới {0}",
         ["svc.accelerating"] = "Đang tăng tốc {0} qua {1}",
+        ["svc.fixingClock"] = "Đang chỉnh lại giờ hệ thống...",
+        ["svc.clockWrong"] = "Đồng hồ máy này lệch {0} giây và không tự chỉnh được. Hãy chỉnh giờ trong Cài đặt > Thời gian & ngôn ngữ rồi kết nối lại.",
         ["svc.routeFailed"] = "Không cập nhật được bảng định tuyến",
         ["svc.disconnecting"] = "Đang ngắt kết nối...",
         ["svc.notConnected"] = "Chưa kết nối",
@@ -289,8 +291,10 @@ internal static class StringsVi
         ["notice.profileUnreachable"] = "Không kết nối được máy chủ giấy phép để cập nhật danh sách game ({0}).",
         ["notice.minutes.one"] = "1 phút",
         ["notice.minutes.many"] = "{0} phút",
-        ["notice.clock.ahead"] = "Đồng hồ máy này đang nhanh hơn máy chủ giấy phép khoảng {0}. Relay từ chối kết nối nếu giờ lệch quá {1} giây, nên sẽ không kết nối được cho tới khi chỉnh lại giờ - bật Cài đặt > Thời gian & ngôn ngữ > Đặt thời gian tự động.",
-        ["notice.clock.behind"] = "Đồng hồ máy này đang chậm hơn máy chủ giấy phép khoảng {0}. Relay từ chối kết nối nếu giờ lệch quá {1} giây, nên sẽ không kết nối được cho tới khi chỉnh lại giờ - bật Cài đặt > Thời gian & ngôn ngữ > Đặt thời gian tự động.",
+        ["notice.clock.ahead"] =
+            "Đồng hồ máy này đang nhanh hơn máy chủ giấy phép khoảng {0} - relay từ chối nếu lệch quá {1} giây. Cứ bấm Kết nối: app sẽ tự chỉnh giờ trước.",
+        ["notice.clock.behind"] =
+            "Đồng hồ máy này đang chậm hơn máy chủ giấy phép khoảng {0} - relay từ chối nếu lệch quá {1} giây. Cứ bấm Kết nối: app sẽ tự chỉnh giờ trước.",
         ["notice.renewFailed"] = "Không gia hạn được giấy phép: {0}",
         ["notice.clearFailed"] = "Không xoá được giấy phép đã hết hạn ({0}).",
         ["notice.renewUnreachable"] = "Không kết nối được máy chủ giấy phép ({0}). App sẽ thử lại sau ít phút.",
@@ -333,5 +337,6 @@ internal static class StringsVi
         ["lag.verdict.relay"] = "Đường tới relay là đoạn đầu tiên bị lỗi{0}, trong khi mọi đoạn trong nước đều ổn. Lỗi nằm ở phía ngoài biên giới - trên đường ra quốc tế, hoặc ngay ở cửa vào của relay.",
         ["lag.verdict.relay-udp"] = "Đường vật lý tới relay vẫn ổn nhưng phản hồi của chính relay thì không{0}. Cả hai số đều là một vòng đi-về tới cùng một máy qua cùng một đường, nên chênh lệch không phải do mạng - mà do tiến trình relay, hoặc do chính máy tính này xử lý chậm. Chạy lại một lần bằng dây mạng thay vì Wi-Fi sẽ phân biệt được hai trường hợp.",
         ["lag.verdict.game"] = "Mọi đoạn tới relay đều ổn nhưng ping trong game thì không{0}, nên lỗi nằm sau relay - giữa relay và máy chủ game.",
+
     };
 }
