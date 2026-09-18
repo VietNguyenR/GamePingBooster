@@ -92,6 +92,22 @@
       "globalAccelerator": true,
       "asns": [6507],
       "note": "Riot publishes no server list: its peering page (riotgames.com/en/peering-information) gives BGP policy only. What IS public is what the cross-check uses. Vietnamese accounts play on the AP shard, Singapore and Hong Kong. Community captures (github.com/alexonpeace/valorant_servers, Feb 2026) put Singapore on Riot Direct 151.106.248.0/24 - announced by AS6507 - and on AWS Global Accelerator anycast addresses, which ip-ranges.json publishes only as GLOBAL /17s; hence asns and globalAccelerator. Tokyo (ap-northeast-1) is there for players the matchmaker spills over. Unknown until the first capture: whether the game probes regions on a port of its own (probePort stays null until one is seen, so nothing is ever mistaken for a landmark), and whether its latency probe shares the gameplay address the way CS2's does. Read the port column of the first capture before trusting the profile."
+    },
+
+    "lol": {
+      "name": "League of Legends",
+      "watchProcess": "League of Legends",
+      "probePort": null,
+      "observedPath": "observed-lol.txt",
+      "landmarkPath": null,
+      "tcpSessionsPath": "tcp-sessions-lol.txt",
+      "unverifiedPath": "observed-lol-unverified.txt",
+      "manualCidrPath": "manual-cidrs-lol.txt",
+      "profilePath": "../../profiles/lol-vn.json",
+      "awsRegions": [],
+      "azureRegions": [],
+      "asns": [6507],
+      "note": "Not captured yet. Riot publishes ports, not servers: the match is UDP 5000-5500 (and 7000-8000) from League of Legends.exe, which only runs during a match - LeagueClient.exe is the lobby and is not watched. Vietnam moved to Riot's own servers in January 2025 (VNG publishes), first hosted in Hong Kong, later on hardware in Vietnam. Whether those servers sit inside AS6507's announcements is unknown - an address outside them lands in observed-lol-unverified.txt, which is the first thing to read after a capture. AS6507 is also VALORANT's, so the two games may share prefixes; the builder's overlap rule decides that, never loosen it."
     }
   }
 }
