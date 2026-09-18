@@ -92,39 +92,47 @@ internal sealed partial class TunnelEngine
         if (due) await RescanBetweenMatchesAsync(tunnel, ct).ConfigureAwait(false);
     }
 
+    /// <summary>Set when the game now running is one the relay in use does not carry. Read by the supervisor.</summary>
+    private volatile bool _moveOffForGame;
+
     /// <summary>
-    /// Called by the supervisor, and only by it, when a match has just ended. Measures, then moves or stays,
-    /// and says which in the log either way.
+    /// Called by the supervisor, and only by it: when a match has just ended, or - <paramref name="forGame"/> -
+    /// as soon as a game opens that the relay in use is not set to carry (Relay.games in /admin/relays). Measures,
+    /// then moves or stays, and says which in the log either way.
+    ///
+    /// Leaving a relay not set for the game is not a matter of margins, or of the player's choice: the operator
+    /// took that game off it, so the tunnel goes to the fastest relay that carries it, whatever it measures, and
+    /// without waiting for a gap - the game has just opened, and no match has begun. A match already under way
+    /// is still never moved; the next gap does it.
     /// </summary>
-    private async Task RescanBetweenMatchesAsync(TunnelClient tunnel, CancellationToken ct)
+    private async Task RescanBetweenMatchesAsync(TunnelClient tunnel, CancellationToken ct, bool forGame = false)
     {
-        if (_config.RescanBetweenMatches == false) return;
         var current = _relay;
         var profile = _profile;
         var path = _path;
         if (current is null || profile is null || _routes is null) return;
+        forGame |= !RelayPaths.Serves(current, _game?.Id);
+        if (!forGame && _config.RescanBetweenMatches == false) return;
 
         // A relay picked by hand is never left for another. Both moments count: the choice this tunnel was
         // connected with - switching the app to automatic mid-session applies from the next connect, as the
         // app says - and the choice now, since picking a relay mid-session says where the player wants to be.
-        if ((_chosenByHandAtConnect ?? RelayChoice) is { } chosen)
+        if (!forGame && (_chosenByHandAtConnect ?? RelayChoice) is { } chosen)
         {
             _log($"Between matches: staying on {current.Name} - {chosen} was chosen by hand, so relays are not re-measured.");
-            return;
-        }
-        if (path is null)
-        {
-            _log($"Between matches: the path through {current.Name} to the game's region was never measured, so there is " +
-                 "nothing to compare a relay against - staying.");
             return;
         }
         if (!(_watcher?.IsGameRunning ?? false)) return;
 
         var currentRelayId = RelayPaths.RelayIdOf(current);
-        var others = profile.Relays
-            .Where(r => r.ViaRelayId is null && !r.Id.Equals(currentRelayId, StringComparison.OrdinalIgnoreCase))
+        var others = RelaysForGame(_game)
+            .Where(r => !r.Id.Equals(currentRelayId, StringComparison.OrdinalIgnoreCase))
             .ToList();
-        if (others.Count == 0) return;
+        if (others.Count == 0)
+        {
+            if (forGame) _log($"No relay in the profile is set to carry {_game?.Name} - staying on {current.Name}.");
+            return;
+        }
 
         var started = Stopwatch.GetTimestamp();
         var packetsAtStart = tunnel.Destinations.UdpPackets;
@@ -136,22 +144,47 @@ internal sealed partial class TunnelEngine
 
         try
         {
-            _log($"Between matches: the game has been silent {SilenceOf(tunnel).TotalSeconds:F0} s - re-measuring the relays " +
-                 $"to {path.RegionName} against {current.Name} [{current.Id}], the median of {RescanScore.Samples} echoes each.");
-
-            var hereSamples = await SampleLiveAsync(tunnel, path.Landmark, token).ConfigureAwait(false);
-            if (RescanScore.Median(hereSamples) is not { } hereMs)
+            // The game just switched to has no measured path yet - SwitchGame blanked it - so its region is
+            // found the way a connect finds it.
+            if (forGame && path is null && await ChooseTargetRegionAsync(token).ConfigureAwait(false) is { } target)
             {
-                _log($"Between matches: {current.Name} answered too few echoes to be compared - staying.");
+                path = new PathMeasurement(target.RegionName, 0, target.Landmark);
+            }
+            if (path is null)
+            {
+                _log($"Between matches: the path through {current.Name} to the game's region was never measured, so " +
+                     "there is nothing to compare a relay against - staying.");
                 return;
             }
-            _log($"  {current.Name} [{current.Id}], in use: {hereMs:F0} ms to {path.RegionName}");
+
+            List<double?> hereSamples;
+            double hereMs;
+            if (forGame)
+            {
+                _log($"Measuring the relays that carry {_game?.Name} to {path.RegionName}, the median of " +
+                     $"{RescanScore.Samples} echoes each, to leave {current.Name} [{current.Id}].");
+                hereSamples = [];
+                hereMs = double.PositiveInfinity;
+            }
+            else
+            {
+                _log($"Between matches: the game has been silent {SilenceOf(tunnel).TotalSeconds:F0} s - re-measuring the relays " +
+                     $"to {path.RegionName} against {current.Name} [{current.Id}], the median of {RescanScore.Samples} echoes each.");
+                hereSamples = await SampleLiveAsync(tunnel, path.Landmark, token).ConfigureAwait(false);
+                if (RescanScore.Median(hereSamples) is not { } measured)
+                {
+                    _log($"Between matches: {current.Name} answered too few echoes to be compared - staying.");
+                    return;
+                }
+                hereMs = measured;
+                _log($"  {current.Name} [{current.Id}], in use: {hereMs:F0} ms to {path.RegionName}");
+            }
 
             foreach (var relay in others)
             {
                 foreach (var way in RelayPaths.DoorsOf(profile.Relays, relay.Id))
                 {
-                    if (MatchStarted(tunnel, packetsAtStart) || TooLate(tunnel, current)) return;
+                    if (MatchStarted(tunnel, packetsAtStart) || (!forGame && TooLate(tunnel, current))) return;
                     if (IsRoutedIntoTunnel(way))
                     {
                         _log($"  {way.Name} [{way.Id}]: skipped - its address is inside a routed game range, so a probe would go through the tunnel.");
@@ -165,7 +198,7 @@ internal sealed partial class TunnelEngine
             }
 
             var best = probes.Where(p => p.EndToEndMs is not null).MinBy(p => p.EndToEndMs!.Value);
-            if (best is null || !RescanScore.WorthMoving(hereMs, best.EndToEndMs!.Value))
+            if (best is null || (!forGame && !RescanScore.WorthMoving(hereMs, best.EndToEndMs!.Value)))
             {
                 _log(best is null
                     ? $"Between matches: no other relay could be measured - staying on {current.Name}."
@@ -175,27 +208,29 @@ internal sealed partial class TunnelEngine
                 return;
             }
 
-            if (MatchStarted(tunnel, packetsAtStart) || TooLate(tunnel, current)) return;
+            if (MatchStarted(tunnel, packetsAtStart) || (!forGame && TooLate(tunnel, current))) return;
             if (!ReferenceEquals(tunnel, _tunnel) || _state != TunnelState.Connected || !(_watcher?.IsGameRunning ?? false)) return;
 
             var client = await OpenChosenAsync(best, probes, psk, token).ConfigureAwait(false);
             probes.Clear();
 
             // The last word before the swap: a match's first packets would have gone out by now.
-            if (MatchStarted(tunnel, packetsAtStart) || TooLate(tunnel, current))
+            if (MatchStarted(tunnel, packetsAtStart) || (!forGame && TooLate(tunnel, current)))
             {
                 client.Dispose();
                 return;
             }
 
             var record = new RelayMoveRecord(
+                forGame ? "game" : "rescan",
                 DateTimeOffset.UtcNow, current.Id, best.Relay.Id,
                 Stopwatch.GetElapsedTime(started).TotalSeconds, SilenceOf(tunnel).TotalSeconds,
                 DoorSwitchPolicy.Stats([.. hereSamples.OfType<double>()], hereSamples.Count, hereSamples.Count(s => s is null)),
                 new DoorStats(best.EndToEndMs, null, RescanScore.Samples, 0),
                 null, null, "");
             var meta = _recorder?.CurrentMeta();
-            if (await MoveToRelayAsync(tunnel, best, client, hereMs, path, ct).ConfigureAwait(false) is { } moved && meta is { } m)
+            if (await MoveToRelayAsync(tunnel, best, client, forGame ? null : hereMs, path, ct).ConfigureAwait(false) is { } moved &&
+                meta is { } m)
             {
                 _moveFollow = new RelayMoveFollow { Record = record, Meta = m, Tunnel = moved, MovedAt = Stopwatch.GetTimestamp() };
             }
@@ -298,7 +333,7 @@ internal sealed partial class TunnelEngine
     /// place throughout - see the class summary. Returns the new tunnel, or null when the move failed and the
     /// reconnect path took over.
     /// </summary>
-    private async Task<TunnelClient?> MoveToRelayAsync(TunnelClient old, RelayProbe chosen, TunnelClient client, double wasMs,
+    private async Task<TunnelClient?> MoveToRelayAsync(TunnelClient old, RelayProbe chosen, TunnelClient client, double? wasMs,
         PathMeasurement path, CancellationToken ct)
     {
         var adapter = _adapter;
@@ -347,9 +382,20 @@ internal sealed partial class TunnelEngine
             routes.RestoreRoutes(adapter.InterfaceIndex);
             PinDoors();
 
-            var saved = wasMs - nowMs;
+            if (wasMs is not { } was)
+            {
+                var gameName = _game?.Name ?? "";
+                _log($"Moved from {previous.Name} [{previous.Id}], which is not used for {gameName}, to {target.Name} " +
+                     $"[{target.Id}] in {swapMs:F0} ms - {nowMs:F0} ms to {path.RegionName}. The lobby reconnects on its own.");
+                SetState(TunnelState.Connected, new StatusText("svc.movedForGame",
+                    $"Connected to {target.Name} - {previous.Name} is not used for {gameName}",
+                    target.Name, previous.Name, gameName));
+                return client;
+            }
+
+            var saved = was - nowMs;
             _log($"Between matches: moved from {previous.Name} [{previous.Id}] to {target.Name} [{target.Id}] in {swapMs:F0} ms - " +
-                 $"{nowMs:F0} ms against {wasMs:F0} ms to {path.RegionName}, {saved:F0} ms faster. The lobby reconnects on its own.");
+                 $"{nowMs:F0} ms against {was:F0} ms to {path.RegionName}, {saved:F0} ms faster. The lobby reconnects on its own.");
             SetState(TunnelState.Connected, new StatusText("svc.rescanMoved",
                 $"Connected to {target.Name} - moved from {previous.Name} between matches, {saved:F0} ms faster",
                 target.Name, previous.Name, saved.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)));
@@ -396,6 +442,38 @@ internal sealed partial class TunnelEngine
         {
             _log($"Between matches: the first match after the move to {record.To} stopped sending within " +
                  $"{HeldAfter.TotalSeconds:F0} s - written to the quality file for a look.");
+        }
+    }
+
+    /// <summary>
+    /// The relays that may carry <paramref name="game"/>, as set in /admin/relays. Every relay when none is set for
+    /// it: a profile that leaves a game with no relay at all is a mistake on the server, and one the player
+    /// should not pay for with no connection - the log says so instead.
+    /// </summary>
+    private List<RelayEntry> RelaysForGame(GameEntry? game)
+    {
+        var all = _profile?.Relays ?? [];
+        var serving = RelayPaths.ServingGame(all, game?.Id);
+        if (serving.Count > 0 || all.Count == 0) return serving;
+        _log($"WARNING: no relay in the profile is set to carry {game?.Name} - using all of them. Tick it on a relay in /admin/relays.");
+        return all;
+    }
+
+    /// <summary>
+    /// The game the main window's relay list is for: the one being played or connected for, else the one the next
+    /// connect would be for. Null with no profile.
+    /// </summary>
+    private GameEntry? GameForRelayList()
+    {
+        if (_game is { } game) return game;
+        if (_profile is not { Games.Count: > 0 }) return null;
+        try
+        {
+            return ChooseGameForConnect(null);
+        }
+        catch (Exception)
+        {
+            return null;
         }
     }
 

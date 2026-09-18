@@ -368,13 +368,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (current.Count == relays.Count &&
             current.Zip(relays).All(pair => string.Equals(pair.First.Id, pair.Second.Id, StringComparison.OrdinalIgnoreCase)))
         {
-            foreach (var (item, relay) in current.Zip(relays)) item.Update(relay.Name, relay.Location, relay.PingMs);
+            foreach (var (item, relay) in current.Zip(relays)) item.Update(relay.Name, relay.Location, relay.PingMs, relay.NotForGame);
             if (!_choicePending) ShowChoice(_confirmedChoice);
             return;
         }
 
         var items = new List<RelayChoiceItem> { RelayChoiceItem.Automatic };
-        items.AddRange(relays.Select(r => new RelayChoiceItem(r.Id, r.Name, r.Location, r.PingMs)));
+        items.AddRange(relays.Select(r => new RelayChoiceItem(r.Id, r.Name, r.Location, r.PingMs, r.NotForGame)));
 
         _applyingChoice = true;
         try
@@ -1010,12 +1010,13 @@ public sealed class RelayChoiceItem : INotifyPropertyChanged
     /// whose text is ours rather than a relay's, so it is read from the language table every time
     /// and follows a language change without being rebuilt.
     /// </summary>
-    public static readonly RelayChoiceItem Automatic = new(null, "", null, null);
+    public static readonly RelayChoiceItem Automatic = new(null, "", null, null, null);
 
-    public RelayChoiceItem(string? id, string name, string? location, double? pingMs)
+    public RelayChoiceItem(string? id, string name, string? location, double? pingMs, string? notForGame)
     {
         Id = id;
-        _label = LabelFor(id, name, location, pingMs);
+        _notForGame = notForGame;
+        _label = LabelFor(id, name, location, pingMs, notForGame);
     }
 
     /// <summary>The relay id, or null for automatic.</summary>
@@ -1030,18 +1031,31 @@ public sealed class RelayChoiceItem : INotifyPropertyChanged
     public void RelabelForLanguage() =>
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Label)));
 
-    public void Update(string name, string? location, double? pingMs)
+    private string? _notForGame;
+
+    /// <summary>
+    /// False for a relay the operator has taken off the game in play (/admin/relays): listed, greyed out and
+    /// not selectable, so a player who remembers it can see why it is gone.
+    /// </summary>
+    public bool IsAvailable => _notForGame is null;
+
+    public void Update(string name, string? location, double? pingMs, string? notForGame)
     {
-        var label = LabelFor(Id, name, location, pingMs);
+        var availabilityChanged = notForGame != _notForGame;
+        _notForGame = notForGame;
+        if (availabilityChanged) PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsAvailable)));
+
+        var label = LabelFor(Id, name, location, pingMs, notForGame);
         if (label == _label) return;
         _label = label;
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Label)));
     }
 
-    private static string LabelFor(string? id, string name, string? location, double? pingMs)
+    private static string LabelFor(string? id, string name, string? location, double? pingMs, string? notForGame)
     {
         var place = location is null || name.Contains(location, StringComparison.OrdinalIgnoreCase) ? name : $"{name} ({location})";
         if (id is null) return place;
+        if (notForGame is not null) return Loc.F("relay.notForGame", place, notForGame);
         return pingMs is { } ms ? Loc.F("relay.withPing", place, $"{ms:F0}") : Loc.F("relay.noAnswer", place);
     }
 }

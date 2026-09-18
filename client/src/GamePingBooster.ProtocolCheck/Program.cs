@@ -245,6 +245,28 @@ internal static class Program
             GamePingBooster.Core.Profiles.RelayPaths.Expand(switching.Relays)[0].EntrySwitching == "on",
             "a tunnel that came in through the entry would fall back to record");
 
+        // Relays per game, set in /admin/relays: PUBG's ranges are Singapore's alone, so Hong Kong is taken off it.
+        var perGame = System.Text.Json.JsonSerializer.Deserialize("""
+            {"relays":[
+              {"id":"hk","name":"Hong Kong #1","endpoint":"198.51.100.1:51820","games":["cs2","valorant"],
+               "entries":[{"id":"vn-1-hk","endpoint":"222.255.184.166:51830"}]},
+              {"id":"sg-4","name":"SG licensed 4","endpoint":"178.128.122.35:51820","games":[]},
+              {"id":"sg-1","name":"SG licensed 1","endpoint":"139.99.73.90:51820"}]}
+            """, GamePingBooster.Core.Profiles.ProfileJsonContext.Default.ProfileBundle)!;
+        Check("games: a relay's games are read under that exact name",
+            perGame.Relays[0].Games.SequenceEqual(["cs2", "valorant"]), string.Join(", ", perGame.Relays[0].Games));
+        Check("games: a relay taken off PUBG is not offered for it",
+            GamePingBooster.Core.Profiles.RelayPaths.ServingGame(perGame.Relays, "PUBG").Select(r => r.Id).SequenceEqual(["sg-4", "sg-1"]),
+            string.Join(", ", GamePingBooster.Core.Profiles.RelayPaths.ServingGame(perGame.Relays, "pubg").Select(r => r.Id)));
+        Check("games: an empty list, or none at all, is every game",
+            GamePingBooster.Core.Profiles.RelayPaths.Serves(perGame.Relays[1], "pubg") &&
+            GamePingBooster.Core.Profiles.RelayPaths.Serves(perGame.Relays[2], "pubg"), "a relay with no games set would vanish");
+        Check("games: a path through an entry carries its relay's games",
+            !GamePingBooster.Core.Profiles.RelayPaths.Serves(GamePingBooster.Core.Profiles.RelayPaths.Expand(perGame.Relays)[0], "pubg"),
+            "a relay taken off PUBG would still be reachable for it through its entry");
+        Check("games: with no game known, nothing is ruled out",
+            GamePingBooster.Core.Profiles.RelayPaths.ServingGame(perGame.Relays, null).Count == 3, "no game, no reason");
+
         static string Resolved(string? local, string? relay)
         {
             var (mode, source) = GamePingBooster.Core.Profiles.EntrySwitching.Resolve(local, relay);

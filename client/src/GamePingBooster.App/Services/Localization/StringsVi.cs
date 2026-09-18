@@ -79,6 +79,7 @@ internal static class StringsVi
         ["relay.automatic"] = "Tự động - nhanh nhất",
         ["relay.withPing"] = "{0} - {1} ms",
         ["relay.noAnswer"] = "{0} - không phản hồi",
+        ["relay.notForGame"] = "{0} - không dùng cho {1}",
 
         ["licence.renewing"] =
             "Đang gia hạn giấy phép... Nếu gói của bạn đã hết, gia hạn trên website là app tự nhận.",
@@ -179,6 +180,7 @@ internal static class StringsVi
         ["svc.connectedWaiting"] = "Đã kết nối tới {0} - đang chờ {1} khởi động",
         ["svc.connectedWaitingAny"] = "Đã kết nối tới {0} - đang chờ bạn mở một game được hỗ trợ",
         ["svc.movedRelay"] = "Đã kết nối tới {0} - chuyển khỏi {1} để đi đường tốt hơn",
+        ["svc.movedForGame"] = "Đã kết nối tới {0} - {1} không dùng cho {2}",
         ["svc.rescanMoved"] = "Đã kết nối tới {0} - chuyển từ {1} giữa hai trận, nhanh hơn {2} ms",
         ["svc.reconnecting"] = "Đang kết nối lại qua {0} (lần {1}) - traffic đang đi đường mạng thường",
         ["svc.reconnected"] = "Đã kết nối lại tới {0}",
@@ -192,6 +194,7 @@ internal static class StringsVi
             "Đã tự ngắt kết nối - {0} phút không mở game nào. Bấm Kết nối trước khi chơi.",
 
         ["choiceNote.nextConnect"] = "Sẽ áp dụng từ lần kết nối sau.",
+        ["choiceNote.notForGame"] = "{0} không dùng cho {1} - đang dùng {2}.",
         ["choiceNote.notAnswering"] = "{0} không phản hồi - đang dùng {1} thay thế.",
 
         ["refusal.notSignedIn"] =

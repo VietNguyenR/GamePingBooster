@@ -172,8 +172,8 @@ public sealed class SupportedGame
 }
 
 /// <summary>
-/// One relay the player can choose on the main window. The same list for every game: a relay is the
-/// app's server, not the game's, and the game's own region is left to the game.
+/// One relay the player can choose on the main window. Every relay is listed for every game; one the
+/// operator has taken off the game in play is marked with <see cref="NotForGame"/> and cannot be picked.
 /// </summary>
 public sealed class RelayOption
 {
@@ -188,6 +188,14 @@ public sealed class RelayOption
     /// the relay did not answer or has not been pinged yet.
     /// </summary>
     [JsonPropertyName("pingMs")] public double? PingMs { get; set; }
+
+    /// <summary>
+    /// The name of the game this relay does not carry, when it is one of those set in /admin/relays - the game
+    /// being played, or the one the next connect is for. Null when the relay can be chosen. Shown greyed out
+    /// with that name rather than left out, so a player who remembers the relay can see why it is gone. An
+    /// older service never sets it.
+    /// </summary>
+    [JsonPropertyName("notForGame")] public string? NotForGame { get; set; }
 }
 
 /// <summary>State the service pushes up to the UI (on request, and on every change).</summary>

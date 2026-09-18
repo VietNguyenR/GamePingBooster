@@ -42,6 +42,9 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     // watches while connected.
     private readonly GameDestinationRecorder? _discovery;
     private readonly DiscoveryUploader? _discoveryUploader;
+
+    // Which game is running here, for /admin/relays. Always there; it sends only when connection quality may be.
+    private readonly PresenceReporter _presence;
     private CancellationTokenSource? _cts;
     private Task? _supervisor;
     private Task? _gamePingProbe;
@@ -111,6 +114,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             _discovery = new GameDestinationRecorder(
                 () => _tunnel?.Destinations.UdpPackets, _discoveryUploader.WhyNotSend, _discoveryUploader.Report, log);
         }
+        _presence = new PresenceReporter(() => _config.LicenceUrl, () => _token, _device.Key, () => _config.ShareQuality, log);
         if (_token is not null)
         {
             log($"Licence token loaded, expires {TokenStore.ExpiryOf(_token):u}.");
@@ -718,6 +722,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         var current = _relay is { } relay && _tunnel?.LastRttMs is { } live
             ? (Id: RelayPaths.RelayIdOf(relay), Ms: live)
             : (Id: (string?)null, Ms: 0d);
+        var game = GameForRelayList();
 
         lock (_relayPings)
         {
@@ -730,6 +735,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     PingMs = r.Id.Equals(current.Id, StringComparison.OrdinalIgnoreCase)
                         ? Math.Round(current.Ms)
                         : _relayPings.TryGetValue(r.Id, out var ms) && ms is { } value ? Math.Round(value) : null,
+                    NotForGame = RelayPaths.Serves(r, game?.Id) ? null : game?.Name,
                 })
                 .ToList();
         }
@@ -746,6 +752,12 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         {
             relay = _profile?.Relays.FirstOrDefault(r => r.Id.Equals(relayId.Trim(), StringComparison.OrdinalIgnoreCase));
             if (relay is null) return $"There is no relay '{relayId.Trim()}' in the current server list.";
+
+            // The list greys it out; this is for anything that asks over the pipe regardless.
+            if (GameForRelayList() is { } game && !RelayPaths.Serves(relay, game.Id))
+            {
+                return $"{relay.Name} is not used for {game.Name}.";
+            }
         }
 
         var previous = _config.DefaultRelayId;
@@ -785,6 +797,11 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         if (choice is null || RelayPaths.RelayIdOf(relay).Equals(choice, StringComparison.OrdinalIgnoreCase)) return null;
 
         var chosen = _profile?.Relays.FirstOrDefault(r => r.Id.Equals(choice, StringComparison.OrdinalIgnoreCase));
+        if (chosen is not null && _game is { } game && !RelayPaths.Serves(chosen, game.Id))
+        {
+            return new StatusText("choiceNote.notForGame",
+                $"{chosen.Name} is not used for {game.Name} - using {relay.Name}.", chosen.Name, game.Name, relay.Name);
+        }
         return chosen is null
             ? null
             : new StatusText("choiceNote.notAnswering",
@@ -974,10 +991,21 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     private async Task<(RelayEntry Relay, TunnelClient Tunnel)> SelectRelayAsync(
         string? preferredId, byte[] psk, CancellationToken ct)
     {
-        var relays = _profile!.Relays;
-        if (relays.Count == 0) throw new InvalidOperationException("The profile declares no relays.");
-
+        if (_profile!.Relays.Count == 0) throw new InvalidOperationException("The profile declares no relays.");
+        var relays = RelaysForGame(_game);
         var paths = RelayPaths.Expand(relays);
+
+        // A relay the operator has taken off this game is not used for it, chosen or not. The choice stays
+        // saved: it is one choice for every game, and the next game may be one this relay carries.
+        if (!string.IsNullOrWhiteSpace(preferredId) &&
+            _profile.Relays.Concat(RelayPaths.Expand(_profile.Relays))
+                .FirstOrDefault(r => r.Id.Equals(preferredId, StringComparison.OrdinalIgnoreCase)) is { } picked &&
+            !RelayPaths.Serves(picked, _game?.Id))
+        {
+            _log($"{picked.Name} [{picked.Id}], the relay chosen in the app, is not used for {_game?.Name} - choosing " +
+                 "the fastest of the ones that are.");
+            preferredId = null;
+        }
 
         if (!string.IsNullOrWhiteSpace(preferredId))
         {
@@ -1498,6 +1526,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         _movedFromDoor = null;
         _matchGap = new GamePingBooster.Core.Quality.MatchGap();
         _moveFollow = null;
+        _moveOffForGame = false;
 
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
         try
@@ -1534,6 +1563,12 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     if (Interlocked.Exchange(ref _pendingDoorMove, null) is { } door) MoveToDoor(tunnel, door, rollback: false);
 
                     // Awaited here, for the same reason: a move to another relay is a tunnel replaced.
+                    if (_moveOffForGame)
+                    {
+                        _moveOffForGame = false;
+                        await RescanBetweenMatchesAsync(tunnel, ct, forGame: true).ConfigureAwait(false);
+                        continue;
+                    }
                     await WatchForMatchGapAsync(tunnel, ct).ConfigureAwait(false);
                     continue;
                 }
@@ -2326,7 +2361,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     private List<RelayEntry> FailoverOrder(RelayEntry current)
     {
         var order = new List<RelayEntry> { current };
-        foreach (var relay in _profile?.Relays ?? [])
+        foreach (var relay in RelaysForGame(_game))
         {
             if (!relay.Id.Equals(current.Id, StringComparison.OrdinalIgnoreCase)) order.Add(relay);
         }
@@ -2347,6 +2382,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                 // Before anything below can return early: discovery does not depend on routes or
                 // on the tunnel being up, and it ignores a game it is already recording.
                 _discovery?.GameStarted(detected);
+                _presence.Set(detected.Id);
 
                 if (!ReferenceEquals(detected, _game))
                 {
@@ -2379,6 +2415,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             {
                 _log("The game exited - removing routes, other traffic returns to the normal path.");
                 _discovery?.GameStopped();
+                _presence.Set(null);
                 if (_adapter is not null) _routes?.RemoveGameRoutes(_adapter.InterfaceIndex);
                 // Do not claim Connected while a reconnect is still in progress.
                 if (_tunnel is not null)
@@ -2557,6 +2594,9 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     /// </summary>
     private async Task TeardownAsync(PhaseTimer? phases = null, bool keepAdapter = false)
     {
+        // No tunnel, nothing to show beside a session on /admin/relays.
+        _presence.Set(null);
+
         // Measured for one relay on one connect. Keeping it would have the UI reporting an
         // in-game ping for a tunnel that no longer exists, and after a failover to a relay at a
         // different distance it would be reporting the wrong one.
@@ -3027,6 +3067,14 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             _log($"{game.Name} is running - moving the routes over from {previous.Name}. Relays were " +
                  $"measured for {previous.Name} at connect; the next connect measures them for {game.Name}.");
         }
+
+        // A relay the operator has taken off this game is left now, not at the next connect - see
+        // MoveOffRelayNotForGameAsync. The supervisor makes the move; this only asks for it.
+        if (_relay is { } relay && _tunnel is not null && !RelayPaths.Serves(relay, game.Id))
+        {
+            _log($"{relay.Name} [{relay.Id}] is not used for {game.Name} - moving to one that is.");
+            _moveOffForGame = true;
+        }
     }
 
     /// <summary>Records the game just seen, so the next connect measures relays for it. Never fails the caller.</summary>
@@ -3109,6 +3157,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         await TeardownAsync().ConfigureAwait(false);
         _discovery?.Dispose();
         _discoveryUploader?.Dispose();
+        _presence.Dispose();
         _device.Dispose();
     }
 }

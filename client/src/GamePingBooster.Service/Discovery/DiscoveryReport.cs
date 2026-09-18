@@ -54,9 +54,12 @@ internal static class DiscoveryReport
     }
 
     /// <summary>Lowercase hex of r||s over the domain and the body.</summary>
-    public static string Sign(ECDsa deviceKey, byte[] body)
+    public static string Sign(ECDsa deviceKey, byte[] body) => Sign(deviceKey, body, Domain);
+
+    /// <summary>The same, under another report's domain - see PresenceReporter.</summary>
+    public static string Sign(ECDsa deviceKey, byte[] body, string domainText)
     {
-        var domain = Encoding.UTF8.GetBytes(Domain);
+        var domain = Encoding.UTF8.GetBytes(domainText);
         var signed = new byte[domain.Length + body.Length];
         domain.CopyTo(signed, 0);
         body.CopyTo(signed, domain.Length);

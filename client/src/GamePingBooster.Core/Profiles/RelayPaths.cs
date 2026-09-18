@@ -41,12 +41,26 @@ public static class RelayPaths
                     PublicKey = relay.PublicKey,
                     // A setting of the relay, not of the road to it.
                     EntrySwitching = relay.EntrySwitching,
+                    Games = relay.Games,
                     ViaRelayId = relay.Id,
                 });
             }
         }
         return paths;
     }
+
+    /// <summary>
+    /// Whether a relay - or a path through an entry, which carries its relay's list - may carry
+    /// <paramref name="gameId"/>. An empty list is every game, and so is no game at all: with nothing
+    /// known to be playing there is nothing to rule a relay out for.
+    /// </summary>
+    public static bool Serves(RelayEntry relay, string? gameId) =>
+        string.IsNullOrWhiteSpace(gameId) || relay.Games.Count == 0 ||
+        relay.Games.Any(g => g.Equals(gameId, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>The relays that may carry <paramref name="gameId"/>, in profile order. See <see cref="Serves"/>.</summary>
+    public static List<RelayEntry> ServingGame(IEnumerable<RelayEntry> relays, string? gameId) =>
+        relays.Where(r => Serves(r, gameId)).ToList();
 
     /// <summary>
     /// The relay a path ends at: a relay's own id, or the id of the relay behind an entry. Two paths

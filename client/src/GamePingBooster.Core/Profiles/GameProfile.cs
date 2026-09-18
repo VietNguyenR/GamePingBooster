@@ -157,6 +157,16 @@ public sealed class RelayEntry
     [JsonPropertyName("entrySwitching")] public string? EntrySwitching { get; set; }
 
     /// <summary>
+    /// The games this relay may carry, by game id, as set in /admin/relays - empty for every game. PUBG's
+    /// ranges are Singapore's alone, so a Hong Kong relay only adds a leg to it: the operator takes PUBG
+    /// off that relay and the client never measures, chooses, fails over to or offers it for PUBG.
+    ///
+    /// Absent from older profiles and from self-hosted relays, which is every game. A client older than the
+    /// field ignores it. See <see cref="RelayPaths.Serves"/>.
+    /// </summary>
+    [JsonPropertyName("games")] public List<string> Games { get; set; } = [];
+
+    /// <summary>
     /// Set only on a path <see cref="RelayPaths.Expand"/> made from an entry: the id of the relay
     /// behind it. Never read from a profile and never written to one.
     /// </summary>

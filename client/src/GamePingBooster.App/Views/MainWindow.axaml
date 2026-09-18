@@ -211,6 +211,12 @@
                     DropDownClosed="OnRelayListClosed"
                     Background="#242424" Foreground="#E2E8F0" BorderThickness="0" CornerRadius="8"
                     ToolTip.Tip="{DynamicResource main.server.tip}">
+            <ComboBox.Styles>
+              <!-- A relay the operator has taken off the game in play stays in the list, greyed out. -->
+              <Style Selector="ComboBoxItem" x:DataType="vm:RelayChoiceItem">
+                <Setter Property="IsEnabled" Value="{Binding IsAvailable}" />
+              </Style>
+            </ComboBox.Styles>
             <ComboBox.ItemTemplate>
               <DataTemplate x:DataType="vm:RelayChoiceItem">
                 <TextBlock Text="{Binding Label}" TextTrimming="CharacterEllipsis" />

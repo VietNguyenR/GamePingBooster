@@ -15,10 +15,12 @@ internal readonly record struct QualityMeta(
 
 /// <summary>
 /// A move to another relay between matches and how the next match went, for <see cref="QualityFile.WriteRelayMove"/>.
+/// <paramref name="Reason"/> is "rescan" for a faster relay, "game" for leaving one not set to carry the game.
 /// <paramref name="FollowEnded"/> says why following stopped: "held", "no-match" (none within ten minutes),
 /// "tunnel-replaced" or "disconnected".
 /// </summary>
 internal sealed record RelayMoveRecord(
+    string Reason,
     DateTimeOffset AtUtc,
     string From,
     string To,
@@ -264,7 +266,7 @@ internal sealed class QualityFile(Action<string> log)
         w.WriteBoolean("moved", true);
         w.WriteString("from", move.From);
         w.WriteString("to", move.To);
-        w.WriteString("reason", "rescan");
+        w.WriteString("reason", move.Reason);
         w.WriteNumber("windowSeconds", Round(move.MeasureSeconds));
         w.WriteNumber("worseShare", 0);
         w.WriteNumber("silenceSeconds", Round(move.SilenceSeconds));

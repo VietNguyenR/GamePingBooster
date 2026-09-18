@@ -79,6 +79,7 @@ internal static class StringsEn
         ["relay.automatic"] = "Automatic - the fastest",
         ["relay.withPing"] = "{0} - {1} ms",
         ["relay.noAnswer"] = "{0} - no answer",
+        ["relay.notForGame"] = "{0} - not used for {1}",
 
         ["licence.renewing"] =
             "Renewing the licence... If your plan has ended, renew it on the website and it is picked up here.",
@@ -180,6 +181,7 @@ internal static class StringsEn
         ["svc.connectedWaiting"] = "Connected to {0} - waiting for {1} to start",
         ["svc.connectedWaitingAny"] = "Connected to {0} - waiting for a supported game to start",
         ["svc.movedRelay"] = "Connected to {0} - moved off {1} for a better route",
+        ["svc.movedForGame"] = "Connected to {0} - {1} is not used for {2}",
         ["svc.rescanMoved"] = "Connected to {0} - moved from {1} between matches, {2} ms faster",
         ["svc.reconnecting"] = "Reconnecting via {0} (attempt {1}) - traffic is on the normal path",
         ["svc.reconnected"] = "Reconnected to {0}",
@@ -193,6 +195,7 @@ internal static class StringsEn
             "Disconnected automatically - no game was open for {0} minutes. Press Connect before you play.",
 
         ["choiceNote.nextConnect"] = "Applies the next time you connect.",
+        ["choiceNote.notForGame"] = "{0} is not used for {1} - using {2}.",
         ["choiceNote.notAnswering"] = "{0} is not answering - using {1} instead.",
 
         ["refusal.notSignedIn"] =
