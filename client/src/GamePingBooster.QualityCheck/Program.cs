@@ -71,6 +71,12 @@ internal static class Program
         NothingMovesAgainForFiveMinutes();
         ADifferentWayInStartsTheWindowAgain();
         TheBetterOfTwoWaysIsChosen();
+        TheWayLeftIsReturnedToOnceItRecovers();
+        AWayLeftThatStillLosesProbesIsNotReturnedTo();
+        AWayLeftThatIsOnlyAsFastIsNotReturnedTo();
+        AWayLeftWithTheWorseTailIsNotReturnedTo();
+        NothingIsReturnedToWhenTheMoveWasNotMade();
+        AMoveToAFasterWayDoesNotBounceBack();
 
         Console.WriteLine();
         if (_failures == 0)
@@ -590,6 +596,84 @@ internal static class Program
             string.Join(", ", w.Decisions.Select(d => d.To)));
     }
 
+    /// <summary>The tunnel moved from sg-4 to vn-1-sg4, as on 2026-09-18 at 20:54.</summary>
+    private static Ways LeftSg4()
+    {
+        var w = new Ways { Current = "sg-4", Others = ["vn-1-sg4"] };
+        w.Run(120, i => i % 5 == 0 ? null : 90, _ => 60);
+        w.Current = "vn-1-sg4";
+        w.Others = ["sg-4"];
+        return w;
+    }
+
+    private static void TheWayLeftIsReturnedToOnceItRecovers()
+    {
+        // 2026-09-18: sg-4 at 43 ms against 53 on the entry for the rest of the hour, and the player stayed on
+        // the entry - 10 ms or more in only 40% of quarter seconds. Replayed from that session's own samples.
+        var w = LeftSg4();
+        var pairs = Session20260918.Pairs();
+        w.Replay(pairs.Take(DoorSwitchPolicy.CooldownTicks - 1));
+        Check("2026-09-18: nothing goes back inside five minutes of leaving sg-4", w.Decisions.Count == 1,
+            string.Join(", ", w.Decisions.Select(d => $"{d.From}->{d.To}")));
+        w.Replay(pairs.Skip(DoorSwitchPolicy.CooldownTicks - 1));
+        var back = w.Decisions.Skip(1).FirstOrDefault();
+        Check("  ...then goes back to sg-4, recovered at 43 ms against 53",
+            back is { Return: true, From: "vn-1-sg4", To: "sg-4" },
+            string.Join(", ", w.Decisions.Select(d => $"{d.From}->{d.To}{(d.Return ? " (return)" : "")}")));
+        if (back is null) return;
+        Check("  ...as soon as the five minutes are up",
+            back.TickIndex - w.Decisions[0].TickIndex == DoorSwitchPolicy.CooldownTicks,
+            $"{(back.TickIndex - w.Decisions[0].TickIndex) / SpikeDetector.TicksPerSecond} s after leaving");
+        Check("  ...judged over two minutes", back.WindowTicks == DoorSwitchPolicy.ReturnWindowTicks, $"{back.WindowTicks}");
+        Check("  ...and says what each way measured",
+            back.ToStats.P50 is > 42 and < 45 && back.FromStats.P50 is > 52 and < 55,
+            $"sg-4 {back.ToStats.P50:F1}, vn-1-sg4 {back.FromStats.P50:F1}");
+    }
+
+    private static void AWayLeftThatStillLosesProbesIsNotReturnedTo()
+    {
+        var w = LeftSg4();
+        w.Run(DoorSwitchPolicy.CooldownTicks * 2, _ => 53, i => i % 50 == 0 ? null : 43);
+        Check("a way left still losing one probe in fifty is not gone back to", w.Decisions.Count == 1,
+            $"{w.Decisions.Count} decision(s)");
+    }
+
+    private static void AWayLeftThatIsOnlyAsFastIsNotReturnedTo()
+    {
+        var w = LeftSg4();
+        w.Run(DoorSwitchPolicy.CooldownTicks * 2, 52, 51);
+        Check("a way left that is only a millisecond faster is not gone back to", w.Decisions.Count == 1,
+            $"{w.Decisions.Count} decision(s)");
+    }
+
+    private static void AWayLeftWithTheWorseTailIsNotReturnedTo()
+    {
+        var w = LeftSg4();
+        w.Run(DoorSwitchPolicy.CooldownTicks * 2, _ => 53, i => i % 10 == 0 ? 95 : 43);
+        Check("a way left, faster at the median but spiking every few seconds, is not gone back to",
+            w.Decisions.Count == 1, $"{w.Decisions.Count} decision(s)");
+    }
+
+    private static void NothingIsReturnedToWhenTheMoveWasNotMade()
+    {
+        // Record mode: the decision is written down and the tunnel stays where it was.
+        var w = new Ways { Current = "sg-4", Others = ["vn-1-sg4"] };
+        w.Run(120, i => i % 5 == 0 ? null : 90, _ => 60);
+        w.Run(DoorSwitchPolicy.CooldownTicks * 2, 43, 53);
+        Check("a decision not acted on is never gone back from", w.Decisions.Count == 1 && !w.Decisions.Any(d => d.Return),
+            string.Join(", ", w.Decisions.Select(d => $"{d.From}->{d.To}")));
+    }
+
+    private static void AMoveToAFasterWayDoesNotBounceBack()
+    {
+        var w = new Ways();
+        w.Run(120, 56, 44);
+        w.Current = "sg-2-vn";
+        w.Others = ["sg-2"];
+        w.Run(DoorSwitchPolicy.CooldownTicks * 2, 44, 56);
+        Check("a move to a way that stays faster is not undone", w.Decisions.Count == 1, $"{w.Decisions.Count} decision(s)");
+    }
+
     /// <summary>
     /// The pongs down the current way and the probes down the others, quarter second by quarter second. Values
     /// are the round trip to relayd; null is sent and never answered.
@@ -621,6 +705,27 @@ internal static class Program
                     DoorIds = Others,
                     DoorSent = Enumerable.Repeat(true, Others.Length).ToArray(),
                     DoorMs = others.Select(o => o(i) is { } v ? v + Noise() : (double?)null).ToArray(),
+                };
+                _index++;
+                if (Policy.Feed(tick) is { } decision) Decisions.Add(decision);
+            }
+        }
+
+        /// <summary>Measured pairs as they were, without added noise, against the one other way.</summary>
+        public void Replay(IEnumerable<(double? Current, bool CurrentSent, double? Other, bool OtherSent)> pairs)
+        {
+            foreach (var (current, currentSent, other, otherSent) in pairs)
+            {
+                var tick = new QualityTick(_index, new DateTimeOffset(2026, 9, 18, 13, 55, 0, TimeSpan.Zero)
+                    .AddMilliseconds(_index * SpikeDetector.TickMs))
+                {
+                    Active = true,
+                    RelayProcessSent = currentSent,
+                    RelayProcessMs = current,
+                    CurrentDoor = Current,
+                    DoorIds = Others,
+                    DoorSent = [otherSent],
+                    DoorMs = [other],
                 };
                 _index++;
                 if (Policy.Feed(tick) is { } decision) Decisions.Add(decision);

@@ -205,7 +205,8 @@ internal sealed class QualityFile(Action<string> log)
         w.WriteBoolean("moved", moved);
         w.WriteString("from", decision.From);
         w.WriteString("to", decision.To);
-        w.WriteNumber("windowSeconds", DoorSwitchPolicy.WindowTicks / SpikeDetector.TicksPerSecond);
+        w.WriteString("reason", decision.Return ? "return" : "worse");
+        w.WriteNumber("windowSeconds", decision.WindowTicks / SpikeDetector.TicksPerSecond);
         w.WriteNumber("worseShare", Math.Round(decision.WorseShare, 2));
         w.WriteNumber("comparable", decision.Comparable);
 

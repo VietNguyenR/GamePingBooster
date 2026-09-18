@@ -886,9 +886,13 @@ internal sealed class SpikeRecorder : IQualitySink
             : context.MovesEnabled
                 ? "not moving - the tunnel is not connected right now"
                 : "recorded, not moved (entrySwitching is \"record\")";
-        _log($"Entry switching: {decision.From} was worse than {decision.To} in {decision.WorseShare:P0} of the last " +
-             $"{DoorSwitchPolicy.WindowTicks / SpikeDetector.TicksPerSecond} s - {Figures(decision.FromStats)} against " +
-             $"{Figures(decision.ToStats)}; {what}.");
+        var seconds = decision.WindowTicks / SpikeDetector.TicksPerSecond;
+        _log(decision.Return
+            ? $"Entry switching: {decision.To}, left earlier, has recovered - faster than {decision.From} in " +
+              $"{decision.WorseShare:P0} of the last {seconds} s, {Figures(decision.ToStats)} against " +
+              $"{Figures(decision.FromStats)}; {(requested ? "going back to it" : what)}."
+            : $"Entry switching: {decision.From} was worse than {decision.To} in {decision.WorseShare:P0} of the last " +
+              $"{seconds} s - {Figures(decision.FromStats)} against {Figures(decision.ToStats)}; {what}.");
     }
 
     /// <summary>Adds one settled quarter second to the move being followed. Returns it once the minute is complete.</summary>

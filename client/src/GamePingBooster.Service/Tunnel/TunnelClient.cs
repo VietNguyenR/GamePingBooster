@@ -33,6 +33,7 @@ internal sealed class TunnelClient : IDisposable
     private WintunAdapter? _adapter;
     private Thread? _uplinkThread;
     private Thread? _downlinkThread;
+    private Thread? _keepaliveThread;
     private CancellationTokenSource? _cts;
 
     private ulong _sessionId;
@@ -48,7 +49,10 @@ internal sealed class TunnelClient : IDisposable
     private long _pingsSent;
     private long _pongsReceived;
     private double _lastRttMs = -1;
-    private long _lastPongTicks;
+
+    // The last time anything of this session came back from the relay: a pong or a data packet.
+    // Written by the downlink thread on every packet, so a plain volatile store, not Interlocked.
+    private long _lastHeardTicks;
 
     // Every place a packet can be lost on this machine rather than out on the internet. Without
     // these, a player reporting "it still feels laggy" leaves nothing to look at, and the honest
@@ -127,14 +131,21 @@ internal sealed class TunnelClient : IDisposable
     public bool AnnounceDisconnect { get; set; } = true;
 
     /// <summary>
-    /// How long since the relay last answered. The reconnect supervisor watches this: it is the
-    /// only evidence available that a tunnel carrying no game traffic is still alive.
+    /// How long since the relay last sent this session anything - a pong or a game packet. The
+    /// reconnect supervisor watches this.
+    ///
+    /// It was pongs only, and on 2026-09-18 that reconnected a VALORANT player in the first minute of
+    /// every match. The game pegged their CPU, the keepalive (then a thread-pool timer) went unrun for
+    /// 15+ seconds, so no pings went out and no pongs came back - while the pump threads carried over a
+    /// hundred game packets a second each way. The reconnect pulled the game routes, the game server
+    /// saw the player's own address for a second and then the relay's again, and the match never
+    /// recovered. A relay that is delivering the game's packets is alive, whatever the pongs say.
     /// </summary>
-    public TimeSpan SinceLastPong
+    public TimeSpan SinceLastHeard
     {
         get
         {
-            var ticks = Interlocked.Read(ref _lastPongTicks);
+            var ticks = Volatile.Read(ref _lastHeardTicks);
             if (ticks == 0) return TimeSpan.Zero;
             return TimeSpan.FromSeconds((double)(_clock.ElapsedTicks - ticks) / Stopwatch.Frequency);
         }
@@ -261,7 +272,7 @@ internal sealed class TunnelClient : IDisposable
                 _sessionId = result.SessionId;
                 Session = result;
                 _subnetBroadcast = UplinkFilter.SubnetBroadcastFor(result.ClientIp);
-                Interlocked.Exchange(ref _lastPongTicks, _clock.ElapsedTicks);
+                Volatile.Write(ref _lastHeardTicks, _clock.ElapsedTicks);
                 _log($"Handshake succeeded in {HandshakeRttMs:F0} ms. Tunnel IP: {result.ClientIp}, MTU {result.Mtu}");
                 return result;
             }
@@ -546,10 +557,16 @@ internal sealed class TunnelClient : IDisposable
             IsBackground = true,
             Priority = ThreadPriority.AboveNormal,
         };
+        // Its own thread at the pumps' priority, not a thread-pool timer: see KeepaliveLoop.
+        _keepaliveThread = new Thread(() => KeepaliveLoop(token))
+        {
+            Name = "gpb-keepalive",
+            IsBackground = true,
+            Priority = ThreadPriority.AboveNormal,
+        };
         _uplinkThread.Start();
         _downlinkThread.Start();
-
-        _ = Task.Run(() => KeepaliveLoopAsync(token), token);
+        _keepaliveThread.Start();
     }
 
     /// <summary>Wintun to relay: read what Windows pushed into the adapter, wrap it, send it.</summary>
@@ -661,6 +678,9 @@ internal sealed class TunnelClient : IDisposable
                     case GpbProtocol.TypeData:
                         if (GpbProtocol.TryReadData(buffer.AsSpan(0, n), out var sid, out var ip) && sid == _sessionId)
                         {
+                            // Proof of life, like a pong - see SinceLastHeard.
+                            Volatile.Write(ref _lastHeardTicks, _clock.ElapsedTicks);
+
                             // An answer to our own game-server probe, if one is outstanding. It is
                             // consumed here rather than injected: the request was assembled by
                             // hand instead of being sent through a socket, so Windows has no
@@ -715,7 +735,7 @@ internal sealed class TunnelClient : IDisposable
                         {
                             var now = (ulong)_clock.ElapsedTicks;
                             _lastRttMs = (now - stamp) * 1000.0 / Stopwatch.Frequency;
-                            Interlocked.Exchange(ref _lastPongTicks, (long)now);
+                            Volatile.Write(ref _lastHeardTicks, (long)now);
                             Interlocked.Increment(ref _pongsReceived);
                             _qualitySink?.OnPong(_lastRttMs, Stopwatch.GetTimestamp());
                         }
@@ -762,16 +782,38 @@ internal sealed class TunnelClient : IDisposable
     ///
     /// The extra traffic is nothing: one ping is a few dozen bytes, so this is well under a
     /// kilobyte a minute against a game sending over a hundred packets a second.
+    ///
+    /// A dedicated thread at the pumps' priority, not a PeriodicTimer on the thread pool. The pool is
+    /// what a game that pegs the CPU starves first: on 2026-09-18 a VALORANT player's service went 6 s
+    /// without running a pool timer while the pump threads never missed a beat, and a keepalive that
+    /// stops is a pong that stops - see SinceLastHeard for what that led to.
     /// </summary>
-    private async Task KeepaliveLoopAsync(CancellationToken ct)
+    private void KeepaliveLoop(CancellationToken ct)
     {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
-        while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
+        var interval = Stopwatch.Frequency; // one second
+        var next = Stopwatch.GetTimestamp() + interval;
+        while (!ct.IsCancellationRequested)
         {
+            // Wait for the next second on a fixed cadence, so a slow send does not stretch the gap after it.
+            var waitMs = (int)Math.Max(0, (next - Stopwatch.GetTimestamp()) * 1000 / Stopwatch.Frequency);
+            try
+            {
+                if (ct.WaitHandle.WaitOne(waitMs)) return;
+            }
+            catch (ObjectDisposedException)
+            {
+                return; // Dispose got to the token source first.
+            }
+            next += interval;
+            // Fell far behind - a sleep, a stall - so start the cadence afresh rather than firing a burst.
+            var now = Stopwatch.GetTimestamp();
+            if (next < now) next = now + interval;
+
             try
             {
                 var ping = GpbProtocol.BuildPing(_sessionId, (ulong)_clock.ElapsedTicks);
-                await _socket!.SendAsync(ping, SocketFlags.None, ct).ConfigureAwait(false);
+                if (_socket is not { } socket) continue;
+                socket.Send(ping, SocketFlags.None);
                 Interlocked.Increment(ref _pingsSent);
 
                 // Every thirtieth tick, so still once every 30 seconds now that the tick is a
@@ -781,9 +823,11 @@ internal sealed class TunnelClient : IDisposable
                 // one and tripled the noise in the log.
                 if (++_keepaliveTicks % 30 == 0) ReportDrops();
             }
-            catch (Exception) when (!ct.IsCancellationRequested)
+            catch (Exception)
             {
-                // Temporary network outage; try again next tick.
+                // A temporary network outage, a MoveTo swapping the socket, or Dispose closing it. Every
+                // exception is caught: one escaping a thread of our own would take the service down.
+                if (_disposing || ct.IsCancellationRequested) return;
             }
         }
     }
@@ -991,6 +1035,9 @@ internal sealed class TunnelClient : IDisposable
                  $"downlink stopped: {downlinkStopped}). The adapter is about to be released while " +
                  "it may still be in use - if the service dies right after this line, that is why.");
         }
+
+        // Wakes at once on the cancel above. It never touches the adapter, so no warning if it is slow.
+        _keepaliveThread?.Join(TimeSpan.FromSeconds(2));
 
         _cts?.Dispose();
     }

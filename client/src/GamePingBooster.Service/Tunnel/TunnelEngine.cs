@@ -1423,9 +1423,9 @@ internal sealed class TunnelEngine : IAsyncDisposable
     // ---------------------------------------------------------- reconnection
 
     /// <summary>
-    /// How long the relay may stay silent before the tunnel is presumed dead. Keepalives go out
-    /// every 3 seconds, so this is five missed answers - long enough to ride out a hiccup, short
-    /// enough that a player notices the reconnect rather than a dead game.
+    /// How long the relay may stay silent - no pong and no game packet - before the tunnel is presumed
+    /// dead. Keepalives go out every second, so this is fifteen missed answers - long enough to ride out
+    /// a hiccup, short enough that a player notices the reconnect rather than a dead game.
     /// </summary>
     private static readonly TimeSpan SilenceBeforeDead = TimeSpan.FromSeconds(15);
 
@@ -1516,7 +1516,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
                     return;
                 }
 
-                var silence = tunnel.SinceLastPong;
+                var silence = tunnel.SinceLastHeard;
                 if (silence < SilenceBeforeDead)
                 {
                     // Here and nowhere else, so a move between ways into the relay can never run beside a
