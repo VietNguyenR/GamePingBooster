@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using Avalonia.Media;
 using Avalonia.Threading;
 using GamePingBooster.App.Services;
+using GamePingBooster.App.Services.Localization;
 using GamePingBooster.Core.Ipc;
 
 namespace GamePingBooster.App.ViewModels;
@@ -21,6 +22,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _pipe = pipe;
         _pipe.StatusReceived += OnStatus;
         _pipe.Disconnected += OnDisconnected;
+
+        // Every line on this screen is computed, so switching language is a matter of telling the
+        // bindings to ask again. This view model lives as long as the app, so there is nothing to
+        // unsubscribe from.
+        Loc.Changed += OnLanguageChanged;
     }
 
     // ------------------------------------------------------------ licence
@@ -113,7 +119,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool ShowLicence => !string.IsNullOrWhiteSpace(LicenceUrl);
 
     /// <summary>What the menu item says. One entry, two states, no dead end either way.</summary>
-    public string AccountMenuText => HasToken ? "Account" : "Sign in";
+    public string AccountMenuText => Loc.T(HasToken ? "main.account.account" : "main.account.signIn");
 
     // ------------------------------------------------------------ updates
 
@@ -134,7 +140,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool HasUpdate => Update is not null;
 
     /// <summary>The footer line, and only there when a newer release exists.</summary>
-    public string UpdateFooterText => Update is null ? "" : $"New version v{Update.Version} available";
+    public string UpdateFooterText => Update is null ? "" : Loc.F("main.update.available", Update.Version);
 
     /// <summary>
     /// The last thing the renewer had to say, if anything.
@@ -168,19 +174,19 @@ public sealed class MainViewModel : INotifyPropertyChanged
             {
                 return !string.IsNullOrEmpty(LicenceNotice)
                     ? LicenceNotice!
-                    : "Renewing the licence... If your plan has ended, renew it on the website and it is picked up here.";
+                    : Loc.T("licence.renewing");
             }
             if (LicenceBlocked) return LicenceRefusal!;
             if (!string.IsNullOrEmpty(LicenceNotice)) return LicenceNotice!;
-            if (!HasToken) return "Not signed in";
+            if (!HasToken) return Loc.T("licence.notSignedIn");
 
             // A licence server that is set but has never sent a game list means the ranges are
             // whatever the installer carried. The tunnel works, so nothing else would say so.
             if (!string.IsNullOrWhiteSpace(LicenceUrl) && ProfileSource == "shipped")
             {
-                return "Signed in - using the installed game list, not the current one";
+                return Loc.T("licence.signedInShipped");
             }
-            if (TokenExpiresAt is not { } expiry) return "Signed in";
+            if (TokenExpiresAt is not { } expiry) return Loc.T("licence.signedIn");
 
             // Renewal happens on its own at half of remaining life, so an expiry hours away is
             // normal and not something to alarm anybody about. Only say something when it is
@@ -191,9 +197,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             // trial gaining a day each time somebody signed in again. The plan's real end is on
             // the Account screen, which asks the licence server for it.
             var left = expiry - DateTimeOffset.UtcNow;
-            if (left <= TimeSpan.Zero) return "Licence expired - renewing it automatically";
-            if (left < TimeSpan.FromHours(2)) return $"Licence expires in {left.TotalMinutes:F0} min";
-            return "Signed in";
+            if (left <= TimeSpan.Zero) return Loc.T("licence.expired");
+            if (left < TimeSpan.FromHours(2)) return Loc.F("licence.expiresIn", $"{left.TotalMinutes:F0}");
+            return Loc.T("licence.signedIn");
         }
     }
 
@@ -215,8 +221,21 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    private string _detail = "Starting up...";
+    private string _detail = Loc.T("detail.starting");
     public string Detail { get => _detail; private set => Set(ref _detail, value); }
+
+    /// <summary>
+    /// Which key <see cref="Detail"/> was written from, when the WINDOW wrote it rather than the
+    /// service - null once a status has overwritten it. Kept so that a language change can say the
+    /// same line again: before the service has ever answered, there is no status to rebuild it from.
+    /// </summary>
+    private string? _detailKey = "detail.starting";
+
+    private void SetDetail(string key)
+    {
+        _detailKey = key;
+        Detail = Loc.T(key);
+    }
 
     // ------------------------------------------------------- configuration state
     //
@@ -526,15 +545,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     // --------------------------------------------------------- derived UI properties
 
-    public string StatusText => State switch
+    public string StatusText => Loc.T(State switch
     {
-        TunnelState.Disconnected => "Not connected",
-        TunnelState.Connecting => "Connecting...",
-        TunnelState.Connected => "Connected",
-        TunnelState.Reconnecting => "Reconnecting...",
-        TunnelState.Faulted => "Error",
-        _ => "Unknown",
-    };
+        TunnelState.Disconnected => "status.disconnected",
+        TunnelState.Connecting => "status.connecting",
+        TunnelState.Connected => "status.connected",
+        TunnelState.Reconnecting => "status.reconnecting",
+        TunnelState.Faulted => "status.faulted",
+        _ => "status.unknown",
+    });
 
     /// <summary>
     /// A ready-made brush instead of a colour string: binding a string to IBrush goes through a
@@ -548,9 +567,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _ => Brushes.Gray,
     };
 
-    public string ActionButtonText => State is TunnelState.Connected or TunnelState.Connecting
-        ? "Disconnect"
-        : "Connect";
+    public string ActionButtonText => Loc.T(State is TunnelState.Connected or TunnelState.Connecting
+        ? "action.disconnect"
+        : "action.connect");
 
     public bool IsBusy => State is TunnelState.Connecting or TunnelState.Reconnecting;
     // Nothing to connect to until a relay and a key exist, so the button is dead until then and
@@ -579,8 +598,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </summary>
     public string GamePingText => GamePingMs is { } g
         ? (GamePingDirect ? "" : "~") +
-          (GameRegionName is { } region ? $"{g:F0} ms to {region}" : $"{g:F0} ms")
-        : "-";
+          (GameRegionName is { } region
+              ? Loc.F("value.msTo", $"{g:F0}", region)
+              : Loc.F("value.ms", $"{g:F0}"))
+        : Loc.T("value.none");
 
     /// <summary>
     /// What the in-game figure is, on hover. The estimate is to the game's servers in a region, and a player who
@@ -588,18 +609,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// that the game chooses its server and the relay only changes the road there.
     /// </summary>
     public string GamePingTip => GamePingMs is null
-        ? "Appears once the connection has been measured."
+        ? Loc.T("gamePing.tip.pending")
         : GamePingDirect
-            ? "Measured: echoes to this match's game server, through the tunnel."
-            : $"Estimated: the ping to {RelayName ?? "the relay"} plus the distance from there to the game's " +
-              $"{GameRegionName ?? "servers"} servers. The game picks its own server - changing the relay changes " +
-              "the route to it, not the server. In a match it follows the region the game actually uses, where that " +
-              "can be told from its traffic.";
+            ? Loc.T("gamePing.tip.measured")
+            : Loc.F("gamePing.tip.estimated",
+                RelayName ?? Loc.T("gamePing.tip.theRelay"),
+                GameRegionName ?? Loc.T("gamePing.tip.itsServers"));
 
-    public string PingText => PingMs is { } p ? $"{p:F0} ms" : "-";
-    public string LossText => LossRatio is { } l ? $"{l * 100:F1}%" : "-";
-    public string RelayText => RelayName ?? "-";
-    public string RouteText => ActiveRoutes > 0 ? $"{ActiveRoutes} ranges" : "-";
+    public string PingText => PingMs is { } p ? Loc.F("value.ms", $"{p:F0}") : Loc.T("value.none");
+    public string LossText => LossRatio is { } l ? $"{l * 100:F1}%" : Loc.T("value.none");
+    public string RelayText => RelayName ?? Loc.T("value.none");
+    public string RouteText => ActiveRoutes > 0 ? Loc.F("value.ranges", ActiveRoutes) : Loc.T("value.none");
 
     /// <summary>
     /// The game being played, or how many are supported. A count and not the names: the line has
@@ -615,15 +635,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public IBrush GameTextBrush => HasGames ? LinkBrush : ValueBrush;
 
     public string GameText => GameName is not null
-        ? GameRunning ? $"{GameName} is running" : $"{GameName} is not open"
-        : GameCount > 0 ? $"No game open - {GameCount} supported" : "-";
+        ? Loc.F(GameRunning ? "game.running" : "game.notOpen", GameName)
+        : GameCount > 0 ? Loc.F("game.noneOpen", GameCount) : Loc.T("value.none");
 
     /// <summary>
     /// Packet counters. Not cosmetic: when the tunnel connects but traffic does not flow, the
     /// first question is always whether the client is sending at all, and this answers it
     /// without attaching a packet capture.
     /// </summary>
-    public string PacketsText => $"{PacketsSent} up / {PacketsReceived} down";
+    public string PacketsText => Loc.F("value.packets", PacketsSent, PacketsReceived);
 
     // ------------------------------------------------------------------- actions
 
@@ -656,7 +676,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _holdConnecting = false;
         try
         {
-            Detail = "Disconnecting...";
+            SetDetail("detail.disconnecting");
             await _pipe.DisconnectTunnelAsync().ConfigureAwait(true);
             await Task.WhenAny(wait.Task, Task.Delay(timeout)).ConfigureAwait(true);
         }
@@ -740,7 +760,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
                 if (profileSync is not null && !string.IsNullOrWhiteSpace(LicenceUrl))
                 {
-                    Detail = "Getting the latest server list...";
+                    SetDetail("detail.fetchingProfile");
                     // ConfigureAwait(true): this is called from a click on the UI thread, and the
                     // next line raises PropertyChanged - off the UI thread that breaks Avalonia's
                     // bindings in ways that surface later and somewhere else.
@@ -749,7 +769,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                         .ConfigureAwait(true);
                 }
 
-                Detail = "Sending the request to the background service...";
+                SetDetail("detail.sending");
                 await _pipe.ConnectTunnelAsync().ConfigureAwait(true);
                 _connectSentAt = DateTimeOffset.UtcNow;
             }
@@ -782,6 +802,58 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// <summary>Whether the service sends connection quality after each match; null from a service too old to.</summary>
     public bool? QualitySharing { get; private set; }
 
+    /// <summary>
+    /// Says everything on this screen again in the language just chosen.
+    ///
+    /// Every text property here is computed from state, so the words follow as soon as the bindings
+    /// ask again - which is what these Raise calls are for. The three lines the SERVICE wrote are
+    /// the exception: those are rebuilt from the code and arguments of the last status, which is
+    /// why they are stored rather than only displayed. See ApplyServiceText.
+    /// </summary>
+    private void OnLanguageChanged()
+    {
+        if (LastStatus is { } status) ApplyServiceText(status);
+        else if (_detailKey is { } key) Detail = Loc.T(key);
+
+        Raise(nameof(AccountMenuText));
+        Raise(nameof(UpdateFooterText));
+        Raise(nameof(LicenceText));
+        Raise(nameof(StatusText));
+        Raise(nameof(ActionButtonText));
+        Raise(nameof(GamePingText));
+        Raise(nameof(GamePingTip));
+        Raise(nameof(PingText));
+        Raise(nameof(LossText));
+        Raise(nameof(RelayText));
+        Raise(nameof(RouteText));
+        Raise(nameof(GameText));
+        Raise(nameof(PacketsText));
+
+        foreach (var item in RelayItems) item.RelabelForLanguage();
+    }
+
+    /// <summary>
+    /// The three lines the service supplies: the detail under the status, the licence refusal, and
+    /// the note about the chosen relay.
+    ///
+    /// Each arrives twice - as English, and as a language key with its arguments - and the key wins
+    /// when this build knows it. A service too old to send keys, or one sending a key from a newer
+    /// version, falls through to the English it also sent, which is what this UI always did.
+    /// </summary>
+    private void ApplyServiceText(StatusMessage status)
+    {
+        _detailKey = null;
+        Detail = Say(status.DetailCode, status.DetailArgs, status.Detail) ?? "";
+        LicenceRefusal = Say(status.LicenceRefusalCode, status.LicenceRefusalArgs, status.LicenceRefusal);
+        RelayChoiceNote = Say(status.RelayChoiceNoteCode, status.RelayChoiceNoteArgs, status.RelayChoiceNote);
+    }
+
+    private static string? Say(string? code, List<string>? args, string? english)
+    {
+        if (string.IsNullOrEmpty(code)) return english;
+        return args is { Count: > 0 } ? Loc.F(code, [.. args]) : Loc.T(code);
+    }
+
     private void OnStatus(StatusMessage status) => Dispatcher.UIThread.Post(() =>
     {
         LastStatus = status;
@@ -811,7 +883,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         State = status.State;
-        Detail = status.Detail;
+        _detailKey = null;
+        Detail = Say(status.DetailCode, status.DetailArgs, status.Detail) ?? "";
         Error = status.Error;
         ApplyDetails(status);
     });
@@ -836,7 +909,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             ShowChoice(_confirmedChoice);
         }
 
-        RelayChoiceNote = status.RelayChoiceNote;
+        RelayChoiceNote = Say(status.RelayChoiceNoteCode, status.RelayChoiceNoteArgs, status.RelayChoiceNote);
 
         var profileStamp = status.ProfileUpdatedAt ?? 0;
         var connectedNow = status.State == TunnelState.Connected && State != TunnelState.Connected;
@@ -863,7 +936,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         RelayEndpoints = status.RelayEndpoints;
         Configured = status.Configured;
         LicenceUrl = status.LicenceUrl;
-        LicenceRefusal = status.LicenceRefusal;
+        LicenceRefusal = Say(status.LicenceRefusalCode, status.LicenceRefusalArgs, status.LicenceRefusal);
         ProfileSource = status.ProfileSource;
         QualitySharing = status.QualitySharing;
         DevicePublicKey = status.DevicePublicKey;
@@ -917,7 +990,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
 /// </summary>
 public sealed class RelayChoiceItem : INotifyPropertyChanged
 {
-    public static readonly RelayChoiceItem Automatic = new(null, "Automatic - the fastest", null, null);
+    /// <summary>
+    /// The "let the app choose" line. Its name is not passed in and not stored: it is the one item
+    /// whose text is ours rather than a relay's, so it is read from the language table every time
+    /// and follows a language change without being rebuilt.
+    /// </summary>
+    public static readonly RelayChoiceItem Automatic = new(null, "", null, null);
 
     public RelayChoiceItem(string? id, string name, string? location, double? pingMs)
     {
@@ -929,9 +1007,13 @@ public sealed class RelayChoiceItem : INotifyPropertyChanged
     public string? Id { get; }
 
     private string _label;
-    public string Label => _label;
+    public string Label => Id is null ? Loc.T("relay.automatic") : _label;
 
     public event PropertyChangedEventHandler? PropertyChanged;
+
+    /// <summary>Says the label again in the language now in use. See <see cref="Automatic"/>.</summary>
+    public void RelabelForLanguage() =>
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Label)));
 
     public void Update(string name, string? location, double? pingMs)
     {
@@ -945,6 +1027,6 @@ public sealed class RelayChoiceItem : INotifyPropertyChanged
     {
         var place = location is null || name.Contains(location, StringComparison.OrdinalIgnoreCase) ? name : $"{name} ({location})";
         if (id is null) return place;
-        return place + (pingMs is { } ms ? $" - {ms:F0} ms" : " - no answer");
+        return pingMs is { } ms ? Loc.F("relay.withPing", place, $"{ms:F0}") : Loc.F("relay.noAnswer", place);
     }
 }

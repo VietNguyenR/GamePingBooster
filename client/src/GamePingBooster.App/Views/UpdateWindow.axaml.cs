@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
 using GamePingBooster.App.Services;
+using GamePingBooster.App.Services.Localization;
 using GamePingBooster.App.ViewModels;
 using GamePingBooster.Core.Ipc;
 
@@ -33,11 +34,11 @@ public partial class UpdateWindow : SurfaceWindow
         _vm = vm;
         InitializeComponent();
 
-        Find<TextBlock>("TitleText").Text = $"Update to v{update.Version}";
+        Find<TextBlock>("TitleText").Text = Loc.F("update.title", update.Version);
         var current = UpdateChecker.CurrentVersion();
         Find<TextBlock>("SubtitleText").Text = update.InstallerSize is { } size
-            ? $"You have v{current}. Download size {FormatMb(size)}."
-            : $"You have v{current}.";
+            ? Loc.F("update.subtitle", current, FormatMb(size))
+            : Loc.F("update.subtitleNoSize", current);
 
         if (Warning() is { } warning)
         {
@@ -59,16 +60,9 @@ public partial class UpdateWindow : SurfaceWindow
     {
         if (_vm is null) return null;
 
-        if (_vm.GameRunning)
-        {
-            var game = _vm.GameName ?? "A game";
-            return $"{game} is running. If you are in a match, finish it first: updating disconnects you, " +
-                   "and the game goes back to your normal internet route until you connect again.";
-        }
+        if (_vm.GameRunning) return Loc.F("update.warn.game", _vm.GameName ?? Loc.T("main.label.game"));
 
-        return _vm.State is TunnelState.Disconnected
-            ? null
-            : "You are connected. The update will disconnect you while it installs; press Connect again when the app reopens.";
+        return _vm.State is TunnelState.Disconnected ? null : Loc.T("update.warn.connected");
     }
 
     private void Show(string panel)
@@ -94,7 +88,7 @@ public partial class UpdateWindow : SurfaceWindow
             if (total is { } t && t > 0)
             {
                 bar.Value = Math.Min(1.0, (double)received / t);
-                text.Text = $"{FormatMb(received)} / {FormatMb(t)}";
+                text.Text = Loc.F("update.progress", FormatMb(received), FormatMb(t));
             }
             else
             {
@@ -113,24 +107,26 @@ public partial class UpdateWindow : SurfaceWindow
         }
         catch (Exception ex)
         {
-            Fail(ex switch
+            // By type, not by the exception's own words: those are written in English for the log,
+            // and what goes on screen has to be in the language the person chose. See UpdateInstaller.
+            Fail(Loc.T(ex switch
             {
-                InvalidDataException or TimeoutException => ex.Message,
-                _ => "The download failed. Check your internet connection and try again, or download the installer from the release page.",
-            });
+                InvalidDataException => "update.fail.mismatch",
+                TimeoutException => "update.fail.stalled",
+                _ => "update.fail.download",
+            }));
             return;
         }
 
-        Find<TextBlock>("InstallText").Text = "Waiting for Windows permission to install...";
+        Find<TextBlock>("InstallText").Text = Loc.T("update.installing.waiting");
         Show("InstallPanel");
 
         // Now, and not before: see the class summary.
         if (_vm is not null && _vm.State is not TunnelState.Disconnected)
         {
-            Find<TextBlock>("InstallText").Text = "Disconnecting...";
+            Find<TextBlock>("InstallText").Text = Loc.T("update.installing.disconnecting");
             await _vm.DisconnectAndWaitAsync(TimeSpan.FromSeconds(6)).ConfigureAwait(true);
-            Find<TextBlock>("InstallText").Text =
-                "Waiting for Windows permission to install. Game Ping Booster will close and open again by itself.";
+            Find<TextBlock>("InstallText").Text = Loc.T("update.installing.waitingFull");
         }
 
         // When setup goes ahead it closes this app, so everything after this line only runs when
@@ -139,12 +135,11 @@ public partial class UpdateWindow : SurfaceWindow
 
         Fail(code switch
         {
-            null => "The installer did not start. If you answered No when Windows asked for permission, press Update to try again.",
-            0 => "The update is installed. Close Game Ping Booster and open it again to use the new version.",
+            null => Loc.T("update.fail.notStarted"),
+            0 => Loc.T("update.fail.installed"),
             // PrepareToInstall refused: the old service could not be removed. See GamePingBooster.iss.
-            7 => "The update could not replace the running service. If the Services window is open, close it and try again.",
-            _ => $"The update was not installed (setup ended with code {code}). If you answered No when Windows " +
-                 "asked for permission, press Update to try again. Otherwise, download the installer from the release page.",
+            7 => Loc.T("update.fail.service"),
+            _ => Loc.F("update.fail.other", code),
         });
     }
 
@@ -173,5 +168,5 @@ public partial class UpdateWindow : SurfaceWindow
     }
 
     private static string FormatMb(long bytes) =>
-        (bytes / (1024.0 * 1024.0)).ToString("0.0", CultureInfo.InvariantCulture) + " MB";
+        Loc.F("update.mb", (bytes / (1024.0 * 1024.0)).ToString("0.0", CultureInfo.InvariantCulture));
 }

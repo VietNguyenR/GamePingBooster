@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
+using GamePingBooster.App.Services.Localization;
 
 namespace GamePingBooster.App.Services;
 
@@ -134,15 +135,15 @@ public sealed class LoopbackAuth
 
                 if (error is not null)
                 {
-                    await RespondAsync(client, "Sign-in was refused", "You can close this tab and try again from the app.", deadline.Token).ConfigureAwait(false);
-                    throw new InvalidOperationException($"The sign-in page reported: {error}");
+                    await RespondAsync(client, Loc.T("auth.page.refused.title"), Loc.T("auth.page.refused.detail"), deadline.Token).ConfigureAwait(false);
+                    throw new InvalidOperationException(Loc.F("auth.pageReported", error));
                 }
 
                 if (code is null || state is null)
                 {
                     // Not the callback. Answer politely so the browser is not left hanging, and
                     // keep waiting for the one we want.
-                    await RespondAsync(client, "Waiting for sign-in", "Nothing to do here. Finish signing in on the other tab.", deadline.Token).ConfigureAwait(false);
+                    await RespondAsync(client, Loc.T("auth.page.waiting.title"), Loc.T("auth.page.waiting.detail"), deadline.Token).ConfigureAwait(false);
                     continue;
                 }
 
@@ -151,21 +152,17 @@ public sealed class LoopbackAuth
                 if (!CryptographicOperations.FixedTimeEquals(
                         Encoding.UTF8.GetBytes(state), Encoding.UTF8.GetBytes(_request.State)))
                 {
-                    await RespondAsync(client, "That sign-in did not match", "Close this tab and start again from the app.", deadline.Token).ConfigureAwait(false);
-                    throw new InvalidOperationException(
-                        "The sign-in that came back is not the one this app started. Nothing was changed. " +
-                        "Try again, and if it keeps happening close any other copy of the app first.");
+                    await RespondAsync(client, Loc.T("auth.page.mismatch.title"), Loc.T("auth.page.mismatch.detail"), deadline.Token).ConfigureAwait(false);
+                    throw new InvalidOperationException(Loc.T("auth.mismatch"));
                 }
 
-                await RespondAsync(client, "Signed in", "You can close this tab and go back to Game Ping Booster.", deadline.Token).ConfigureAwait(false);
+                await RespondAsync(client, Loc.T("auth.page.done.title"), Loc.T("auth.page.done.detail"), deadline.Token).ConfigureAwait(false);
                 return code;
             }
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            throw new TimeoutException(
-                $"No answer from the browser within {Timeout.TotalMinutes:F0} minutes. " +
-                "If no browser window opened, check that Windows has a default browser set.");
+            throw new TimeoutException(Loc.F("auth.timeout", $"{Timeout.TotalMinutes:F0}"));
         }
     }
 

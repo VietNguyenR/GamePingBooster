@@ -5,6 +5,7 @@ using System.Net.Sockets;
 using System.Text.Json.Serialization;
 using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Native;
+using GamePingBooster.App.Services.Localization;
 
 namespace GamePingBooster.App.Services;
 
@@ -703,10 +704,10 @@ public static class LagDiagnostics
         // hops before it arrives - five silent hops and a 20-hop cap did exactly that on the first
         // real run - leaves it null, and the check falls back to a looser ceiling derived from the
         // far side of the step. Three echoes cost nothing and cannot run out.
-        progress?.Report("Measuring the relay...");
+        progress?.Report(Loc.T("lag.progress.relay"));
         var relayRtt = relayIp is not null ? await BestRttAsync(relayIp, 3, ct).ConfigureAwait(false) : null;
 
-        progress?.Report("Tracing the path to the relay...");
+        progress?.Report(Loc.T("lag.progress.trace"));
         var trace = relayIp is not null ? await TraceAsync(relayIp, ct).ConfigureAwait(false) : [];
         var gateway = DefaultGateway();
         var domestic = DomesticHop(trace, relayRtt);
@@ -759,7 +760,7 @@ public static class LagDiagnostics
         for (var tick = 0; tick < seconds; tick++)
         {
             ct.ThrowIfCancellationRequested();
-            progress?.Report($"Measuring... {tick + 1}/{seconds}s");
+            progress?.Report(Loc.F("lag.progress.tick", tick + 1, seconds));
 
             var sweep = Stopwatch.StartNew();
 

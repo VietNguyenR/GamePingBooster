@@ -4,7 +4,7 @@
         xmlns:views="using:GamePingBooster.App.Views"
         x:Class="GamePingBooster.App.Views.AboutWindow"
         x:DataType="vm:AboutViewModel"
-        Title="About"
+        Title="{DynamicResource about.title}"
         Width="400" SizeToContent="Height"
         MinWidth="400"
         WindowStartupLocation="CenterOwner"
@@ -57,16 +57,16 @@
     </StackPanel>
 
     <TextBlock Classes="label" TextWrapping="Wrap"
-               Text="Sends a game's traffic through a relay abroad whose route to the game servers beats the one your ISP picks." />
+               Text="{DynamicResource about.tagline}" />
 
     <StackPanel>
-      <TextBlock Classes="label" Text="Author" />
+      <TextBlock Classes="label" Text="{DynamicResource about.author}" />
       <TextBlock Classes="value" Text="{Binding Author}" />
       <Button Classes="link" Content="{Binding Email}" Click="OnEmailClick" Margin="0,2,0,0" />
     </StackPanel>
 
     <StackPanel>
-      <TextBlock Classes="label" Text="Source code" />
+      <TextBlock Classes="label" Text="{DynamicResource about.source}" />
       <Button Classes="link" Content="{Binding RepositoryUrl}" Click="OnRepositoryClick" Margin="0,2,0,0" />
     </StackPanel>
 
@@ -79,7 +79,7 @@
     </Border>
 
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
-      <Button Content="Close" Click="OnCloseClick"
+      <Button Content="{DynamicResource common.close}" Click="OnCloseClick"
               Background="#334155" Foreground="#E2E8F0" />
     </StackPanel>
 

@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using GamePingBooster.Core.Ipc;
+using GamePingBooster.App.Services.Localization;
 
 namespace GamePingBooster.App.ViewModels;
 
@@ -12,7 +13,7 @@ public sealed class GameRow
         Name = game.Name;
         Processes = string.Join(", ", game.ProcessNames);
         Regions = string.Join(", ", game.Regions);
-        Badge = game.Running ? "Running" : game.LastPlayed ? "Last played" : "";
+        Badge = game.Running ? Loc.T("games.badge.running") : game.LastPlayed ? Loc.T("games.badge.lastPlayed") : "";
         _search = string.Join('\n', [game.Name, game.Id, .. game.ProcessNames]);
     }
 
@@ -66,12 +67,12 @@ public sealed class GamesViewModel : INotifyPropertyChanged
         }
     }
 
-    public string CountText => _all.Count == 1 ? "1 game" : $"{_all.Count} games";
+    public string CountText => _all.Count == 1 ? Loc.T("games.count.one") : Loc.F("games.count.many", _all.Count);
 
     /// <summary>Only there when the list is empty, and says which kind of empty.</summary>
-    public string EmptyText => Loading ? "Loading..."
-        : _all.Count == 0 ? "No game list yet. Sign in, or wait for the game list to download."
-        : $"No game matches \"{Query.Trim()}\".";
+    public string EmptyText => Loading ? Loc.T("games.loading")
+        : _all.Count == 0 ? Loc.T("games.empty")
+        : Loc.F("games.noMatch", Query.Trim());
 
     public bool IsEmpty => Visible.Count == 0;
 

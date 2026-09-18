@@ -1,4 +1,5 @@
 using GamePingBooster.Core.Ipc;
+using GamePingBooster.App.Services.Localization;
 
 namespace GamePingBooster.App.Services;
 
@@ -10,10 +11,7 @@ namespace GamePingBooster.App.Services;
 /// </summary>
 public static class QualityNotice
 {
-    public const string Text =
-        "The app now sends connection quality after each match - ping, lag spikes and which part of the " +
-        "path they came from, none of your addresses - and the address of any game server we do not cover yet, " +
-        "so lag can be fixed at its source. Turn it off in Settings.";
+    public static string Text => Loc.T("notice.quality");
 
     private static string MarkerPath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),

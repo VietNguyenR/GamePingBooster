@@ -4,6 +4,7 @@ using Avalonia.Markup.Xaml;
 using Avalonia.Threading;
 using GamePingBooster.App.Services;
 using GamePingBooster.Core.Ipc;
+using GamePingBooster.App.Services.Localization;
 
 namespace GamePingBooster.App.Views;
 
@@ -82,7 +83,7 @@ public partial class ReportLagWindow : SurfaceWindow
         }
         catch (Exception ex)
         {
-            Finish("Could not measure", ex.Message);
+            Finish(Loc.T("lag.result.failed"), ex.Message);
         }
     }
 
@@ -95,15 +96,13 @@ public partial class ReportLagWindow : SurfaceWindow
     /// </summary>
     private async Task SendAsync(LagDiagnostics.Report report, string? comment)
     {
-        var title = report.Verdict == "clean" ? "Nothing found" : "Sent";
+        var title = Loc.T(report.Verdict == "clean" ? "lag.result.clean" : "lag.result.sent");
+        var verdict = VerdictText(report);
 
         var refresh = RefreshTokenStore.Load();
         if (string.IsNullOrWhiteSpace(_licenceUrl) || refresh is null)
         {
-            Finish("Measured, but not sent",
-                report.VerdictText +
-                "\n\nThis installation is not signed in to a licence server, so there was nowhere " +
-                "to send it. Copy this text to whoever is helping you.");
+            Finish(Loc.T("lag.result.notSent"), verdict + "\n\n" + Loc.T("lag.result.noLicence"));
             return;
         }
 
@@ -112,14 +111,29 @@ public partial class ReportLagWindow : SurfaceWindow
             using var client = new LicenceClient(_licenceUrl);
             await client.SendDiagnosticAsync(refresh, report, comment, _devicePublicKey, _cts.Token)
                 .ConfigureAwait(true);
-            Finish(title, report.VerdictText + "\n\nThe report has been sent. Thank you.");
+            Finish(title, verdict + "\n\n" + Loc.T("lag.result.thanks"));
         }
         catch (Exception ex)
         {
-            Finish("Measured, but not sent",
-                report.VerdictText +
-                $"\n\nThe report could not be uploaded: {ex.Message}");
+            Finish(Loc.T("lag.result.notSent"), verdict + "\n\n" + Loc.F("lag.result.uploadFailed", ex.Message));
         }
+    }
+
+    /// <summary>
+    /// The verdict in the language the person chose.
+    ///
+    /// The report itself keeps its English VerdictText - that is what support reads on the server,
+    /// in one language whoever sent it. This is only what goes on screen: the same sentence looked
+    /// up by the verdict's key, with the measured reason filled in exactly as it was measured. A
+    /// verdict this build has no sentence for shows the report's own English.
+    /// </summary>
+    private static string VerdictText(LagDiagnostics.Report report)
+    {
+        var key = "lag.verdict." + report.Verdict;
+        if (!Loc.Has(key)) return report.VerdictText;
+
+        var reason = report.Rungs.FirstOrDefault(r => r.Key == report.Verdict)?.BadReason;
+        return Loc.F(key, reason is null ? "" : $" ({reason})");
     }
 
     private void Finish(string title, string text)

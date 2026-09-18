@@ -1,6 +1,7 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using Avalonia.Controls;
 using Avalonia.Platform;
+using GamePingBooster.App.Services.Localization;
 using GamePingBooster.App.ViewModels;
 
 namespace GamePingBooster.App.Views;
@@ -45,10 +46,10 @@ public sealed class SystemTray : IDisposable
             ToolTipText = ToolTipText(),
         };
 
-        var show = new NativeMenuItem("Show Game Ping Booster");
+        var show = new NativeMenuItem(Loc.T("tray.show"));
         show.Click += (_, _) => _window.RestoreFromTray();
 
-        var quit = new NativeMenuItem("Exit");
+        var quit = new NativeMenuItem(Loc.T("tray.exit"));
         quit.Click += (_, _) =>
         {
             // Gone the moment it is pressed. Teardown takes seconds on a bad day and there is no
@@ -71,6 +72,15 @@ public sealed class SystemTray : IDisposable
         // Raised on the UI thread already: every update in MainViewModel goes through
         // Dispatcher.UIThread.Post. See MainViewModel.OnStatus.
         _vm.PropertyChanged += OnViewModelChanged;
+
+        // The menu is built once, so its two items are relabelled rather than rebuilt when the
+        // language changes; the tooltip is computed and only has to be asked for again.
+        Loc.Changed += () =>
+        {
+            show.Header = Loc.T("tray.show");
+            quit.Header = Loc.T("tray.exit");
+            _icon.ToolTipText = ToolTipText();
+        };
 
         _window.EnableMinimizeToTray();
     }
@@ -99,8 +109,8 @@ public sealed class SystemTray : IDisposable
     /// ping.
     /// </summary>
     private string ToolTipText() => _vm.GamePingMs is not null
-        ? $"Game Ping Booster - {_vm.StatusText}, {_vm.GamePingText}"
-        : $"Game Ping Booster - {_vm.StatusText}";
+        ? Loc.F("tray.tooltipWithPing", _vm.StatusText, _vm.GamePingText)
+        : Loc.F("tray.tooltip", _vm.StatusText);
 
     /// <summary>
     /// Takes the icon out of the notification area. Without it Windows leaves a dead icon behind

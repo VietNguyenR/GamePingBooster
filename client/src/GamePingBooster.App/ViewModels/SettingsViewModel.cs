@@ -1,5 +1,6 @@
 ﻿using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using GamePingBooster.App.Services.Localization;
 
 namespace GamePingBooster.App.ViewModels;
 
@@ -87,13 +88,39 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         set { if (Set(ref _psk, value)) { Raise(nameof(CanSave)); Saved = false; } }
     }
 
-    public string PskWatermark => _alreadyConfigured
-        ? "Leave blank to keep the current key"
-        : "44 characters";
+    public string PskWatermark =>
+        Loc.T(_alreadyConfigured ? "settings.psk.placeholderKeep" : "settings.psk.placeholderNew");
 
-    public string PskHint => _alreadyConfigured
-        ? "A key is already saved. It is not shown here, and leaving this blank keeps it."
-        : "Printed by the relay's installer, next to the endpoint.";
+    public string PskHint =>
+        Loc.T(_alreadyConfigured ? "settings.psk.hintKeep" : "settings.psk.hintNew");
+
+    // ------------------------------------------------------------------ language
+    //
+    // The odd one out on this screen: every other setting here belongs to the machine and is saved
+    // by the service, and this one belongs to the person and is saved by the app. It also applies
+    // the moment it is picked rather than on Save - a language you have to confirm is a language
+    // you cannot preview, and there is nothing to validate or reject.
+
+    public IReadOnlyList<LanguageChoice> Languages { get; } =
+    [
+        new(AppLanguage.English, "English"),
+        new(AppLanguage.Vietnamese, "Tiếng Việt"),
+    ];
+
+    private LanguageChoice? _selectedLanguage;
+    public LanguageChoice? SelectedLanguage
+    {
+        get => _selectedLanguage ??= Languages.First(l => l.Language == Loc.Current);
+        set
+        {
+            if (value is null || !Set(ref _selectedLanguage, value)) return;
+            Loc.Set(value.Language);
+            // The two below are this window's own text, and neither is a {DynamicResource} - both
+            // are chosen in C# from how the machine is configured.
+            Raise(nameof(PskWatermark));
+            Raise(nameof(PskHint));
+        }
+    }
 
     /// <summary>
     /// Saving needs SOMETHING to save, and a key only when there are self-hosted addresses to
@@ -140,3 +167,9 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private void Raise(string? name) =>
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 }
+
+/// <summary>
+/// One line of the language list. The label is the language's own name and is never translated:
+/// somebody looking for Vietnamese in an English UI is looking for "Tiếng Việt".
+/// </summary>
+public sealed record LanguageChoice(AppLanguage Language, string Label);

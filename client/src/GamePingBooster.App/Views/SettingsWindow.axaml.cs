@@ -5,6 +5,7 @@ using Avalonia.Threading;
 using GamePingBooster.App.Services;
 using GamePingBooster.App.ViewModels;
 using GamePingBooster.Core.Ipc;
+using GamePingBooster.App.Services.Localization;
 
 namespace GamePingBooster.App.Views;
 
@@ -80,8 +81,7 @@ public partial class SettingsWindow : SurfaceWindow
 
         if (!_pipe.IsConnected)
         {
-            vm.Error = "The service is not running, so there is nothing to save to. " +
-                       "Start it and try again.";
+            vm.Error = Loc.T("settings.noService");
             return;
         }
 
@@ -114,7 +114,7 @@ public partial class SettingsWindow : SurfaceWindow
         catch (Exception ex)
         {
             _awaitingReply = false;
-            vm.Error = $"Could not reach the service: {ex.Message}";
+            vm.Error = Loc.F("settings.serviceUnreachable", ex.Message);
         }
     }
 

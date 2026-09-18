@@ -1,6 +1,7 @@
-using System.IO.Pipes;
+﻿using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
+using GamePingBooster.App.Services.Localization;
 using GamePingBooster.Core.Ipc;
 
 namespace GamePingBooster.App.Services;
@@ -57,7 +58,7 @@ public sealed class PipeClient : IAsyncDisposable
                     }
                 }
 
-                Disconnected?.Invoke("The service closed the connection.");
+                Disconnected?.Invoke(Loc.T("pipe.closed"));
             }
             catch (OperationCanceledException)
             {
@@ -65,11 +66,11 @@ public sealed class PipeClient : IAsyncDisposable
             }
             catch (TimeoutException)
             {
-                Disconnected?.Invoke("Could not reach the background service. Check that the 'GamePingBooster' service is running.");
+                Disconnected?.Invoke(Loc.T("pipe.unreachable"));
             }
             catch (Exception ex)
             {
-                Disconnected?.Invoke($"Lost connection to the background service: {ex.Message}");
+                Disconnected?.Invoke(Loc.F("pipe.lost", ex.Message));
             }
             finally
             {
@@ -93,7 +94,7 @@ public sealed class PipeClient : IAsyncDisposable
     public async Task SendAsync(CommandMessage command)
     {
         var writer = _writer;
-        if (writer is null) throw new InvalidOperationException("Not connected to the background service.");
+        if (writer is null) throw new InvalidOperationException(Loc.T("pipe.notConnected"));
 
         var json = JsonSerializer.Serialize(command, IpcJsonContext.Default.CommandMessage);
         await _writeLock.WaitAsync().ConfigureAwait(false);

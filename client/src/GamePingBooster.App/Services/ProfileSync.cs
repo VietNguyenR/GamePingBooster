@@ -1,4 +1,5 @@
 ﻿using GamePingBooster.Core.Ipc;
+using GamePingBooster.App.Services.Localization;
 
 namespace GamePingBooster.App.Services;
 
@@ -174,13 +175,13 @@ public sealed class ProfileSync
             // unnoticed.
             if (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests) return;
 
-            _report($"Could not update the game list: {ex.Message}");
+            _report(Loc.F("notice.profileFailed", ex.Message));
         }
         catch (Exception ex)
         {
             // Network, DNS, server down. Not worth alarming anybody: the previous profile is
             // still in place and a profile is not urgent.
-            _report($"Could not reach the licence server to update the game list ({ex.Message}).");
+            _report(Loc.F("notice.profileUnreachable", ex.Message));
         }
     }
 }

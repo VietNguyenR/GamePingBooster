@@ -4,7 +4,7 @@
         xmlns:views="using:GamePingBooster.App.Views"
         x:Class="GamePingBooster.App.Views.AccountWindow"
         x:DataType="vm:AccountViewModel"
-        Title="Account"
+        Title="{DynamicResource account.title}"
         Width="400" SizeToContent="Height"
         MinWidth="400"
         WindowStartupLocation="CenterOwner"
@@ -38,41 +38,41 @@
   <StackPanel Grid.Row="1" Margin="24,4,24,24" Spacing="16">
 
     <StackPanel Spacing="2">
-      <TextBlock Text="Account" Foreground="#ababab" FontSize="18" FontWeight="SemiBold" />
+      <TextBlock Text="{DynamicResource account.title}" Foreground="#ababab" FontSize="18" FontWeight="SemiBold" />
       <TextBlock Classes="label" Text="{Binding ServerText}" />
     </StackPanel>
 
-    <TextBlock Classes="label" Text="Loading..." IsVisible="{Binding Loading}" />
+    <TextBlock Classes="label" Text="{DynamicResource account.loading}" IsVisible="{Binding Loading}" />
 
     <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto,Auto"
           IsVisible="{Binding Ready}">
       <StackPanel Grid.Row="0" Grid.ColumnSpan="2" Margin="0,0,0,12">
-        <TextBlock Classes="label" Text="Signed in as" />
+        <TextBlock Classes="label" Text="{DynamicResource account.email}" />
         <TextBlock Classes="value" Text="{Binding Email}" />
       </StackPanel>
 
       <StackPanel Grid.Row="1" Grid.Column="0" Margin="0,0,8,12">
-        <TextBlock Classes="label" Text="Plan" />
+        <TextBlock Classes="label" Text="{DynamicResource account.plan}" />
         <TextBlock Classes="value" Text="{Binding Plan}" />
       </StackPanel>
       <StackPanel Grid.Row="1" Grid.Column="1" Margin="0,0,0,12">
-        <TextBlock Classes="label" Text="Status" />
+        <TextBlock Classes="label" Text="{DynamicResource account.status}" />
         <TextBlock Classes="value" Text="{Binding Status}" />
       </StackPanel>
 
       <StackPanel Grid.Row="2" Grid.Column="0" Margin="0,0,8,0">
-        <TextBlock Classes="label" Text="Renews / expires" />
+        <TextBlock Classes="label" Text="{DynamicResource account.expires}" />
         <TextBlock Classes="value" Text="{Binding Expires}" />
       </StackPanel>
       <StackPanel Grid.Row="2" Grid.Column="1">
-        <TextBlock Classes="label" Text="Devices" />
+        <TextBlock Classes="label" Text="{DynamicResource account.devices}" />
         <TextBlock Classes="value" Text="{Binding Devices}" />
       </StackPanel>
     </Grid>
 
     <Border Background="#242424" CornerRadius="8" Padding="12" IsVisible="{Binding Ready}">
       <StackPanel Spacing="2">
-        <TextBlock Classes="label" Text="This device" />
+        <TextBlock Classes="label" Text="{DynamicResource account.thisDevice}" />
         <TextBlock Classes="value" Text="{Binding DeviceText}" FontFamily="Consolas,monospace" FontSize="11" />
       </StackPanel>
     </Border>
@@ -82,9 +82,9 @@
     </Border>
 
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
-      <Button Content="Close" Click="OnCloseClick"
+      <Button Content="{DynamicResource common.close}" Click="OnCloseClick"
               Background="#111111" Foreground="#ababab" />
-      <Button Content="Sign out" Click="OnSignOutClick"
+      <Button Content="{DynamicResource account.signOut}" Click="OnSignOutClick"
               IsEnabled="{Binding Ready}"
               Background="#7F1D1D" Foreground="#FECACA" />
     </StackPanel>
@@ -92,7 +92,7 @@
     <!-- Said plainly, because it is the one thing about this button somebody might not
          expect: it also ends a connection that is running. -->
     <TextBlock Classes="label" TextWrapping="Wrap"
-               Text="Signing out removes this account from this computer and disconnects if the tunnel is up. The game list already downloaded is kept - it is encrypted to this PC and useless anywhere else." />
+               Text="{DynamicResource account.signOutHint}" />
 
   </StackPanel>
   </Grid>

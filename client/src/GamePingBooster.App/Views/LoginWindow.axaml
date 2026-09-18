@@ -4,7 +4,7 @@
         xmlns:views="using:GamePingBooster.App.Views"
         x:Class="GamePingBooster.App.Views.LoginWindow"
         x:DataType="vm:LoginViewModel"
-        Title="Sign in"
+        Title="{DynamicResource login.title}"
         Width="400" SizeToContent="Height"
         MinWidth="400"
         WindowStartupLocation="CenterOwner"
@@ -43,7 +43,7 @@
          flow was confirmed working on a real machine. The endpoint behind it was deleted on
          2026-09-10, so restoring the form now means restoring the endpoint too - a protocol
          change rather than a UI one. -->
-    <Button Content="Sign in with your browser" Click="OnBrowserClick"
+    <Button Content="{DynamicResource login.browser}" Click="OnBrowserClick"
             IsEnabled="{Binding !Busy}" HorizontalAlignment="Stretch"
             HorizontalContentAlignment="Center"
             Background="#2563EB" Foreground="White" />
@@ -71,7 +71,7 @@
     </Border>
 
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
-      <Button Content="Cancel" Click="OnCancelClick"
+      <Button Content="{DynamicResource common.cancel}" Click="OnCancelClick"
               Background="#111111" Foreground="#ababab" />
     </StackPanel>
 

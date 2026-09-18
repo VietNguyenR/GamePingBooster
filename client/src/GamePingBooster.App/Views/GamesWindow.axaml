@@ -4,7 +4,7 @@
         xmlns:views="using:GamePingBooster.App.Views"
         x:Class="GamePingBooster.App.Views.GamesWindow"
         x:DataType="vm:GamesViewModel"
-        Title="Supported games"
+        Title="{DynamicResource games.title}"
         Width="420" Height="520"
         MinWidth="380" MinHeight="360"
         WindowStartupLocation="CenterOwner">
@@ -36,14 +36,14 @@
     <Grid Grid.Row="1" RowDefinitions="Auto,Auto,*,Auto" Margin="24,4,24,24">
 
       <StackPanel Grid.Row="0" Spacing="2">
-        <TextBlock Text="Supported games" Foreground="#F8FAFC" FontSize="18" FontWeight="Bold" />
+        <TextBlock Text="{DynamicResource games.title}" Foreground="#F8FAFC" FontSize="18" FontWeight="Bold" />
         <TextBlock Foreground="#787878" FontSize="12" TextWrapping="Wrap"
-                   Text="Detected automatically - just open the game. Nothing to choose here." />
+                   Text="{DynamicResource games.intro}" />
       </StackPanel>
 
       <Grid Grid.Row="1" ColumnDefinitions="*,Auto" Margin="0,16,0,0">
         <TextBox Grid.Column="0" Name="SearchBox"
-                 Text="{Binding Query}" PlaceholderText="Search by game or process name"
+                 Text="{Binding Query}" PlaceholderText="{DynamicResource games.search}"
                  IsVisible="{Binding ShowSearch}" />
         <TextBlock Grid.Column="1" Text="{Binding CountText}"
                    Foreground="#787878" FontSize="12" VerticalAlignment="Center" Margin="12,0,0,0" />
@@ -88,7 +88,7 @@
       </Border>
 
       <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
-        <Button Content="Close" Click="OnCloseClick" Background="#333333" Foreground="#E2E8F0" />
+        <Button Content="{DynamicResource common.close}" Click="OnCloseClick" Background="#333333" Foreground="#E2E8F0" />
       </StackPanel>
     </Grid>
   </Grid>

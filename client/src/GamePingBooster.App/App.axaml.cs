@@ -3,6 +3,7 @@ using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using Avalonia.Threading;
 using GamePingBooster.App.Services;
+using GamePingBooster.App.Services.Localization;
 using GamePingBooster.App.ViewModels;
 using GamePingBooster.App.Views;
 
@@ -32,6 +33,11 @@ public partial class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             _desktop = desktop;
+
+            // Before anything with words on it exists: the language the person chose last time,
+            // or the one Windows is in on a machine that has never chosen. See Loc.
+            Loc.Initialize(this);
+
             _pipe = new PipeClient();
             var vm = new MainViewModel(_pipe);
             _vm = vm;

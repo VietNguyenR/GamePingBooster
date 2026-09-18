@@ -1,4 +1,5 @@
 using System.Reflection;
+using GamePingBooster.App.Services.Localization;
 
 namespace GamePingBooster.App.ViewModels;
 
@@ -54,8 +55,8 @@ public sealed class AboutViewModel
 
             // A build with no version stamped at all is a development build, and saying so is
             // more useful than showing the 1.0.0 the SDK would otherwise invent.
-            if (string.IsNullOrWhiteSpace(info) || info == "1.0.0") return "Development build";
-            return $"Version {info}";
+            if (string.IsNullOrWhiteSpace(info) || info == "1.0.0") return Loc.T("about.devBuild");
+            return Loc.F("about.version", info);
         }
     }
 }

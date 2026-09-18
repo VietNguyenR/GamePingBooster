@@ -8,6 +8,7 @@ using System.Text.Json.Serialization.Metadata;
 using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Net;
 using GamePingBooster.Core.Protocol;
+using GamePingBooster.App.Services.Localization;
 
 namespace GamePingBooster.App.Services;
 
@@ -323,16 +324,16 @@ public sealed class LicenceClient : IDisposable
                     .ConfigureAwait(false);
                 if (string.IsNullOrWhiteSpace(body?.Envelope))
                 {
-                    throw new LicenceException("The licence server sent an empty game list.");
+                    throw new LicenceException(Loc.T("licenceErr.emptyGameList"));
                 }
                 return body;
             }
 
             throw await ErrorAsync(response, t, new()
             {
-                [System.Net.HttpStatusCode.Unauthorized] = "Sign in again to update the game list.",
-                [System.Net.HttpStatusCode.PaymentRequired] = "This account has no active subscription.",
-                [System.Net.HttpStatusCode.TooManyRequests] = "Asked for the game list too often. It will update later.",
+                [System.Net.HttpStatusCode.Unauthorized] = Loc.T("licenceErr.profileUnauthorized"),
+                [System.Net.HttpStatusCode.PaymentRequired] = Loc.T("licenceErr.noSubscription"),
+                [System.Net.HttpStatusCode.TooManyRequests] = Loc.T("licenceErr.tooOften"),
             }).ConfigureAwait(false);
         });
 
@@ -349,12 +350,12 @@ public sealed class LicenceClient : IDisposable
                 return await response.Content
                     .ReadFromJsonAsync(LicenceJsonContext.Default.AccountResult, t)
                     .ConfigureAwait(false)
-                    ?? throw new LicenceException("The licence server sent an empty answer.");
+                    ?? throw new LicenceException(Loc.T("licenceErr.emptyAnswer"));
             }
 
             throw await ErrorAsync(response, t, new()
             {
-                [System.Net.HttpStatusCode.Unauthorized] = "This sign-in has expired. Sign in again.",
+                [System.Net.HttpStatusCode.Unauthorized] = Loc.T("licenceErr.accountExpired"),
             }).ConfigureAwait(false);
         });
 
@@ -394,7 +395,7 @@ public sealed class LicenceClient : IDisposable
         {
             return new LicenceException(message, response.StatusCode);
         }
-        return new LicenceException($"The licence server answered {(int)response.StatusCode}.",
+        return new LicenceException(Loc.F("licenceErr.status", (int)response.StatusCode),
             response.StatusCode);
     }
 
@@ -412,7 +413,7 @@ public sealed class LicenceClient : IDisposable
         if (response.IsSuccessStatusCode)
         {
             var value = await response.Content.ReadFromJsonAsync(type, ct).ConfigureAwait(false);
-            if (value is null) throw new LicenceException("The licence server sent an empty answer.");
+            if (value is null) throw new LicenceException(Loc.T("licenceErr.emptyAnswer"));
             return value;
         }
 
@@ -432,10 +433,10 @@ public sealed class LicenceClient : IDisposable
         {
             // No password is ever sent from here, so a 401 can only mean the sign-in itself is no
             // longer accepted - an expired or revoked refresh token, or a one-time code already spent.
-            System.Net.HttpStatusCode.Unauthorized => "That sign-in is no longer valid. Sign in again.",
-            System.Net.HttpStatusCode.Forbidden => "This account is not allowed to add another device.",
-            System.Net.HttpStatusCode.NotFound => "The licence server does not recognise this request. Check the address in settings.",
-            _ => $"The licence server answered {(int)response.StatusCode}.",
+            System.Net.HttpStatusCode.Unauthorized => Loc.T("licenceErr.signInInvalid"),
+            System.Net.HttpStatusCode.Forbidden => Loc.T("licenceErr.deviceLimit"),
+            System.Net.HttpStatusCode.NotFound => Loc.T("licenceErr.notFound"),
+            _ => Loc.F("licenceErr.status", (int)response.StatusCode),
         }, response.StatusCode);
     }
 }
@@ -464,7 +465,7 @@ public sealed class LicenceException(string message, System.Net.HttpStatusCode? 
 /// licence - it is a network failure, and every caller already has a catch for those.
 /// </summary>
 public sealed class LicenceTimeoutException(TimeSpan waited)
-    : TimeoutException($"The licence server did not answer within {waited.TotalSeconds:F0} seconds.")
+    : TimeoutException(Loc.F("licenceErr.timeout", $"{waited.TotalSeconds:F0}"))
 {
     /// <summary>The deadline that ran out - 10 or 30 seconds depending on the call.</summary>
     public TimeSpan Waited { get; } = waited;

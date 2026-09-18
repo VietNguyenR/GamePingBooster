@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using GamePingBooster.App.Services;
 using GamePingBooster.Core.Ipc;
+using GamePingBooster.App.Services.Localization;
 
 namespace GamePingBooster.App.ViewModels;
 
@@ -75,7 +76,7 @@ public sealed class AccountViewModel : INotifyPropertyChanged
             var refreshToken = RefreshTokenStore.Load();
             if (refreshToken is null)
             {
-                Error = "This machine is not signed in any more. Close this and sign in again.";
+                Error = Loc.T("account.notSignedIn");
                 return;
             }
 
@@ -83,22 +84,23 @@ public sealed class AccountViewModel : INotifyPropertyChanged
             var account = await client.FetchAccountAsync(refreshToken, ct).ConfigureAwait(true);
 
             Email = account.Email;
-            Plan = account.Plan ?? "No plan";
+            Plan = account.Plan ?? Loc.T("account.noPlan");
             Status = account.Status switch
             {
-                "TRIALING" => "Trial",
-                "ACTIVE" => "Active",
-                "PAST_DUE" => "Payment overdue",
-                "CANCELLED" => "Cancelled",
-                "EXPIRED" => "Expired",
-                null => "No subscription",
+                "TRIALING" => Loc.T("account.state.trial"),
+                "ACTIVE" => Loc.T("account.state.active"),
+                "PAST_DUE" => Loc.T("account.state.pastDue"),
+                "CANCELLED" => Loc.T("account.state.cancelled"),
+                "EXPIRED" => Loc.T("account.state.expired"),
+                null => Loc.T("account.state.none"),
                 _ => account.Status,
             };
             Expires = account.ExpiresAt is { } unix
-                ? DateTimeOffset.FromUnixTimeSeconds(unix).LocalDateTime.ToString("g")
+                ? DateTimeOffset.FromUnixTimeSeconds(unix).LocalDateTime
+                    .ToString(Loc.T("format.dateTime"), System.Globalization.CultureInfo.InvariantCulture)
                 : "-";
             Devices = account.DeviceLimit > 0
-                ? $"{account.DeviceCount} of {account.DeviceLimit}"
+                ? Loc.F("account.devicesOf", account.DeviceCount, account.DeviceLimit)
                 : account.DeviceCount.ToString();
         }
         catch (LicenceException ex)
@@ -112,7 +114,7 @@ public sealed class AccountViewModel : INotifyPropertyChanged
         }
         catch (Exception ex)
         {
-            Error = $"Could not reach {_licenceUrl}: {ex.Message}";
+            Error = Loc.F("account.unreachable", _licenceUrl, ex.Message);
         }
         finally
         {
@@ -184,7 +186,7 @@ public sealed class AccountViewModel : INotifyPropertyChanged
         }
         catch (Exception ex)
         {
-            Error = $"Signed out on this machine, but the service did not confirm: {ex.Message}";
+            Error = Loc.F("account.signOutUnconfirmed", ex.Message);
             // Still true: the credential is gone from disk, which is the part that matters.
             SignedOut = true;
         }

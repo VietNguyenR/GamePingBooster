@@ -197,8 +197,24 @@ public sealed class StatusMessage
 
     [JsonPropertyName("state")] public TunnelState State { get; set; } = TunnelState.Disconnected;
 
-    /// <summary>Short human-readable line shown directly in the UI.</summary>
+    /// <summary>Short human-readable line shown directly in the UI, in English.</summary>
     [JsonPropertyName("detail")] public string Detail { get; set; } = "";
+
+    /// <summary>
+    /// What <see cref="Detail"/> says, as a key into the UI's language tables, with the parts that
+    /// vary - a relay name, a game, a count - in <see cref="DetailArgs"/>.
+    ///
+    /// The service cannot write this line in the user's language: it runs as LocalSystem, serves
+    /// whoever is logged in, and the language is a per-user choice the UI holds. So it says WHICH
+    /// line, and the UI says it in words. See Loc and TunnelEngine.SetState.
+    ///
+    /// Additive, so no contract version bump. Detail carries the English text as before, and an
+    /// older UI - or a key a newer service invents that this UI does not know - falls back to it.
+    /// </summary>
+    [JsonPropertyName("detailCode")] public string? DetailCode { get; set; }
+
+    /// <summary>The {0}, {1}... of <see cref="DetailCode"/>, already formatted as text.</summary>
+    [JsonPropertyName("detailArgs")] public List<string>? DetailArgs { get; set; }
 
     [JsonPropertyName("relayId")] public string? RelayId { get; set; }
     [JsonPropertyName("relayName")] public string? RelayName { get; set; }
@@ -383,6 +399,10 @@ public sealed class StatusMessage
     /// </summary>
     [JsonPropertyName("licenceRefusal")] public string? LicenceRefusal { get; set; }
 
+    /// <summary>The same refusal as a language key and its arguments. See <see cref="DetailCode"/>.</summary>
+    [JsonPropertyName("licenceRefusalCode")] public string? LicenceRefusalCode { get; set; }
+    [JsonPropertyName("licenceRefusalArgs")] public List<string>? LicenceRefusalArgs { get; set; }
+
     /// <summary>
     /// Which profile the service is actually using: "shipped", "pushed", or "cached".
     ///
@@ -446,6 +466,10 @@ public sealed class StatusMessage
     /// from the next. On every status.
     /// </summary>
     [JsonPropertyName("relayChoiceNote")] public string? RelayChoiceNote { get; set; }
+
+    /// <summary>The same note as a language key and its arguments. See <see cref="DetailCode"/>.</summary>
+    [JsonPropertyName("relayChoiceNoteCode")] public string? RelayChoiceNoteCode { get; set; }
+    [JsonPropertyName("relayChoiceNoteArgs")] public List<string>? RelayChoiceNoteArgs { get; set; }
 
     /// <summary>quality-outbox only: how many records were still waiting, this batch included.</summary>
     [JsonPropertyName("qualityPending")] public int? QualityPending { get; set; }

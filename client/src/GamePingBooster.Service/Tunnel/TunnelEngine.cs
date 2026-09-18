@@ -1,4 +1,5 @@
 ﻿using System.Buffers.Binary;
+using System.Globalization;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -85,6 +86,10 @@ internal sealed class TunnelEngine : IAsyncDisposable
     private RelayEntry? _relay;
     private volatile TunnelState _state = TunnelState.Disconnected;
     private volatile string _detail = "Not connected";
+
+    // The same line as a language key and its arguments, for a UI that is not in English. English
+    // stays in _detail: it is what the log and an older UI read. See StatusText.
+    private volatile StatusText _detailText = new("svc.notConnected", "Not connected");
     private volatile string? _error;
 
     /// <summary>Raised on every state change so PipeServer can push it to the UI.</summary>
@@ -476,7 +481,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
 
         try
         {
-            SetState(TunnelState.Connecting, "Preparing...");
+            SetState(TunnelState.Connecting, new StatusText("svc.preparing", "Preparing..."));
             var phases = new PhaseTimer();
 
             // The licence gate, before anything is created and before a packet is sent. An
@@ -485,7 +490,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             // LicenceRefusal for why this is not the same question as Configured.
             if (LicenceRefusal() is { } refusal)
             {
-                throw new InvalidOperationException(refusal);
+                throw new InvalidOperationException(refusal.English);
             }
 
             // Reload every time the user connects. This used to be "load it once and keep it",
@@ -509,7 +514,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
 
             // Choose the relay before creating anything. Probing is pure UDP - no adapter, no
             // routes - so a relay that turns out to be unreachable costs nothing but a timeout.
-            SetState(TunnelState.Connecting, "Measuring relays...");
+            SetState(TunnelState.Connecting, new StatusText("svc.measuring", "Measuring relays..."));
             ResetThroughputBaseline();
             _choiceAtConnect = RelayChoice;
             (_relay, _tunnel) = await SelectRelayAsync(string.IsNullOrWhiteSpace(relayId) ? RelayChoice : relayId, psk, token)
@@ -518,7 +523,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
             var session = _tunnel.Session;
             phases.Mark("relays");
 
-            SetState(TunnelState.Connecting, "Creating the virtual adapter...");
+            SetState(TunnelState.Connecting, new StatusText("svc.creatingAdapter", "Creating the virtual adapter..."));
             _adapter = OpenAdapter();
             phases.Mark("adapter");
 
@@ -556,13 +561,14 @@ internal sealed class TunnelEngine : IAsyncDisposable
 
             SetState(TunnelState.Connected,
                 _watcher.IsGameRunning
-                    ? $"Connected to {_relay.Name} - accelerating {_game.Name}"
-                    : $"Connected to {_relay.Name} - waiting for {GamesLabel} to start");
+                    ? new StatusText("svc.connectedAccelerating",
+                        $"Connected to {_relay.Name} - accelerating {_game.Name}", _relay.Name, _game.Name)
+                    : WaitingForGame(_relay.Name));
         }
         catch (Exception ex)
         {
             _error = ex.Message;
-            SetState(TunnelState.Faulted, "Connection failed");
+            SetState(TunnelState.Faulted, new StatusText("svc.connectFailed", "Connection failed"));
             _log($"Connection failed: {ex}");
             // The adapter goes too: it may be the reason, and the next connect should start from a new one.
             await TeardownAsync().ConfigureAwait(false);
@@ -725,7 +731,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
     /// here, beside the state it describes, rather than in the UI from a relay id - which would be an
     /// entry's id whenever the tunnel came in through one.
     /// </summary>
-    private string? RelayChoiceNote()
+    private StatusText? RelayChoiceNote()
     {
         var relay = _relay;
         if (relay is null || _state is not (TunnelState.Connected or TunnelState.Reconnecting)) return null;
@@ -733,13 +739,27 @@ internal sealed class TunnelEngine : IAsyncDisposable
         var choice = RelayChoice;
         if (!string.Equals(choice, _choiceAtConnect, StringComparison.OrdinalIgnoreCase))
         {
-            return "Applies the next time you connect.";
+            return new StatusText("choiceNote.nextConnect", "Applies the next time you connect.");
         }
         if (choice is null || RelayPaths.RelayIdOf(relay).Equals(choice, StringComparison.OrdinalIgnoreCase)) return null;
 
         var chosen = _profile?.Relays.FirstOrDefault(r => r.Id.Equals(choice, StringComparison.OrdinalIgnoreCase));
-        return chosen is null ? null : $"{chosen.Name} is not answering - using {relay.Name} instead.";
+        return chosen is null
+            ? null
+            : new StatusText("choiceNote.notAnswering",
+                $"{chosen.Name} is not answering - using {relay.Name} instead.", chosen.Name, relay.Name);
     }
+
+    /// <summary>
+    /// Connected, with no game open yet. Two keys rather than one with a "a supported game" argument
+    /// stuffed into it: that phrase is words, and words are the UI's job to translate.
+    /// </summary>
+    private StatusText WaitingForGame(string relayName) =>
+        OnlyGameName is { } only
+            ? new StatusText("svc.connectedWaiting",
+                $"Connected to {relayName} - waiting for {only} to start", relayName, only)
+            : new StatusText("svc.connectedWaitingAny",
+                $"Connected to {relayName} - waiting for {GamesLabel} to start", relayName);
 
     // ------------------------------------------------------- authentication
 
@@ -767,7 +787,7 @@ internal sealed class TunnelEngine : IAsyncDisposable
     /// out by anybody sitting at this machine. What this buys is that the refusal arrives
     /// immediately, in words, instead of as four handshake attempts and a timeout.
     /// </summary>
-    private string? LicenceRefusal()
+    private StatusText? LicenceRefusal()
     {
         if (string.IsNullOrWhiteSpace(_config.LicenceUrl)) return null;
         if (_config.RelayEndpoints.Count > 0) return null;
@@ -775,15 +795,19 @@ internal sealed class TunnelEngine : IAsyncDisposable
         var token = _token;
         if (token is null)
         {
-            return "This installation connects through a licensed relay and is not signed in. " +
-                   "Sign in from the menu to get a licence.";
+            return new StatusText("refusal.notSignedIn",
+                "This installation connects through a licensed relay and is not signed in. " +
+                "Sign in from the menu to get a licence.");
         }
 
         var expiry = TokenStore.ExpiryOf(token);
         if (expiry <= DateTimeOffset.UtcNow)
         {
-            return $"The licence expired {expiry.ToLocalTime():g}. Renew the subscription and " +
-                   "sign in again - the relay will not accept an expired licence.";
+            var when = expiry.ToLocalTime().ToString("g", CultureInfo.InvariantCulture);
+            return new StatusText("refusal.expired",
+                $"The licence expired {when}. Renew the subscription and " +
+                "sign in again - the relay will not accept an expired licence.",
+                when);
         }
 
         return null;
@@ -1451,9 +1475,10 @@ internal sealed class TunnelEngine : IAsyncDisposable
 
                     // Not awaited. Disconnecting cancels this loop and waits for it to finish, which from
                     // inside the loop would wait forever.
-                    _ = Task.Run(() => DisconnectAsync(
+                    _ = Task.Run(() => DisconnectAsync(new StatusText("svc.idleDisconnect",
                         $"Disconnected automatically - no game was open for {IdleDisconnectAfter.TotalMinutes:F0} minutes. " +
-                        "Press Connect before you play."));
+                        "Press Connect before you play.",
+                        IdleDisconnectAfter.TotalMinutes.ToString("F0", CultureInfo.InvariantCulture))));
                     return;
                 }
 
@@ -1815,7 +1840,9 @@ internal sealed class TunnelEngine : IAsyncDisposable
 
             _log($"Entry switching: moved from {current.Name} [{current.Id}] to {target.Name} [{target.Id}] - the same " +
                  "relay and session, so the game server sees no change.");
-            SetState(TunnelState.Connected, $"Connected to {target.Name} - moved off {current.Name} for a better route");
+            SetState(TunnelState.Connected, new StatusText("svc.movedRelay",
+                $"Connected to {target.Name} - moved off {current.Name} for a better route",
+                target.Name, current.Name));
         }
         catch (Exception ex)
         {
@@ -2130,8 +2157,9 @@ internal sealed class TunnelEngine : IAsyncDisposable
             {
                 if (ct.IsCancellationRequested) return;
 
-                SetState(TunnelState.Reconnecting,
-                    $"Reconnecting via {relay.Name} (attempt {round}) - traffic is on the normal path");
+                SetState(TunnelState.Reconnecting, new StatusText("svc.reconnecting",
+                    $"Reconnecting via {relay.Name} (attempt {round}) - traffic is on the normal path",
+                    relay.Name, round.ToString(CultureInfo.InvariantCulture)));
 
                 TunnelClient? client = null;
                 try
@@ -2199,7 +2227,8 @@ internal sealed class TunnelEngine : IAsyncDisposable
 
                     client.StartPumping(adapter, ct);
                     _error = null;
-                    SetState(TunnelState.Connected, $"Reconnected to {relay.Name}");
+                    SetState(TunnelState.Connected,
+                        new StatusText("svc.reconnected", $"Reconnected to {relay.Name}", relay.Name));
                     return;
                 }
                 catch (OperationCanceledException)
@@ -2296,7 +2325,8 @@ internal sealed class TunnelEngine : IAsyncDisposable
 
                 _log($"Detected {processName}.exe running - installing routes for {detected.Name}.");
                 InstallRoutes();
-                SetState(TunnelState.Connected, $"Accelerating {_game?.Name} through {_relay?.Name}");
+                SetState(TunnelState.Connected, new StatusText("svc.accelerating",
+                    $"Accelerating {_game?.Name} through {_relay?.Name}", _game?.Name ?? "", _relay?.Name ?? ""));
             }
             else
             {
@@ -2306,14 +2336,14 @@ internal sealed class TunnelEngine : IAsyncDisposable
                 // Do not claim Connected while a reconnect is still in progress.
                 if (_tunnel is not null)
                 {
-                    SetState(TunnelState.Connected, $"Connected to {_relay?.Name} - waiting for {GamesLabel} to start");
+                    SetState(TunnelState.Connected, WaitingForGame(_relay?.Name ?? ""));
                 }
             }
         }
         catch (Exception ex)
         {
             _error = ex.Message;
-            SetState(TunnelState.Faulted, "Failed to update the routing table");
+            SetState(TunnelState.Faulted, new StatusText("svc.routeFailed", "Failed to update the routing table"));
             _log($"Error while adding or removing routes: {ex}");
         }
     }
@@ -2454,14 +2484,18 @@ internal sealed class TunnelEngine : IAsyncDisposable
     /// What the player reads once it is done, when the disconnect was not their own click - the
     /// idle timeout says why the tunnel went down, so nobody mistakes it for a fault.
     /// </param>
-    public async Task DisconnectAsync(string? reason = null)
+    public Task DisconnectAsync(string? reason = null) =>
+        DisconnectAsync(reason is null ? null : new StatusText("", reason));
+
+    /// <param name="reason">Why, as a language key and its English - see <see cref="StatusText"/>.</param>
+    public async Task DisconnectAsync(StatusText? reason)
     {
         if (_state == TunnelState.Disconnected) return;
-        SetState(TunnelState.Disconnected, "Disconnecting...");
+        SetState(TunnelState.Disconnected, new StatusText("svc.disconnecting", "Disconnecting..."));
         var phases = new PhaseTimer();
         await TeardownAsync(phases, keepAdapter: true).ConfigureAwait(false);
         _log($"Disconnect took {phases}.");
-        SetState(TunnelState.Disconnected, reason ?? "Not connected");
+        SetState(TunnelState.Disconnected, reason ?? new StatusText("svc.notConnected", "Not connected"));
     }
 
     /// <summary>
@@ -2627,10 +2661,17 @@ internal sealed class TunnelEngine : IAsyncDisposable
         // between the two - a status that says "measured" over an estimated number.
         var direct = DirectGamePingMs;
 
+        // Both are worked out once and read three times below - the English sentence, its language
+        // key and its arguments have to describe the same moment.
+        var choiceNote = RelayChoiceNote();
+        var refusal = LicenceRefusal();
+
         return new StatusMessage
         {
             State = _state,
             Detail = _detail,
+            DetailCode = _detailText.Key.Length > 0 ? _detailText.Key : null,
+            DetailArgs = _detailText.Args.Count > 0 ? _detailText.Args : null,
             Error = _error,
             RelayId = _relay?.Id,
             RelayName = _relay?.Name,
@@ -2669,7 +2710,9 @@ internal sealed class TunnelEngine : IAsyncDisposable
             GameName = (_watcher?.IsGameRunning ?? false) ? _game?.Name : OnlyGameName,
             GameCount = _profile?.Games.Count ?? 0,
             RelayChoice = RelayChoice,
-            RelayChoiceNote = RelayChoiceNote(),
+            RelayChoiceNote = choiceNote?.English,
+            RelayChoiceNoteCode = choiceNote?.Key,
+            RelayChoiceNoteArgs = choiceNote is { Args.Count: > 0 } ? choiceNote.Args : null,
             ActiveRoutes = _routes?.ActiveRouteCount ?? 0,
             PacketsSent = _tunnel?.PacketsSent ?? 0,
             PacketsReceived = _tunnel?.PacketsReceived ?? 0,
@@ -2689,7 +2732,9 @@ internal sealed class TunnelEngine : IAsyncDisposable
             // in the service rather than worked out again in the UI: the rule decides whether a
             // connection is attempted at all, and two copies of it would drift into a button that is
             // enabled for a connection that cannot happen, or disabled for one that could.
-            LicenceRefusal = LicenceRefusal(),
+            LicenceRefusal = refusal?.English,
+            LicenceRefusalCode = refusal?.Key,
+            LicenceRefusalArgs = refusal is { Args.Count: > 0 } ? refusal.Args : null,
             ProfileSource = _profileSource,
             // Read from the file rather than remembered in a field, so it is right after a restart
             // and right after somebody has copied a profile in by hand. A missing file is null,
@@ -2868,10 +2913,11 @@ internal sealed class TunnelEngine : IAsyncDisposable
         Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
         (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
 
-    private void SetState(TunnelState state, string detail)
+    private void SetState(TunnelState state, StatusText detail)
     {
         _state = state;
-        _detail = detail;
+        _detail = detail.English;
+        _detailText = detail;
         StatusChanged?.Invoke(Snapshot());
     }
 

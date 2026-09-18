@@ -1,5 +1,6 @@
 using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Protocol;
+using GamePingBooster.App.Services.Localization;
 
 namespace GamePingBooster.App.Services;
 
@@ -246,12 +247,9 @@ public sealed class TokenRefresher : IAsyncDisposable
         if (drift.Duration() <= GpbProtocol.HandshakeSkew) return;
 
         var minutes = Math.Max(1, (int)Math.Round(drift.Duration().TotalMinutes));
-        var direction = drift > TimeSpan.Zero ? "ahead of" : "behind";
-        _report(
-            $"This PC's clock is about {minutes} minute{(minutes == 1 ? "" : "s")} {direction} the " +
-            "licence server. Relays refuse a handshake more than " +
-            $"{GpbProtocol.HandshakeSkew.TotalSeconds:F0} seconds out, so connecting will fail until " +
-            "the time is corrected - turn on Settings > Time & language > Set time automatically.");
+        var amount = minutes == 1 ? Loc.T("notice.minutes.one") : Loc.F("notice.minutes.many", minutes);
+        _report(Loc.F(drift > TimeSpan.Zero ? "notice.clock.ahead" : "notice.clock.behind",
+            amount, $"{GpbProtocol.HandshakeSkew.TotalSeconds:F0}"));
     }
 
     /// <summary>
@@ -355,7 +353,7 @@ public sealed class TokenRefresher : IAsyncDisposable
         {
             // The server answered and said no. Show its own sentence rather than inventing one,
             // and back off further than a network failure would - see RetryAfterRefusal.
-            _report($"Could not renew the licence: {ex.Message}");
+            _report(Loc.F("notice.renewFailed", ex.Message));
 
             // 402 is the one refusal that means the licence itself is finished: there is no
             // active subscription behind this account any more. Holding on to the token already
@@ -380,7 +378,7 @@ public sealed class TokenRefresher : IAsyncDisposable
                 {
                     // The service being unreachable is its own visible problem; do not turn it
                     // into a second message about the licence.
-                    _report($"Could not clear the expired licence ({clear.Message}).");
+                    _report(Loc.F("notice.clearFailed", clear.Message));
                 }
             }
 
@@ -391,7 +389,7 @@ public sealed class TokenRefresher : IAsyncDisposable
             // Network, DNS, the server being down. Worth retrying sooner, and the backoff the
             // caller armed is already that one: the whole reason for refreshing at 50% is that an
             // outage this side of the expiry does not matter.
-            _report($"Could not reach the licence server ({ex.Message}). Will try again shortly.");
+            _report(Loc.F("notice.renewUnreachable", ex.Message));
         }
     }
 

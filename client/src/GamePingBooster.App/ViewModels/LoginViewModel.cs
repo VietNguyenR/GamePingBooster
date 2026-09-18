@@ -1,6 +1,7 @@
 ﻿using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using GamePingBooster.App.Services;
+using GamePingBooster.App.Services.Localization;
 
 namespace GamePingBooster.App.ViewModels;
 
@@ -41,7 +42,7 @@ public sealed class LoginViewModel : INotifyPropertyChanged
     }
 
     /// <summary>Shown so somebody can tell which server they are about to hand a password to.</summary>
-    public string ServerText => $"Signing in to {_licenceUrl}";
+    public string ServerText => Loc.F("login.server", _licenceUrl);
 
     /// <summary>
     /// The first eight characters of the device key.
@@ -50,8 +51,8 @@ public sealed class LoginViewModel : INotifyPropertyChanged
     /// machine you are sitting at. It is a public key, so displaying it costs nothing.
     /// </summary>
     public string DeviceText => _devicePublicKey.Length >= 8
-        ? $"This device: {_devicePublicKey[..8]}... ({Environment.MachineName})"
-        : $"This device: {Environment.MachineName}";
+        ? Loc.F("login.deviceWithKey", _devicePublicKey[..8], Environment.MachineName)
+        : Loc.F("login.device", Environment.MachineName);
 
     private bool _busy;
     public bool Busy
@@ -108,7 +109,7 @@ public sealed class LoginViewModel : INotifyPropertyChanged
 
     public bool HasManualUrl => !string.IsNullOrEmpty(ManualUrl);
 
-    private string _copyLabel = "Copy link";
+    private string _copyLabel = Loc.T("login.copy");
 
     /// <summary>The copy button's text, which says "Copied" once it has been, so a click visibly did something.</summary>
     public string CopyLabel
@@ -117,7 +118,7 @@ public sealed class LoginViewModel : INotifyPropertyChanged
         private set => Set(ref _copyLabel, value);
     }
 
-    public void MarkLinkCopied() => CopyLabel = "Copied";
+    public void MarkLinkCopied() => CopyLabel = Loc.T("login.copied");
 
     /// <summary>True once a token has been stored, which is what the window closes on.</summary>
     public bool Succeeded { get; private set; }
@@ -142,12 +143,11 @@ public sealed class LoginViewModel : INotifyPropertyChanged
         {
             loopback = LoopbackAuth.Start(_licenceUrl, Environment.MachineName);
             ManualUrl = loopback.AuthorizeUrl;
-            CopyLabel = "Copy link";
+            CopyLabel = Loc.T("login.copy");
 
             // Said before the browser opens, not after. The window may end up behind the app, and
             // "nothing happened" is the report you get otherwise.
-            Status = "Finish signing in in your browser, then come back here. " +
-                     "If it did not open, copy the link below into any browser.";
+            Status = Loc.T("login.waiting");
 
             // A browser that will not start is NOT a failed sign-in. The listener is already up
             // and will take the callback from a browser the person opens themselves, so the wait
@@ -155,8 +155,7 @@ public sealed class LoginViewModel : INotifyPropertyChanged
             // customer on 2026-09-14 behind a raw "Application not found".
             if (!loopback.OpenBrowser())
             {
-                Status = "Couldn't open a browser on this PC. Copy the link below, paste it into " +
-                         "Chrome, Edge or any browser, and finish signing in there.";
+                Status = Loc.T("login.noBrowser");
             }
 
             var code = await loopback.WaitForCodeAsync(ct).ConfigureAwait(true);
@@ -176,7 +175,7 @@ public sealed class LoginViewModel : INotifyPropertyChanged
         {
             // Only the window closing cancels this, so in practice nobody reads it. Kept so the
             // catch below never has to guess.
-            Error = "Cancelled.";
+            Error = Loc.T("login.cancelled");
         }
         catch (LicenceTimeoutException ex)
         {
@@ -186,13 +185,13 @@ public sealed class LoginViewModel : INotifyPropertyChanged
             // before the exchange. The message has to say so, or the person goes looking for the
             // problem in the wrong place. Its own text carries the deadline that ran out, which
             // is 30 seconds for the exchange and 10 for the token call after it.
-            Error = ex.Message + " The browser part worked - try again.";
+            Error = Loc.F("login.retryBrowserOk", ex.Message);
         }
         catch (Exception ex)
         {
             // A browser that will not open, a port that cannot be claimed, a proxy in the way.
             // There is no other way in any more, so the only honest next step is another attempt.
-            Error = ex.Message + " Try again.";
+            Error = Loc.F("login.retry", ex.Message);
         }
         finally
         {
