@@ -20,8 +20,14 @@ public sealed class ServiceConfig
     [JsonPropertyName("psk")] public string Psk { get; set; } = "";
 
     /// <summary>
-    /// Base URL of the licence server, e.g. https://licence.example.com. Empty = self-hosted
-    /// only, which is the default and stays the default.
+    /// Base URL of the licence server, e.g. https://licence.example.com. Empty = self-hosted only.
+    ///
+    /// A NEW installation starts pointed at <see cref="DefaultLicenceUrl"/>, so the Sign in item is
+    /// there on first run without anybody typing an address - see <see cref="Load"/>. Only a new
+    /// one: a config.json that exists is never given a URL it did not have, because an installation
+    /// that runs on the profile's relays with a key and no licence server would start refusing to
+    /// connect ("not signed in") the moment it became licensed. Clearing the box in Settings saves
+    /// "", which stays self-hosted for good.
     ///
     /// It lives here rather than in a settings file of the UI's own because it is a property of
     /// the installation, not of the person sitting at it, and because there should be one place
@@ -162,6 +168,9 @@ public sealed class ServiceConfig
         File.Move(tmp, FilePath, overwrite: true);
     }
 
+    /// <summary>The licence server a new installation is pointed at. See <see cref="LicenceUrl"/>.</summary>
+    public const string DefaultLicenceUrl = "https://gamepingbooster.com";
+
     public static ServiceConfig Load()
     {
         var path = Path.Combine(DefaultDirectory, "config.json");
@@ -175,7 +184,10 @@ public sealed class ServiceConfig
             // Not an error any more. A freshly installed machine has no configuration, and the
             // service has to come up anyway so the UI can connect and offer the settings screen.
             // Throwing here meant the service died on first run and the user saw nothing at all.
-            return new ServiceConfig();
+            //
+            // Pointed at the licence server, which is how the product is sold: a customer's first
+            // screen should offer Sign in, not a relay-address form they have no values for.
+            return new ServiceConfig { LicenceUrl = DefaultLicenceUrl };
         }
 
         var json = File.ReadAllText(path);

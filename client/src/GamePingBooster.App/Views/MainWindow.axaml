@@ -194,7 +194,7 @@
               Background="#20252b" CornerRadius="8" Padding="12" Margin="0,0,0,12"
               IsVisible="{Binding NeedsSetup}">
         <TextBlock Foreground="#869bb3" FontSize="12" TextWrapping="Wrap"
-                   Text="{DynamicResource main.setup.needed}" />
+                   Text="{Binding SetupText}" />
       </Border>
 
       <!-- Which relay to use: automatic, or one the player picks. The same list for every game. -->

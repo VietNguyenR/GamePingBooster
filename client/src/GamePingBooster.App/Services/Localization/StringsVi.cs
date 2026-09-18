@@ -34,6 +34,7 @@ internal static class StringsVi
 
         ["main.setup.needed"] =
             "Chưa cấu hình relay. Mở Cài đặt rồi nhập địa chỉ relay và khoá của bạn.",
+        ["main.setup.signIn"] = "Đăng nhập để bắt đầu: mở menu (góc trên bên phải) rồi chọn Đăng nhập.",
         ["main.server.label"] = "Máy chủ",
         ["main.server.tip"] =
             "Ping ở đây là ping tới chính máy chủ đó. Chế độ Tự động đo cả đường đi tới game lúc bạn bấm Kết nối rồi chọn máy chủ nhanh nhất.",
@@ -111,10 +112,10 @@ internal static class StringsVi
         ["settings.psk.placeholderNew"] = "44 ký tự",
         ["settings.psk.hintKeep"] = "Đã có khoá được lưu. App không hiện lại khoá, để trống ô này là giữ nguyên.",
         ["settings.psk.hintNew"] = "Bộ cài relay in ra khoá này, ngay cạnh địa chỉ.",
-        ["settings.licence"] = "Máy chủ giấy phép (không bắt buộc)",
+        ["settings.licence"] = "Máy chủ giấy phép",
         ["settings.licence.hint"] =
-            "Chỉ dùng khi bạn có tài khoản. Để trống thì app chạy hoàn toàn bằng relay của bạn với khoá ở trên - " +
-            "đây là cách dùng thông thường. Điền vào thì app hiện thêm nút Tài khoản, và danh sách game cũng lấy từ đó.",
+            "Nơi tài khoản Game Ping Booster của bạn đăng nhập và nơi lấy danh sách game. Đã được điền sẵn - cứ để " +
+            "nguyên. Chỉ xoá đi nếu bạn tự chạy relay riêng với khoá ở trên.",
         ["settings.quality"] = "Gửi chất lượng kết nối sau mỗi trận",
         ["settings.quality.hint"] =
             "Ping, các cú giật và chỗ sinh ra mỗi cú giật đó - mạng nhà bạn, đường tới relay, bản thân relay, hay " +

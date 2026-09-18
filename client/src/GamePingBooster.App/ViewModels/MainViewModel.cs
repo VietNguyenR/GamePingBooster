@@ -31,14 +31,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     // ------------------------------------------------------------ licence
     //
-    // All of this is absent on a self-hosted installation, which is the default and stays the
-    // default: no licenceUrl means no sign-in button, no licence line, nothing to explain.
+    // All of this is absent on a self-hosted installation: no licenceUrl means no sign-in button,
+    // no licence line, nothing to explain. A new installation is NOT self-hosted - the service
+    // starts it pointed at the licence server (ServiceConfig.DefaultLicenceUrl).
 
     private string? _licenceUrl;
     public string? LicenceUrl
     {
         get => _licenceUrl;
-        private set { if (Set(ref _licenceUrl, value)) Raise(nameof(ShowLicence)); }
+        private set
+        {
+            if (!Set(ref _licenceUrl, value)) return;
+            Raise(nameof(ShowLicence));
+            Raise(nameof(SetupText));
+        }
     }
 
     /// <summary>This machine's device public key, hex. Public, and needed to sign in.</summary>
@@ -61,6 +67,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             if (!Set(ref _hasToken, value)) return;
             Raise(nameof(LicenceText));
             Raise(nameof(AccountMenuText));
+            Raise(nameof(SetupText));
         }
     }
 
@@ -256,6 +263,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     public bool NeedsSetup => !Configured;
+
+    /// <summary>
+    /// What the setup banner asks for. With a licence server and no sign-in, that is signing in -
+    /// the relays and the credential both come from the account - and telling a new customer to
+    /// "enter your relay's address and key" would send them looking for values they were never given.
+    /// </summary>
+    public string SetupText => Loc.T(ShowLicence && !HasToken ? "main.setup.signIn" : "main.setup.needed");
 
     // ------------------------------------------------------------ relay choice
     //
@@ -816,6 +830,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         else if (_detailKey is { } key) Detail = Loc.T(key);
 
         Raise(nameof(AccountMenuText));
+        Raise(nameof(SetupText));
         Raise(nameof(UpdateFooterText));
         Raise(nameof(LicenceText));
         Raise(nameof(StatusText));

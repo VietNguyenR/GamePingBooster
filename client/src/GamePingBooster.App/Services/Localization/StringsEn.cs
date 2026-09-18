@@ -34,6 +34,7 @@ internal static class StringsEn
 
         ["main.setup.needed"] =
             "No relay configured yet. Open Settings and enter your relay's address and key.",
+        ["main.setup.signIn"] = "Sign in to start: open the menu (top right) and choose Sign in.",
         ["main.server.label"] = "Server",
         ["main.server.tip"] =
             "Ping is to the server itself. Automatic measures the whole way to the game when you connect and takes the fastest.",
@@ -112,10 +113,10 @@ internal static class StringsEn
         ["settings.psk.placeholderNew"] = "44 characters",
         ["settings.psk.hintKeep"] = "A key is already saved. It is not shown here, and leaving this blank keeps it.",
         ["settings.psk.hintNew"] = "Printed by the relay's installer, next to the endpoint.",
-        ["settings.licence"] = "Licence server (optional)",
+        ["settings.licence"] = "Licence server",
         ["settings.licence.hint"] =
-            "Only if you have an account. Leave blank to run entirely on your own relays with the key above - that " +
-            "is the normal setup. Filling this in adds an Account button, and the game list comes from there too.",
+            "Where your Game Ping Booster account signs in, and where the game list comes from. Already filled in - " +
+            "leave it as it is. Clear it only if you run your own relays with the key above.",
         ["settings.quality"] = "Send connection quality after each match",
         ["settings.quality.hint"] =
             "Ping, lag spikes and which part of the path each one came from - your network, the route to the relay, " +
