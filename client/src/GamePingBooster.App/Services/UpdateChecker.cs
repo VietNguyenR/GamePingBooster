@@ -47,6 +47,23 @@ public sealed class UpdateChecker : IAsyncDisposable
 
     public void Start() => _loop ??= Task.Run(() => LoopAsync(_cts.Token));
 
+    /// <summary>
+    /// One check now, off the six-hour schedule: the licence server has just said this version is
+    /// too old, and nobody should wait hours for the update that lets them connect again.
+    /// </summary>
+    public void CheckNow() => _ = Task.Run(async () =>
+    {
+        try
+        {
+            var update = await CheckAsync(CurrentVersion(), _cts.Token).ConfigureAwait(false);
+            if (update is not null) _onUpdate(update);
+        }
+        catch (Exception)
+        {
+            // As in the loop: nothing to announce. The server's own message already says where to go.
+        }
+    });
+
     private async Task LoopAsync(CancellationToken ct)
     {
         try

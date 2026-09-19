@@ -40,6 +40,7 @@ internal static class StringsEn
             "Ping is to the server itself. Automatic measures the whole way to the game when you connect and takes the fastest.",
 
         ["main.update.available"] = "New version v{0} available",
+        ["main.update.required"] = "Update to v{0} to connect again",
         ["main.update.action"] = "Update →",
 
         // ------------------------------------------------------------------ state and values

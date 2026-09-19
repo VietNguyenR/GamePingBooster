@@ -40,6 +40,7 @@ internal static class StringsVi
             "Ping ở đây là ping tới chính máy chủ đó. Chế độ Tự động đo cả đường đi tới game lúc bạn bấm Kết nối rồi chọn máy chủ nhanh nhất.",
 
         ["main.update.available"] = "Đã có bản mới v{0}",
+        ["main.update.required"] = "Cần cập nhật lên v{0} để kết nối",
         ["main.update.action"] = "Cập nhật →",
 
         // ------------------------------------------------------------------ state and values

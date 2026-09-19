@@ -59,6 +59,7 @@ public sealed class TokenRefresher : IAsyncDisposable
 
     private readonly PipeClient _pipe;
     private readonly Action<string?> _report;
+    private readonly Action? _upgradeRequired;
 
     /// <summary>
     /// The licence server and this machine's device key, from the status push itself.
@@ -128,10 +129,14 @@ public sealed class TokenRefresher : IAsyncDisposable
     /// than saying "valid until": that date is the token's, a day away, and customers read it as
     /// the end of what they paid for.
     /// </param>
-    public TokenRefresher(PipeClient pipe, Action<string?> report)
+    /// <param name="upgradeRequired">
+    /// Called, from the loop's thread, when the licence server refuses this version as too old (426).
+    /// </param>
+    public TokenRefresher(PipeClient pipe, Action<string?> report, Action? upgradeRequired = null)
     {
         _pipe = pipe;
         _report = report;
+        _upgradeRequired = upgradeRequired;
     }
 
     public void Start() => _loop ??= Task.Run(() => LoopAsync(_cts.Token));
@@ -367,7 +372,14 @@ public sealed class TokenRefresher : IAsyncDisposable
             // Only 402. A 401, a 429 or a device-limit 403 are all things that can be true this
             // minute and false the next, and throwing away a working licence over one of them
             // would sign the user out of a session they were entitled to.
-            if (ex.StatusCode == System.Net.HttpStatusCode.PaymentRequired)
+            //
+            // And 426: this version is older than the minimum the server accepts. That does not fix
+            // itself either - only installing the update does - so the token goes the same way, and
+            // the app is told, so it can put the update in front of the person instead of a footer line.
+            var upgradeRequired = ex.StatusCode == System.Net.HttpStatusCode.UpgradeRequired;
+            if (upgradeRequired) _upgradeRequired?.Invoke();
+
+            if (ex.StatusCode == System.Net.HttpStatusCode.PaymentRequired || upgradeRequired)
             {
                 try
                 {

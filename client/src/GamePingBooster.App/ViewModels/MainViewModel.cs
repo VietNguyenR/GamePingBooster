@@ -146,8 +146,26 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public bool HasUpdate => Update is not null;
 
+    private bool _updateRequired;
+
+    /// <summary>
+    /// The licence server refused this version as older than its minimum (426), so nothing connects
+    /// until the update is installed. Set on the UI thread, never cleared: only a new version fixes it.
+    /// </summary>
+    public bool UpdateRequired
+    {
+        get => _updateRequired;
+        set
+        {
+            if (!Set(ref _updateRequired, value)) return;
+            Raise(nameof(UpdateFooterText));
+        }
+    }
+
     /// <summary>The footer line, and only there when a newer release exists.</summary>
-    public string UpdateFooterText => Update is null ? "" : Loc.F("main.update.available", Update.Version);
+    public string UpdateFooterText => Update is null
+        ? ""
+        : Loc.F(UpdateRequired ? "main.update.required" : "main.update.available", Update.Version);
 
     /// <summary>
     /// The last thing the renewer had to say, if anything.

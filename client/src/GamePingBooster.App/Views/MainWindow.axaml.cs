@@ -174,6 +174,23 @@ public partial class MainWindow : SurfaceWindow
     /// with a digest; otherwise opens its release page, which is what every release before this
     /// feature offered.
     /// </summary>
+    private bool _offeredRequiredUpdate;
+
+    /// <summary>
+    /// Opens the update window by itself, once per run, when the licence server has refused this
+    /// version and a newer release with an installer is known. App calls it on the UI thread whenever
+    /// either half of that arrives. Not while the window is hidden in the tray: a dialog with no
+    /// visible owner is one nobody sees, and the footer line and the notice are still there after.
+    /// </summary>
+    public async void OfferRequiredUpdate()
+    {
+        if (_offeredRequiredUpdate || !IsVisible) return;
+        if (DataContext is not MainViewModel { UpdateRequired: true, Update: { CanInstall: true } update } vm) return;
+
+        _offeredRequiredUpdate = true;
+        await new UpdateWindow(update, vm).ShowDialog(this);
+    }
+
     private async void OnUpdateClick(object? sender, RoutedEventArgs e)
     {
         if (DataContext is not MainViewModel { Update: { } update } vm) return;

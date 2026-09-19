@@ -96,10 +96,14 @@ public sealed class ProfileSync
     private Task PushAsync(string sealedHex) =>
         _pipe.SendAsync(new CommandMessage { Verb = "set-profile", Profile = sealedHex });
 
-    public ProfileSync(PipeClient pipe, Action<string> report)
+    private readonly Action? _upgradeRequired;
+
+    /// <param name="upgradeRequired">Called when the licence server refuses this version as too old (426).</param>
+    public ProfileSync(PipeClient pipe, Action<string> report, Action? upgradeRequired = null)
     {
         _pipe = pipe;
         _report = report;
+        _upgradeRequired = upgradeRequired;
     }
 
     /// <summary>
@@ -174,6 +178,7 @@ public sealed class ProfileSync
             // tunnel quietly running on months-old ranges is exactly the sort of thing that goes
             // unnoticed.
             if (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests) return;
+            if (ex.StatusCode == System.Net.HttpStatusCode.UpgradeRequired) _upgradeRequired?.Invoke();
 
             _report(Loc.F("notice.profileFailed", ex.Message));
         }

@@ -58,7 +58,8 @@ public partial class App : Application
                 // Marshalled: the refresher reports from its own loop, and raising
                 // PropertyChanged off the UI thread breaks Avalonia's bindings in ways that
                 // surface much later and somewhere else.
-                message => Dispatcher.UIThread.Post(() => vm.LicenceNotice = message));
+                message => Dispatcher.UIThread.Post(() => vm.LicenceNotice = message),
+                OnUpgradeRequired);
             _pipe.StatusReceived += _refresher.OnStatus;
             // Coming back to the app - typically from the payment page - asks again at once when
             // there is no usable token, rather than waiting out the refusal backoff.
@@ -68,7 +69,8 @@ public partial class App : Application
             // holds the credential the licence server asks for - see ProfileSync.
             _profileSync = new ProfileSync(
                 _pipe,
-                message => Dispatcher.UIThread.Post(() => vm.LicenceNotice = message));
+                message => Dispatcher.UIThread.Post(() => vm.LicenceNotice = message),
+                OnUpgradeRequired);
             window.AttachProfileSync(_profileSync);
 
             // One attempt shortly after the service has had time to report its configuration.
@@ -135,8 +137,22 @@ public partial class App : Application
 
             // Checks GitHub for a newer release now and then, and puts a line in the footer when
             // there is one. Marshalled for the same reason as the refresher's messages.
-            _updates = new UpdateChecker(update => Dispatcher.UIThread.Post(() => vm.Update = update));
+            _updates = new UpdateChecker(update => Dispatcher.UIThread.Post(() =>
+            {
+                vm.Update = update;
+                window.OfferRequiredUpdate();
+            }));
             _updates.Start();
+
+            // The licence server refused this version as too old (426). Look for the release now
+            // rather than in up to six hours, and offer it once it is known - OfferRequiredUpdate
+            // does nothing until both the refusal and the release are in.
+            void OnUpgradeRequired() => Dispatcher.UIThread.Post(() =>
+            {
+                vm.UpdateRequired = true;
+                window.OfferRequiredUpdate();
+                _updates?.CheckNow();
+            });
         }
 
         base.OnFrameworkInitializationCompleted();

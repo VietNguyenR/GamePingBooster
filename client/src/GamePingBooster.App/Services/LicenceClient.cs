@@ -70,7 +70,18 @@ public sealed class LicenceClient : IDisposable
             // call is wrong for the exchange - see ExchangeTimeout.
             Timeout = System.Threading.Timeout.InfiniteTimeSpan,
         };
+
+        // Which version is asking, on every call. The licence server refuses one older than its
+        // minimum with 426 (web-service app/lib/client-version.ts), and the app then offers the
+        // update - see TokenRefresher. Releases up to 0.3.1 sent nothing, which is how the server
+        // tells those apart.
+        var version = UpdateChecker.CurrentVersion() ?? "0.0.0";
+        _http.DefaultRequestHeaders.TryAddWithoutValidation(VersionHeader, version);
+        _http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("GamePingBooster", version));
     }
+
+    /// <summary>The header the licence server reads the app version from.</summary>
+    public const string VersionHeader = "X-GPB-Version";
 
     /// <summary>
     /// How far this machine's clock ran ahead of the licence server's on the last call that got
