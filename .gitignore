@@ -81,3 +81,5 @@ profiles/cs2-vn.json
 tools/profile-builder/manual-cidrs*
 tools/profile-builder/tcp-sessions*
 profiles/valorant-vn.json
+profiles/valorant-tft-import.json
+profiles/tft-vn.json

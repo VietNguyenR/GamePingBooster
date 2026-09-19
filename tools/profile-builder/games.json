@@ -108,6 +108,22 @@
       "azureRegions": [],
       "asns": [6507],
       "note": "Not captured yet. Riot publishes ports, not servers: the match is UDP 5000-5500 (and 7000-8000) from League of Legends.exe, which only runs during a match - LeagueClient.exe is the lobby and is not watched. Vietnam moved to Riot's own servers in January 2025 (VNG publishes), first hosted in Hong Kong, later on hardware in Vietnam. Whether those servers sit inside AS6507's announcements is unknown - an address outside them lands in observed-lol-unverified.txt, which is the first thing to read after a capture. AS6507 is also VALORANT's, so the two games may share prefixes; the builder's overlap rule decides that, never loosen it."
+    },
+	
+	"tft": {
+      "name": "TFT",
+      "watchProcess": "TFTClient-Win64-Shipping",
+      "probePort": null,
+      "observedPath": "observed-tft.txt",
+      "landmarkPath": null,
+      "tcpSessionsPath": "tcp-sessions-tft.txt",
+      "unverifiedPath": "observed-tft-unverified.txt",
+      "manualCidrPath": "manual-cidrs-tft.txt",
+      "profilePath": "../../profiles/tft-vn.json",
+      "awsRegions": [],
+      "azureRegions": [],
+      "asns": [6507],
+      "note": "Not captured yet. Riot publishes ports, not servers: the match is UDP 5000-5500 (and 7000-8000) from League of Legends.exe, which only runs during a match - LeagueClient.exe is the lobby and is not watched. Vietnam moved to Riot's own servers in January 2025 (VNG publishes), first hosted in Hong Kong, later on hardware in Vietnam. Whether those servers sit inside AS6507's announcements is unknown - an address outside them lands in observed-lol-unverified.txt, which is the first thing to read after a capture. AS6507 is also VALORANT's, so the two games may share prefixes; the builder's overlap rule decides that, never loosen it."
     }
   }
 }
