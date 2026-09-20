@@ -34,6 +34,10 @@ tools/profile-builder/.cache/
 # nearly did on 2026-09-05.
 tools/profile-builder/observed*
 tools/profile-builder/landmarks-observed*
+# Block-check output, same reasoning: it records this machine's resolvers, its ISP and every
+# address those resolvers named. One of these per ISP is the point of the tool, and none of them
+# belong in a public repository.
+blockcheck-*.json
 profiles/*.bak
 CLAUDE.md
 

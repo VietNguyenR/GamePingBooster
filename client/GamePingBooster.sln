@@ -17,6 +17,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GamePingBooster.QualityChec
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GamePingBooster.EtwWatch", "src\GamePingBooster.EtwWatch\GamePingBooster.EtwWatch.csproj", "{0A7C8EE9-0F78-4116-9DEE-D82D9E3C7EA5}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GamePingBooster.BlockCheck", "src\GamePingBooster.BlockCheck\GamePingBooster.BlockCheck.csproj", "{5F3C1A82-7D64-4E19-9B2A-6C0D8E4F1A37}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -99,6 +101,18 @@ Global
 		{0A7C8EE9-0F78-4116-9DEE-D82D9E3C7EA5}.Release|x64.Build.0 = Release|Any CPU
 		{0A7C8EE9-0F78-4116-9DEE-D82D9E3C7EA5}.Release|x86.ActiveCfg = Release|Any CPU
 		{0A7C8EE9-0F78-4116-9DEE-D82D9E3C7EA5}.Release|x86.Build.0 = Release|Any CPU
+		{5F3C1A82-7D64-4E19-9B2A-6C0D8E4F1A37}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5F3C1A82-7D64-4E19-9B2A-6C0D8E4F1A37}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5F3C1A82-7D64-4E19-9B2A-6C0D8E4F1A37}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{5F3C1A82-7D64-4E19-9B2A-6C0D8E4F1A37}.Debug|x64.Build.0 = Debug|Any CPU
+		{5F3C1A82-7D64-4E19-9B2A-6C0D8E4F1A37}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{5F3C1A82-7D64-4E19-9B2A-6C0D8E4F1A37}.Debug|x86.Build.0 = Debug|Any CPU
+		{5F3C1A82-7D64-4E19-9B2A-6C0D8E4F1A37}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5F3C1A82-7D64-4E19-9B2A-6C0D8E4F1A37}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5F3C1A82-7D64-4E19-9B2A-6C0D8E4F1A37}.Release|x64.ActiveCfg = Release|Any CPU
+		{5F3C1A82-7D64-4E19-9B2A-6C0D8E4F1A37}.Release|x64.Build.0 = Release|Any CPU
+		{5F3C1A82-7D64-4E19-9B2A-6C0D8E4F1A37}.Release|x86.ActiveCfg = Release|Any CPU
+		{5F3C1A82-7D64-4E19-9B2A-6C0D8E4F1A37}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -110,5 +124,6 @@ Global
 		{6E200AC5-2729-46C9-BA7C-3E479034EA92} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{82040371-25E4-4F23-BAD2-D95904EC7E0A} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{0A7C8EE9-0F78-4116-9DEE-D82D9E3C7EA5} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{5F3C1A82-7D64-4E19-9B2A-6C0D8E4F1A37} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal

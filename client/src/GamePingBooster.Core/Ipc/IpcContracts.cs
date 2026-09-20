@@ -353,6 +353,26 @@ public sealed class StatusMessage
     [JsonPropertyName("packetsDroppedFaults")] public long PacketsDroppedFaults { get; set; }
 
     /// <summary>
+    /// Whether the Steam name fix is on - a handful of names answered over encrypted DNS because
+    /// the ISP answers them with 127.0.0.1.
+    ///
+    /// Nothing to do with the tunnel, the relay or a game, and reported separately for that reason:
+    /// a player whose Steam works and whose ping did not improve has to be able to see which half
+    /// did what. Downloads are deliberately NOT part of it and stay on the ISP's own path, where
+    /// the in-country caches are.
+    ///
+    /// Additive, so no contract version bump: an older UI ignores the field and a newer UI reads
+    /// false from an older service.
+    /// </summary>
+    [JsonPropertyName("steamDns")] public bool SteamDns { get; set; }
+
+    /// <summary>
+    /// One line about the Steam fix in English - how many names it answered, or why it is off.
+    /// Null on a service too old to have it.
+    /// </summary>
+    [JsonPropertyName("steamDnsDetail")] public string? SteamDnsDetail { get; set; }
+
+    /// <summary>
     /// This machine's device public key, 65 bytes as lowercase hex, or null on a service too old
     /// to have one.
     ///

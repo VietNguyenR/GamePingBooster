@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Protocol;
+using GamePingBooster.Service.Dns;
 using GamePingBooster.Service.Tunnel;
 
 namespace GamePingBooster.Service.Ipc;
@@ -28,13 +29,15 @@ namespace GamePingBooster.Service.Ipc;
 internal sealed class PipeServer
 {
     private readonly TunnelEngine _engine;
+    private readonly SteamDns _steamDns;
     private readonly Action<string> _log;
     private StreamWriter? _writer;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
 
-    public PipeServer(TunnelEngine engine, Action<string> log)
+    public PipeServer(TunnelEngine engine, SteamDns steamDns, Action<string> log)
     {
         _engine = engine;
+        _steamDns = steamDns;
         _log = log;
         _engine.StatusChanged += status => _ = PushAsync(status);
     }
@@ -145,6 +148,9 @@ internal sealed class PipeServer
                 break;
 
             case "disconnect":
+                // The Steam fix is deliberately NOT touched here. It is not part of the tunnel and
+                // turning it off with the tunnel put the block back the moment somebody stopped
+                // boosting - see Program, which starts it with the service instead.
                 await _engine.DisconnectAsync().ConfigureAwait(false);
                 break;
 
@@ -391,6 +397,13 @@ internal sealed class PipeServer
     {
         var writer = _writer;
         if (writer is null) return;
+
+        // Stamped here rather than in the engine's Snapshot: the Steam fix is not part of the
+        // tunnel and the engine knows nothing about it. Every status leaves through this method,
+        // including the ones the engine raises by itself, so this is the one place that cannot be
+        // forgotten when a new verb is added.
+        status.SteamDns = _steamDns.Enabled;
+        status.SteamDnsDetail = _steamDns.Detail;
 
         await _writeLock.WaitAsync().ConfigureAwait(false);
         try

@@ -555,6 +555,46 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    private bool _steamDns;
+
+    /// <summary>
+    /// Whether the service has Steam's names answered over encrypted DNS right now.
+    ///
+    /// Reported separately from everything else on this screen because it is a separate product:
+    /// it fixes a block, not a ping, and a player whose Steam works while their ping did not move
+    /// has to be able to see which half did what.
+    /// </summary>
+    public bool SteamDns
+    {
+        get => _steamDns;
+        private set
+        {
+            if (!Set(ref _steamDns, value)) return;
+            Raise(nameof(SteamText));
+            Raise(nameof(SteamTip));
+        }
+    }
+
+    private string? _steamDnsDetail;
+
+    /// <summary>
+    /// The service's own sentence about the Steam fix - how many names it answered, or why it is
+    /// off. Shown in the tooltip, never as the line itself: it is English, written by a process
+    /// that cannot know the user's language, and the line has to be in theirs.
+    /// </summary>
+    public string? SteamDnsDetail
+    {
+        get => _steamDnsDetail;
+        private set
+        {
+            if (!Set(ref _steamDnsDetail, value)) return;
+            Raise(nameof(SteamTip));
+            // The line itself reads this to tell "the service says off" from "the service never
+            // mentioned it", so it has to be told when it changes.
+            Raise(nameof(SteamText));
+        }
+    }
+
     private long _packetsSent;
     public long PacketsSent
     {
@@ -652,6 +692,48 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string LossText => LossRatio is { } l ? $"{l * 100:F1}%" : Loc.T("value.none");
     public string RelayText => RelayName ?? Loc.T("value.none");
     public string RouteText => ActiveRoutes > 0 ? Loc.F("value.ranges", ActiveRoutes) : Loc.T("value.none");
+
+    /// <summary>
+    /// A dash only when the service did not report on this at all.
+    ///
+    /// Unlike every other value on this card, it does NOT go blank on disconnect: the Steam fix
+    /// runs with the service and not with the tunnel, so a player who has stopped boosting still
+    /// has working Steam and the line has to keep saying so.
+    ///
+    /// That second case is why this is not simply <c>SteamDns ? on : off</c>. The field is additive,
+    /// so a service older than the feature sends nothing and the JSON default arrives here as
+    /// false - which this line then announced as "not enabled", with a tooltip telling the player
+    /// to press Connect to turn on something that build cannot do. Seen for real on 2026-09-20: the
+    /// UI was new, the running service was the installed one from the day before, and the card
+    /// accused a working setup of a failure.
+    ///
+    /// A service that HAS the feature always sends a detail line, whether it worked or not. So a
+    /// missing detail means "not reported", and the honest answer to that is the dash.
+    /// </summary>
+    public string SteamText
+    {
+        get
+        {
+            if (!SteamDns && SteamDnsDetail is null) return Loc.T("value.none");
+            return Loc.T(SteamDns ? "steam.on" : "steam.off");
+        }
+    }
+
+    /// <summary>
+    /// The explanation in the user's language, with the service's own line appended when it has
+    /// something to add - which it does when the fix could not be turned on, and that reason is
+    /// the only place a player can read why.
+    /// </summary>
+    public string SteamTip
+    {
+        get
+        {
+            var text = Loc.T(SteamDns ? "steam.tip.on" : "steam.tip.off");
+            return string.IsNullOrWhiteSpace(SteamDnsDetail)
+                ? text
+                : text + Environment.NewLine + Environment.NewLine + SteamDnsDetail;
+        }
+    }
 
     /// <summary>
     /// The game being played, or how many are supported. A count and not the names: the line has
@@ -859,6 +941,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(LossText));
         Raise(nameof(RelayText));
         Raise(nameof(RouteText));
+        Raise(nameof(SteamText));
+        Raise(nameof(SteamTip));
         Raise(nameof(GameText));
         Raise(nameof(PacketsText));
 
@@ -978,6 +1062,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             ? DateTimeOffset.FromUnixTimeSeconds(unix)
             : null;
         ActiveRoutes = status.ActiveRoutes;
+        SteamDns = status.SteamDns;
+        SteamDnsDetail = status.SteamDnsDetail;
         PacketsSent = status.PacketsSent;
         PacketsReceived = status.PacketsReceived;
     }
@@ -998,6 +1084,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
         GameRegionName = null;
         LossRatio = null;
         ActiveRoutes = 0;
+
+        // Cleared here and NOT on an ordinary disconnect. This method runs when the pipe itself
+        // dropped, which means the service is gone - and the service going takes the name policy
+        // with it, so the fix really is off. A tunnel disconnect is the opposite case: the service
+        // is alive, Steam still works, and the line must keep saying so.
+        SteamDns = false;
+        SteamDnsDetail = null;
+
         PacketsSent = 0;
         PacketsReceived = 0;
     });

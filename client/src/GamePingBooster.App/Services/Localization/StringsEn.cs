@@ -1,4 +1,4 @@
-namespace GamePingBooster.App.Services.Localization;
+﻿namespace GamePingBooster.App.Services.Localization;
 
 /// <summary>
 /// The English text of the UI, and the reference every other language is checked against: a key
@@ -30,6 +30,11 @@ internal static class StringsEn
         ["main.label.game"] = "Game",
         ["main.label.routing"] = "Routing",
         ["main.label.packets"] = "Packets",
+        ["main.label.steam"] = "Steam",
+        ["steam.on"] = "Unblocked",
+        ["steam.off"] = "Not enabled",
+        ["steam.tip.on"] = "Steam's store and community are answered over encrypted DNS, because this line answers them with a fake address. Downloads are not affected - they stay on your provider's own path, which is faster.",
+        ["steam.tip.off"] = "Steam name support is not running. The service will keep trying.",
         ["main.games.tip"] = "See supported games",
 
         ["main.setup.needed"] =

@@ -124,6 +124,22 @@ public sealed class ServiceConfig
     public bool? DiscoverDestinations { get; set; }
 
     /// <summary>
+    /// Whether Steam's blocked names are answered over encrypted DNS - see SteamDns.
+    ///
+    /// ON unless switched off, and NOT tied to the tunnel. It shares nothing with a connection:
+    /// no relay, no bandwidth, no route. It was tied to Connect in the first version and that was
+    /// wrong in a way a player would have hit within a minute - pressing Disconnect put the block
+    /// straight back, and reading the Steam store is not something anyone does while in a match.
+    ///
+    /// Nullable and never written while unset, for the reason DiscoverDestinations gives: a default
+    /// written into every config.json can no longer be told from somebody choosing it, and a later
+    /// release could then never change the default for anyone.
+    /// </summary>
+    [JsonPropertyName("steamDns")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? SteamDnsEnabled { get; set; }
+
+    /// <summary>
     /// Automatic moves between the ways into the relay in use - the relay itself and the entries in front
     /// of it - while a game runs, FOR THIS MACHINE. See DoorSwitchPolicy and TunnelEngine.MoveToDoor.
     ///

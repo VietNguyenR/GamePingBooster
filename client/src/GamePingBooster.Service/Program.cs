@@ -1,4 +1,5 @@
 ﻿using System.ServiceProcess;
+using GamePingBooster.Service.Dns;
 using GamePingBooster.Service.Ipc;
 using GamePingBooster.Service.Tunnel;
 
@@ -22,6 +23,10 @@ namespace GamePingBooster.Service;
 /// And one for support and development, which prints this machine's device public key:
 ///
 ///   gpb-service.exe --device-key
+///
+/// And one that exercises the Steam name resolver and prints what it found, installing nothing:
+///
+///   gpb-service.exe --dns-selftest [--policy]
 /// </summary>
 public static class Program
 {
@@ -50,6 +55,15 @@ public static class Program
             using var device = DeviceIdentity.LoadOrCreate(Console.Error.WriteLine);
             Console.WriteLine(device.PublicKeyHex);
             return 0;
+        }
+
+        // Exercises the Steam resolver without installing anything. See DnsSelfTest: the half that
+        // needs no rights is the half a developer can run, and --policy adds the half that only
+        // SYSTEM can write.
+        if (args.Contains("--dns-selftest", StringComparer.OrdinalIgnoreCase))
+        {
+            var withPolicy = args.Contains("--policy", StringComparer.OrdinalIgnoreCase);
+            return Dns.DnsSelfTest.RunAsync(withPolicy, CancellationToken.None).GetAwaiter().GetResult();
         }
 
         if (args.Contains("--console", StringComparer.OrdinalIgnoreCase))
@@ -106,6 +120,21 @@ public static class Program
 
         await using var engine = new TunnelEngine(config, log);
 
+        // Before anything else decides anything: a name resolution policy is machine-wide and
+        // survives this process. If the last run was killed rather than stopped, its rules are
+        // still pointing Steam's names at a resolver that is no longer listening - which breaks
+        // Steam in a way that survives a reboot and has no visible cause. The only place that is
+        // guaranteed to run after a crash is the next start, so it is cleaned up here.
+        SteamDns.RemoveLeftovers(log);
+        await using var steamDns = new SteamDns(log);
+
+        // Started here and not from the connect verb. The Steam fix has nothing to do with the
+        // tunnel - no relay, no bandwidth, no route - and tying it to Connect meant pressing
+        // Disconnect put the block straight back, which is the opposite of what somebody reading
+        // the Steam store wants. Off only if config.json says so.
+        if (config.SteamDnsEnabled ?? true) steamDns.Start(ct);
+        else log("Steam DNS is switched off in config.json.");
+
         // Load the profile now, not at the first connect.
         //
         // Everything the UI asks about configuration goes through Snapshot, and Snapshot answers
@@ -128,7 +157,7 @@ public static class Program
                 "It will be tried again on the next connect.");
         }
 
-        var pipe = new PipeServer(engine, log);
+        var pipe = new PipeServer(engine, steamDns, log);
 
         log($"Listening on pipe \\\\.\\pipe\\{Core.Ipc.IpcConstants.PipeName}");
         await pipe.RunAsync(ct).ConfigureAwait(false);

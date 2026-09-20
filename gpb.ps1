@@ -16,6 +16,10 @@
                                       never answered, into tcp-sessions.txt - never the profile
         .\gpb.ps1 etw [game]          PROTOTYPE, run next to capture: the same discovery through ETW,
                                       no Wireshark - reports what it found and what it cost
+        .\gpb.ps1 blockcheck [label]  how Steam is blocked on THIS line - DNS poisoning, SNI
+                                      filtering or a dead address. Turn every VPN off first.
+        .\gpb.ps1 dns                 does the Steam name fix work here? Needs an Administrator
+                                      terminal; installs nothing that it does not remove again
         .\gpb.ps1 profile [game]      rebuild that game's profile from what was captured
         .\gpb.ps1 push-profile <game> [remove]  seal that local profile into the running service,
                                       to test a game the licence server does not serve yet
@@ -577,6 +581,74 @@ switch ($Verb.ToLowerInvariant()) {
         Write-Host "    report -> $report" -ForegroundColor DarkGray
         & $exe @etwArgs
         if ($LASTEXITCODE -ne 0) { throw "gpb-etwwatch exited with $LASTEXITCODE." }
+    }
+
+    'blockcheck' {
+        # ./gpb blockcheck [label]: which of the three ways Steam can be blocked is happening here.
+        #
+        # The answer decides a whole feature. If it is DNS poisoning on every line, supporting Steam
+        # is a resolver scoped to a handful of names and nothing else - no relay to pay for and no
+        # download traffic to carry. If any line filters on SNI or drops the address, that part needs
+        # the tunnel. See the header of client\src\GamePingBooster.BlockCheck\Program.cs.
+        #
+        # Steam does not need to be running, and restarting it proves nothing - the tool asks the
+        # questions itself. What matters is that the line is untouched: it refuses to run with a VPN
+        # or a DNS proxy up, because with one up every name comes back clean.
+        $project = Join-Path $client 'src\GamePingBooster.BlockCheck\GamePingBooster.BlockCheck.csproj'
+        Say "Building gpb-blockcheck"
+        & dotnet build $project --nologo -v quiet
+        if ($LASTEXITCODE -ne 0) { throw "Build failed." }
+
+        $exe = Join-Path $client 'src\GamePingBooster.BlockCheck\bin\Debug\net9.0-windows\gpb-blockcheck.exe'
+
+        # Named blockcheck-* so the .gitignore glob that keeps measurement output out of the
+        # repository covers it: it records this machine's resolvers, its ISP and every address
+        # those resolvers named.
+        $report = Join-Path $root ("blockcheck-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + ".json")
+
+        # The label is the one thing this cannot work out for itself, and a run without it is not
+        # comparable with the next one: name the ISP and the city, e.g. ./gpb blockcheck viettel-hcm
+        $checkArgs = @('--json', $report)
+        if ($Arg1) { $checkArgs = @($Arg1) + $checkArgs }
+        else { Warn "No label. Pass the ISP and city so this run can be compared with the others." }
+
+        & $exe @checkArgs
+        if ($LASTEXITCODE -eq 3) { throw "Refused: turn Cloudflare WARP or the VPN off and run it again." }
+        if ($LASTEXITCODE -ne 0) { throw "gpb-blockcheck exited with $LASTEXITCODE." }
+    }
+
+    'dns' {
+        # ./gpb dns: does the Steam name fix work on this machine?
+        #
+        # Two halves, and only one of them can be tested without rights. The resolver - the part
+        # this project wrote - answers Steam's names over DoH and relays everything else to the
+        # ISP, and anyone can run it. Pointing Windows at it writes a machine-wide name resolution
+        # policy, which only SYSTEM may do, and a policy Windows quietly ignores looks exactly like
+        # one that works. So the service proves it at runtime and rolls back if the proof fails;
+        # this runs that same sequence with the output visible.
+        #
+        # It removes whatever it installs, on every path including the failing ones.
+        $principal = New-Object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())
+        if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw "The name resolution policy can only be written by SYSTEM. Run ./gpb dns from an Administrator terminal."
+        }
+
+        # psexec for the same reason `dev` needs it: SYSTEM, not Administrator.
+        if (-not (Get-Command psexec -ErrorAction SilentlyContinue)) {
+            throw "psexec not found. It is needed to run the check as LocalSystem. Get it from Sysinternals and put it on PATH."
+        }
+
+        Say "Building gpb-service"
+        & dotnet build (Join-Path $client 'src\GamePingBooster.Service\GamePingBooster.Service.csproj') --nologo -v quiet
+        if ($LASTEXITCODE -ne 0) { throw "Build failed." }
+
+        $svc = Get-ServiceExe
+        if (-not (Test-Path $svc)) { throw "No service binary at $svc" }
+
+        # No -i: the output belongs in this window, not in one that closes when it finishes.
+        Say "Running the Steam resolver check as LocalSystem"
+        & psexec -accepteula -nobanner -s $svc --dns-selftest --policy
+        if ($LASTEXITCODE -ne 0) { throw "The Steam resolver check reported a failure - read the lines above." }
     }
 
     'profile' {
