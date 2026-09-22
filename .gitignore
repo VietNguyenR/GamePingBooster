@@ -87,3 +87,5 @@ tools/profile-builder/tcp-sessions*
 profiles/valorant-vn.json
 profiles/valorant-tft-import.json
 profiles/tft-vn.json
+profiles/apex-vn.json
+profiles/wot-vn.json

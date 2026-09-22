@@ -30,11 +30,12 @@ internal static class StringsVi
         ["main.label.game"] = "Game",
         ["main.label.routing"] = "Định tuyến",
         ["main.label.packets"] = "Gói tin",
-        ["main.label.steam"] = "Steam",
-        ["steam.on"] = "Đã mở",
-        ["steam.off"] = "chưa bật",
-        ["steam.tip.on"] = "Store và community của Steam được phân giải qua DNS mã hoá, vì đường mạng này trả về địa chỉ giả cho chúng. Tải game không bị ảnh hưởng - vẫn đi đường của nhà mạng, vì đường đó nhanh hơn.",
-        ["steam.tip.off"] = "Hỗ trợ tên miền Steam chưa chạy. Service sẽ tiếp tục thử lại.",
+        ["main.label.unblock"] = "Mở chặn",
+        ["unblock.on"] = "Đã mở",
+        ["unblock.onFor"] = "{0}",
+        ["unblock.off"] = "Chưa bật",
+        ["unblock.tip.on"] = "Những tên miền bị đường mạng này trả về địa chỉ giả sẽ được phân giải qua DNS mã hoá, nên các trang đó vào bình thường. Tải về không bị ảnh hưởng - vẫn đi đường của nhà mạng, vì đường đó nhanh hơn.",
+        ["unblock.tip.off"] = "Tính năng mở chặn chưa chạy. Service sẽ tiếp tục thử lại.",
         ["main.games.tip"] = "Xem các game được hỗ trợ",
 
         ["main.setup.needed"] =

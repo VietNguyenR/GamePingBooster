@@ -124,5 +124,51 @@ internal sealed class DohUpstream : IDisposable
         return null;
     }
 
+    /// <summary>
+    /// Asks EVERY resolver and returns whatever came back, instead of stopping at the first answer.
+    ///
+    /// <see cref="ResolveAsync"/> exists to answer a client quickly and takes the first reply it
+    /// gets. This one exists to pick the best of several answers, which needs all of them: the
+    /// failure it was written for was one resolver naming a filtered CDN edge while another named
+    /// a clean one, and stopping at the first would reproduce that exactly.
+    ///
+    /// Sent together rather than in turn - it runs on a cache miss with a client waiting.
+    /// </summary>
+    public async Task<IReadOnlyList<byte[]>> ResolveEverywhereAsync(byte[] query, CancellationToken ct)
+    {
+        var wire = (byte[])query.Clone();
+        DnsWire.WriteId(wire, 0);
+
+        var replies = await Task.WhenAll(Resolvers.Select(r => AskAsync(r, wire, ct))).ConfigureAwait(false);
+        return [.. replies.Where(r => r is not null).Select(r => r!)];
+    }
+
+    private async Task<byte[]?> AskAsync(string resolver, byte[] wire, CancellationToken ct)
+    {
+        try
+        {
+            using var content = new ByteArrayContent(wire);
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/dns-message");
+
+            using var request = new HttpRequestMessage(HttpMethod.Post, resolver) { Content = content };
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/dns-message"));
+
+            using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) return null;
+
+            var body = await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
+            return body.Length < DnsWire.HeaderLength ? null : body;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _log($"DoH {resolver} failed: {ex.Message}");
+            return null;
+        }
+    }
+
     public void Dispose() => _http.Dispose();
 }

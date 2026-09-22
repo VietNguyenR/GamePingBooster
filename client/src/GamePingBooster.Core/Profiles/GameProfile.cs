@@ -1,4 +1,4 @@
-using System.Text.Json.Serialization;
+﻿using System.Text.Json.Serialization;
 
 namespace GamePingBooster.Core.Profiles;
 
@@ -16,6 +16,61 @@ public sealed class ProfileBundle
 
     [JsonPropertyName("games")] public List<GameEntry> Games { get; set; } = [];
     [JsonPropertyName("relays")] public List<RelayEntry> Relays { get; set; } = [];
+
+    /// <summary>
+    /// Services whose names this machine should answer over encrypted DNS because the line lies
+    /// about them - UnblockApp on the server, under exactly this name.
+    ///
+    /// NOT per game, and kept from one bundle like <see cref="Relays"/>: a blocked store is blocked
+    /// whether or not a game is running, and every game's profile carries the same list.
+    ///
+    /// ALWAYS present, empty meaning there is nothing to unblock - which is also what a client
+    /// reads from a server that predates the field, and what a newer server sends to a machine
+    /// entitled to nothing. So the feature turning off for everyone is a server-side edit, with no
+    /// client release and no way for an old client to misread it.
+    /// </summary>
+    [JsonPropertyName("unblock")] public List<UnblockEntry> Unblock { get; set; } = [];
+}
+
+/// <summary>
+/// One service the resolver claims a few names for. See GamePingBooster.Service.Dns.UnblockPolicy.
+///
+/// Delivered rather than compiled in, because the alternative is a client release every time an
+/// ISP adds a name to its list - and the people who need the fix are running whatever build they
+/// installed months ago.
+/// </summary>
+public sealed class UnblockEntry
+{
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
+
+    /// <summary>Shown to the player, so it is the service's own name: "Steam", not "steam".</summary>
+    [JsonPropertyName("name")] public string Name { get; set; } = "";
+
+    /// <summary>
+    /// Domain suffixes this service owns, without a leading dot. Matched as suffixes, so
+    /// "steampowered.com" covers store, api and login under it.
+    /// </summary>
+    [JsonPropertyName("scope")] public List<string> Scope { get; set; } = [];
+
+    /// <summary>
+    /// Names under a claimed suffix that must NOT be claimed - the download and media paths.
+    ///
+    /// This is the field that keeps the feature from making things worse. Steam's content CDNs
+    /// resolve to caches inside the country that connect in 10-20 ms, against 30-43 ms for the
+    /// addresses a foreign resolver hands out, so for those names the ISP's answer is the better
+    /// one. Every service has to declare its own: it was measured for Steam, not deduced, and
+    /// nothing about it generalises.
+    /// </summary>
+    [JsonPropertyName("excluded")] public List<string> Excluded { get; set; } = [];
+
+    /// <summary>
+    /// A name this service is known to have lied about, used to prove the fix took effect.
+    ///
+    /// Per service and not one for the whole feature: a line that poisons Discord and leaves Steam
+    /// alone would verify against a Steam canary, see an honest answer, and report success without
+    /// having tested anything.
+    /// </summary>
+    [JsonPropertyName("canary")] public string Canary { get; set; } = "";
 }
 
 public sealed class GameEntry
@@ -74,6 +129,67 @@ public sealed class GameEntry
     /// Absent means false, which is right for every profile written before the field existed.
     /// </summary>
     [JsonPropertyName("landmarksRouted")] public bool LandmarksRouted { get; set; }
+
+    /// <summary>
+    /// Packets a second to one address that make it a game server, for THIS game. Absent means the
+    /// built-in default (GameDestinationRecorder.NewServerPackets, 500 in a 30 s window - 16.7 a
+    /// second), which is what every profile written before this field says and what every game but
+    /// World of Tanks still wants.
+    ///
+    /// Why it cannot be one number for every game. The default was measured on PUBG, whose match
+    /// runs 40-60 packets a second, and it suits Apex (140), CS2 (57-64) and VALORANT (41-43) with
+    /// room to spare. World of Tanks runs 9-16, measured through the tunnel on 2026-09-22: its
+    /// busiest 30-second window in a whole match was 457 packets against a threshold of 500, so a
+    /// server it plays on can never be discovered. It is the first game whose match is quieter than
+    /// PUBG's lobby noise threshold, and hard-coding a lower default for everyone would let Apex's
+    /// datacentre measurements - 25-60 a second, from eleven regions at once - be reported as
+    /// servers, which is the mistake of 2026-09-20 that cost a wrongly routed Hong Kong range.
+    ///
+    /// The one thing that makes a low value safe is that it is DECLARED per game by somebody who
+    /// measured that game, never inferred. The recorder clamps whatever arrives to
+    /// GameDestinationRecorder.MinRatePerSecond..MaxRatePerSecond, because a profile is data from
+    /// the network and a zero here would make every address the game touches a new server.
+    ///
+    /// Read with the game, so it survives ProfileMerge like the rest of the entry. The licence
+    /// server sends it from the live Game row, not from a published profile version, so changing
+    /// it reaches players on their next Connect.
+    ///
+    /// Use <see cref="DiscoveryRate"/> rather than this property to decide anything: what arrives
+    /// here is delivered data and has not been checked yet.
+    /// </summary>
+    [JsonPropertyName("discoveryPacketsPerSecond")] public double? DiscoveryPacketsPerSecond { get; set; }
+
+    /// <summary>
+    /// The narrowest and widest rate a profile may declare, in packets a second.
+    ///
+    /// The floor is what makes a delivered number safe to act on. A profile arrives over the network,
+    /// and a zero - a forgotten field, a bad edit in the dashboard, a server bug - would make every
+    /// address the game touches a new server and send the player's whole destination list to the
+    /// licence server. 3 a second is twice the loudest thing in any capture that was not a match
+    /// (85.236.96.130, 1.5 a second, PUBG's lobby), so nothing below it has ever been worth
+    /// reporting. A game genuinely quieter than that needs somebody to measure it and change this
+    /// line, which is the right gate: the floor is a safety limit, and those tighten in the client,
+    /// never in delivered data.
+    ///
+    /// The ceiling only keeps a fat-fingered value from switching discovery off silently.
+    /// </summary>
+    public const double MinDiscoveryRate = 3.0;
+
+    public const double MaxDiscoveryRate = 500.0;
+
+    /// <summary>
+    /// <see cref="DiscoveryPacketsPerSecond"/> brought inside
+    /// <see cref="MinDiscoveryRate"/>..<see cref="MaxDiscoveryRate"/>, or null when the game declares
+    /// no rate and the recorder's own default applies.
+    ///
+    /// Clamped rather than refused: a value outside the bounds is a mistake somewhere upstream, and
+    /// the nearest safe number goes on discovering servers while a refusal would quietly switch the
+    /// game's discovery off - the failure that takes a month to notice.
+    /// </summary>
+    [JsonIgnore]
+    public double? DiscoveryRate => DiscoveryPacketsPerSecond is { } rate && double.IsFinite(rate)
+        ? Math.Clamp(rate, MinDiscoveryRate, MaxDiscoveryRate)
+        : null;
 }
 
 public sealed class RegionEntry

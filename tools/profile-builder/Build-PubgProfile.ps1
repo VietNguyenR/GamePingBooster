@@ -130,6 +130,12 @@ param(
 
     [string]$UnverifiedPath,
 
+    # Packets a second to one address that make it a server of this game, written into the profile
+    # for the client's discovery to use instead of its built-in 500-in-30-seconds. Declared in
+    # games.json and passed by ./gpb profile; left out, the field is removed from the profile and
+    # the client falls back to its default. See GameEntry.DiscoveryPacketsPerSecond.
+    [double]$DiscoveryPacketsPerSecond = 0,
+
     # Only used when -ProfilePath does not exist yet, to start the new profile.
     [string]$GameName,
     [string[]]$ProcessNames = @()
@@ -1248,6 +1254,17 @@ foreach ($regionId in ($attempt.Current.Keys | Sort-Object)) {
 }
 
 $profileData.generatedUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+
+# Written from games.json on every run, and REMOVED when the game declares none - the same rule the
+# regions follow. A rate that stayed behind in the file after being taken out of games.json would be
+# a threshold nobody could find the reason for, which is how a quiet game gets quietly un-discovered.
+if ($DiscoveryPacketsPerSecond -gt 0) {
+    $game | Add-Member -NotePropertyName discoveryPacketsPerSecond -NotePropertyValue $DiscoveryPacketsPerSecond -Force
+    Write-Host "    Discovery: a server of this game is $DiscoveryPacketsPerSecond packets/s (declared in games.json)"
+} elseif ($game.PSObject.Properties.Name -contains 'discoveryPacketsPerSecond') {
+    $game.PSObject.Properties.Remove('discoveryPacketsPerSecond')
+    Write-Host "    Discovery: no rate in games.json - removed the one in the profile, the client's default applies"
+}
 
 if ($unverified.Count -gt 0) {
     Write-Host ""

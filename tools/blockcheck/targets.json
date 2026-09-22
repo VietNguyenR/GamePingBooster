@@ -1,0 +1,42 @@
+{
+  "_comment": [
+    "Which names ./gpb blockcheck asks about, per app. Committed, like games.json: a blocked",
+    "service's hostnames are project data, not a property of one machine.",
+    "",
+    "kind decides how a result is read, so it is not decoration:",
+    "",
+    "  primary  login, API, the pages people open. Small traffic. This is the part worth fixing.",
+    "  bulk     downloads and media. Measured SEPARATELY and never assumed.",
+    "",
+    "The bulk/primary split is the whole reason this file has a schema at all. On 2026-09-20",
+    "Steam's content CDNs turned out to resolve to caches INSIDE Vietnam that connect in 10-20 ms,",
+    "against 30-43 ms for the addresses a foreign resolver hands out - so for downloads the ISP's",
+    "answer is the better one, and routing them anywhere else would make every player slower while",
+    "fixing nothing. That was true of Steam. It is not a rule about any other app, which is why",
+    "every app here has to declare its own bulk names and have them measured.",
+    "",
+    "The control name is added automatically and does not belong in an app's list."
+  ],
+
+  "control": {
+    "host": "www.microsoft.com",
+    "why": "nobody blocks it; proves the line and this tool are working"
+  },
+
+  "apps": {
+    "steam": {
+      "name": "Steam",
+      "targets": [
+        { "host": "steamcommunity.com", "kind": "primary", "why": "the name players actually report as blocked" },
+        { "host": "store.steampowered.com", "kind": "primary", "why": "the store, in the browser and inside the client's CEF" },
+        { "host": "api.steampowered.com", "kind": "primary", "why": "WebAPI - the client asks it for the CM list before it can log in" },
+        { "host": "login.steampowered.com", "kind": "primary", "why": "sign-in itself" },
+        { "host": "help.steampowered.com", "kind": "primary", "why": "support; same infrastructure, a second sample of the same path" },
+
+        { "host": "cdn.cloudflare.steamstatic.com", "kind": "bulk", "why": "content delivery, Cloudflare-fronted - must stay direct" },
+        { "host": "cdn.steamstatic.com", "kind": "bulk", "why": "content delivery, Fastly - a second CDN, in case only one is filtered" },
+        { "host": "client-update.akamai.steamstatic.com", "kind": "bulk", "why": "client self-update and depot content over Akamai" }
+      ]
+    }
+  }
+}

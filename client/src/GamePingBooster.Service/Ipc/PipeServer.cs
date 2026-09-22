@@ -29,15 +29,15 @@ namespace GamePingBooster.Service.Ipc;
 internal sealed class PipeServer
 {
     private readonly TunnelEngine _engine;
-    private readonly SteamDns _steamDns;
+    private readonly UnblockDns _unblock;
     private readonly Action<string> _log;
     private StreamWriter? _writer;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
 
-    public PipeServer(TunnelEngine engine, SteamDns steamDns, Action<string> log)
+    public PipeServer(TunnelEngine engine, UnblockDns unblock, Action<string> log)
     {
         _engine = engine;
-        _steamDns = steamDns;
+        _unblock = unblock;
         _log = log;
         _engine.StatusChanged += status => _ = PushAsync(status);
     }
@@ -148,7 +148,7 @@ internal sealed class PipeServer
                 break;
 
             case "disconnect":
-                // The Steam fix is deliberately NOT touched here. It is not part of the tunnel and
+            // The unblock fix is deliberately NOT touched here. It is not part of the tunnel and
                 // turning it off with the tunnel put the block back the moment somebody stopped
                 // boosting - see Program, which starts it with the service instead.
                 await _engine.DisconnectAsync().ConfigureAwait(false);
@@ -159,6 +159,10 @@ internal sealed class PipeServer
                 {
                     await _engine.LoadProfileAsync(ct).ConfigureAwait(false);
                     _log("Profile reloaded.");
+
+                    // The profile carries the unblock list, so a new one may change what this
+                    // machine claims. A no-op when it does not.
+                    await _unblock.RefreshAsync(ct).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
@@ -277,6 +281,10 @@ internal sealed class PipeServer
                 }
                 else
                 {
+                    // This is the push that matters most. A signed-in app fetches a profile per
+                    // game seconds after the service started, which is where the server's unblock
+                    // list actually arrives - the copy on disk at startup is the PREVIOUS one.
+                    await _unblock.RefreshAsync(ct).ConfigureAwait(false);
                     await PushAsync(_engine.Snapshot()).ConfigureAwait(false);
                 }
                 break;
@@ -398,12 +406,13 @@ internal sealed class PipeServer
         var writer = _writer;
         if (writer is null) return;
 
-        // Stamped here rather than in the engine's Snapshot: the Steam fix is not part of the
-        // tunnel and the engine knows nothing about it. Every status leaves through this method,
-        // including the ones the engine raises by itself, so this is the one place that cannot be
-        // forgotten when a new verb is added.
-        status.SteamDns = _steamDns.Enabled;
-        status.SteamDnsDetail = _steamDns.Detail;
+        // Stamped here rather than in the engine's Snapshot: unblocking is not part of the tunnel
+        // and the engine knows nothing about it. Every status leaves through this method, including
+        // the ones the engine raises by itself, so this is the one place that cannot be forgotten
+        // when a new verb is added.
+        status.Unblock = _unblock.Enabled;
+        status.UnblockDetail = _unblock.Detail;
+        status.UnblockServices = [.. _unblock.Services];
 
         await _writeLock.WaitAsync().ConfigureAwait(false);
         try

@@ -28,7 +28,18 @@ internal static class NrptPolicy
     /// The rule name prefix. Fixed and recognisable on purpose: somebody reading this key on a
     /// player's machine at two in the morning should be able to tell at a glance who put it there.
     /// </summary>
-    private const string RulePrefix = "GamePingBooster-Steam-";
+    private const string RulePrefix = "GamePingBooster-Unblock-";
+
+    /// <summary>
+    /// Prefixes this service used to write, removed as well as the current one.
+    ///
+    /// Not tidiness. A rule left over from an earlier build points the names it claims at a
+    /// resolver that is not listening, which breaks those sites in a way that survives a reboot and
+    /// has no visible cause - and the rename from Steam-specific to general happened after the
+    /// feature had already run on a real machine. Anything ever written must stay removable,
+    /// whatever it was called at the time.
+    /// </summary>
+    private static readonly string[] AllPrefixes = [RulePrefix, "GamePingBooster-Steam-"];
 
     /// <summary>DNS_POLICY_CONFIG version. 1 is what Windows writes and what it reads.</summary>
     private const int Version = 1;
@@ -46,12 +57,14 @@ internal static class NrptPolicy
     /// a per-suffix rule can be removed on its own, and the failure mode of a partial write is then
     /// "one name is not covered" instead of "the whole table is malformed".
     /// </summary>
-    public static int Install(IReadOnlyList<string> namespaces, string resolverAddress, Action<string> log)
+    public static int Install(
+        string appId, IReadOnlyList<string> namespaces, string resolverAddress, Action<string> log)
     {
-        // Any leftovers go first. A rule from a previous run points at a resolver that is not
-        // listening, and leaving it in place while adding another would make Windows try the dead
-        // one first.
-        Remove(log);
+        // This service's own leftovers go first. A rule from a previous run points at a resolver
+        // that is not listening, and leaving it in place while adding another would make Windows
+        // try the dead one first. Only this service's, because the others are being installed
+        // alongside it and removing them here would undo the work of the previous call.
+        RemoveWhere(log, name => name.StartsWith(RulePrefix + appId + "-", StringComparison.OrdinalIgnoreCase));
 
         using var policy = Registry.LocalMachine.CreateSubKey(PolicyPath, writable: true)
             ?? throw new InvalidOperationException($"Could not open HKLM\\{PolicyPath}.");
@@ -60,7 +73,7 @@ internal static class NrptPolicy
 
         for (var i = 0; i < namespaces.Count; i++)
         {
-            var name = RulePrefix + i.ToString("00");
+            var name = RulePrefix + appId + "-" + i.ToString("00");
 
             using var rule = policy.CreateSubKey(name, writable: true);
             if (rule is null)
@@ -85,7 +98,7 @@ internal static class NrptPolicy
         // feature appears not to work until the cache expires.
         DnsCache.Flush();
 
-        log($"NRPT: {written} rule(s) point {string.Join(", ", namespaces)} at {resolverAddress}.");
+        log($"NRPT: {written} rule(s) for {appId} point {string.Join(", ", namespaces)} at {resolverAddress}.");
         return written;
     }
 
@@ -93,7 +106,10 @@ internal static class NrptPolicy
     /// Removes every rule this service owns. Never throws: it is called from shutdown and from the
     /// rollback path of a failed enable, and neither can afford to fail.
     /// </summary>
-    public static int Remove(Action<string> log)
+    public static int Remove(Action<string> log) =>
+        RemoveWhere(log, name => AllPrefixes.Any(p => name.StartsWith(p, StringComparison.OrdinalIgnoreCase)));
+
+    private static int RemoveWhere(Action<string> log, Func<string, bool> matches)
     {
         var removed = 0;
 
@@ -104,7 +120,7 @@ internal static class NrptPolicy
 
             foreach (var name in policy.GetSubKeyNames())
             {
-                if (!name.StartsWith(RulePrefix, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!matches(name)) continue;
 
                 try
                 {
@@ -126,7 +142,7 @@ internal static class NrptPolicy
         if (removed > 0)
         {
             // The scoped names are cached against OUR resolver's answers now. Leaving them would
-            // keep Steam working for a while after the feature was turned off, which sounds
+            // keep the sites working for a while after the feature was turned off, which sounds
             // harmless and means "off" cannot be tested.
             DnsCache.Flush();
             log($"NRPT: removed {removed} rule(s).");
@@ -144,7 +160,7 @@ internal static class NrptPolicy
             if (policy is null) return 0;
 
             return policy.GetSubKeyNames()
-                .Count(n => n.StartsWith(RulePrefix, StringComparison.OrdinalIgnoreCase));
+                .Count(n => AllPrefixes.Any(p => n.StartsWith(p, StringComparison.OrdinalIgnoreCase)));
         }
         catch (Exception)
         {

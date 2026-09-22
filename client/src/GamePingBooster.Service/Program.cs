@@ -24,7 +24,7 @@ namespace GamePingBooster.Service;
 ///
 ///   gpb-service.exe --device-key
 ///
-/// And one that exercises the Steam name resolver and prints what it found, installing nothing:
+/// And one that exercises the name resolver and prints what it found, installing nothing:
 ///
 ///   gpb-service.exe --dns-selftest [--policy]
 /// </summary>
@@ -122,18 +122,22 @@ public static class Program
 
         // Before anything else decides anything: a name resolution policy is machine-wide and
         // survives this process. If the last run was killed rather than stopped, its rules are
-        // still pointing Steam's names at a resolver that is no longer listening - which breaks
-        // Steam in a way that survives a reboot and has no visible cause. The only place that is
-        // guaranteed to run after a crash is the next start, so it is cleaned up here.
-        SteamDns.RemoveLeftovers(log);
-        await using var steamDns = new SteamDns(log);
+        // still pointing the claimed names at a resolver that is no longer listening - which breaks
+        // those sites in a way that survives a reboot and has no visible cause. The only place that
+        // is guaranteed to run after a crash is the next start, so it is cleaned up here.
+        UnblockDns.RemoveLeftovers(log);
+
+        // The policy is read through the engine because that is where the delivered profile lands,
+        // and read on every attempt rather than captured once: the profile arrives after startup,
+        // so a list captured here would be the built-in fallback for the life of the process.
+        await using var unblock = new UnblockDns(() => engine.UnblockPolicy, log);
 
         // Started here and not from the connect verb. The Steam fix has nothing to do with the
         // tunnel - no relay, no bandwidth, no route - and tying it to Connect meant pressing
         // Disconnect put the block straight back, which is the opposite of what somebody reading
         // the Steam store wants. Off only if config.json says so.
-        if (config.SteamDnsEnabled ?? true) steamDns.Start(ct);
-        else log("Steam DNS is switched off in config.json.");
+        if (config.UnblockEnabled ?? true) unblock.Start(ct);
+        else log("Name unblocking is switched off in config.json.");
 
         // Load the profile now, not at the first connect.
         //
@@ -157,7 +161,7 @@ public static class Program
                 "It will be tried again on the next connect.");
         }
 
-        var pipe = new PipeServer(engine, steamDns, log);
+        var pipe = new PipeServer(engine, unblock, log);
 
         log($"Listening on pipe \\\\.\\pipe\\{Core.Ipc.IpcConstants.PipeName}");
         await pipe.RunAsync(ct).ConfigureAwait(false);

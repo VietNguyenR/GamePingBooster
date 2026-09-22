@@ -16,8 +16,10 @@
                                       never answered, into tcp-sessions.txt - never the profile
         .\gpb.ps1 etw [game]          PROTOTYPE, run next to capture: the same discovery through ETW,
                                       no Wireshark - reports what it found and what it cost
-        .\gpb.ps1 blockcheck [label]  how Steam is blocked on THIS line - DNS poisoning, SNI
-                                      filtering or a dead address. Turn every VPN off first.
+        .\gpb.ps1 blockcheck <label> [app]  how a blocked service is blocked on THIS line - DNS
+                                      poisoning, SNI filtering or a dead address. label is the ISP
+                                      and city (vnpt-hcm); app defaults to steam and comes from
+                                      tools\blockcheck\targets.json. Turn every VPN off first.
         .\gpb.ps1 dns                 does the Steam name fix work here? Needs an Administrator
                                       terminal; installs nothing that it does not remove again
         .\gpb.ps1 profile [game]      rebuild that game's profile from what was captured
@@ -165,6 +167,23 @@ function Get-AppExe {
     Join-Path $client 'src\GamePingBooster.App\bin\Debug\net9.0-windows\win-x64\GamePingBooster.exe'
 }
 
+# Every profile the installer ships, read from the .iss itself rather than listed again here, so a
+# game added there comes along everywhere without anyone having to remember to.
+#
+# Two callers: `installer` refuses to package when one is missing, and `dev` copies them beside the
+# service binary.
+function Get-ShippedProfileFiles {
+    $iss = Join-Path $root 'installer\GamePingBooster.iss'
+    $names = (Select-String -Path $iss -Pattern 'profiles\\([a-z0-9-]+-vn\.json)' -AllMatches).Matches |
+        ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
+    if (-not $names) {
+        throw "Found no profiles\<game>-vn.json in $iss - has the Source line changed shape?"
+    }
+    $names | ForEach-Object {
+        [pscustomobject]@{ Name = $_; Path = Join-Path $root "profiles\$_" }
+    }
+}
+
 # The one place the product's version lives.
 #
 # Read by client\Directory.Build.props, which stamps all four assemblies, and passed to Inno
@@ -293,6 +312,27 @@ function Invoke-Dev {
 
     $svc = Get-ServiceExe
     if (-not (Test-Path $svc)) { throw "No service binary at $svc" }
+
+    # The profiles the installer ships, copied beside that binary.
+    #
+    # The service reads them relative to its OWN directory, and a build output has none - so a
+    # development run had no game ranges and no relay list at all, while an installed one had
+    # both. On a self-hosted machine that is the whole configuration: the UI reported itself
+    # unconfigured and asked for a relay and key that were already entered, and nothing said the
+    # profile was what was missing. Copied rather than left to the build so the .iss stays the one
+    # list of what ships.
+    $profileDir = Join-Path (Split-Path $svc) 'profiles'
+    $null = New-Item -ItemType Directory -Force -Path $profileDir
+    foreach ($p in Get-ShippedProfileFiles) {
+        if (Test-Path $p.Path) {
+            Copy-Item $p.Path -Destination $profileDir -Force
+        } else {
+            # Expected on a fresh clone: the real profiles are gitignored. Not fatal - the rest of
+            # the app is worth running without them - but it IS the reason Connect will refuse.
+            Warn "No profiles\$($p.Name) in the tree. Run: .\gpb.ps1 release-profiles"
+        }
+    }
+    Say "Profiles: $((Get-ChildItem $profileDir -Filter *.json | Measure-Object).Count) file(s) beside the service"
 
     # Wintun refuses to create an adapter for anything below LocalSystem - Administrator is not
     # enough - so the service has to be launched through psexec -s. This is also why the UI is
@@ -584,7 +624,7 @@ switch ($Verb.ToLowerInvariant()) {
     }
 
     'blockcheck' {
-        # ./gpb blockcheck [label]: which of the three ways Steam can be blocked is happening here.
+        # ./gpb blockcheck <label> [app]: which of the three ways a service can be blocked is happening here.
         #
         # The answer decides a whole feature. If it is DNS poisoning on every line, supporting Steam
         # is a resolver scoped to a handful of names and nothing else - no relay to pay for and no
@@ -604,13 +644,19 @@ switch ($Verb.ToLowerInvariant()) {
         # Named blockcheck-* so the .gitignore glob that keeps measurement output out of the
         # repository covers it: it records this machine's resolvers, its ISP and every address
         # those resolvers named.
-        $report = Join-Path $root ("blockcheck-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + ".json")
+        $app = if ($Arg2) { $Arg2 } else { 'steam' }
+        $report = Join-Path $root ("blockcheck-$app-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + ".json")
 
-        # The label is the one thing this cannot work out for itself, and a run without it is not
-        # comparable with the next one: name the ISP and the city, e.g. ./gpb blockcheck viettel-hcm
+        # Two positional arguments, and they answer different questions. The label says WHICH LINE
+        # this ran on - the ISP and the city - and is the one thing the tool cannot work out for
+        # itself; a run without it is not comparable with the next one. The app says WHICH SERVICE
+        # to probe, and comes from tools\blockcheck\targets.json, so adding one needs no build.
+        # e.g. ./gpb blockcheck vnpt-hcm        (steam, the default)
+        #      ./gpb blockcheck 4g-viettel-hcm steam
         $checkArgs = @('--json', $report)
+        if ($Arg2) { $checkArgs = @($Arg2) + $checkArgs }
         if ($Arg1) { $checkArgs = @($Arg1) + $checkArgs }
-        else { Warn "No label. Pass the ISP and city so this run can be compared with the others." }
+        else { Warn "No label. Pass the ISP and city - e.g. vnpt-hcm - so this run can be compared with the others." }
 
         & $exe @checkArgs
         if ($LASTEXITCODE -eq 3) { throw "Refused: turn Cloudflare WARP or the VPN off and run it again." }
@@ -682,6 +728,7 @@ switch ($Verb.ToLowerInvariant()) {
             Asns              = $game.Asns
         }
         if ($game.LandmarkPath) { $profileArgs['LandmarkObservedPath'] = $game.LandmarkPath }
+        if ($null -ne $game.DiscoveryRate) { $profileArgs['DiscoveryPacketsPerSecond'] = $game.DiscoveryRate }
 
         Say "Building the $($game.Name) profile -> $($game.ProfilePath)"
 
@@ -922,9 +969,8 @@ switch ($Verb.ToLowerInvariant()) {
         }
         # Every profile the installer ships, read from the .iss itself rather than listed again here,
         # so a game added there is checked here without anyone remembering to.
-        $iss = Join-Path $root 'installer\GamePingBooster.iss'
-        foreach ($m in (Select-String -Path $iss -Pattern 'profiles\\([a-z0-9-]+-vn\.json)' -AllMatches).Matches) {
-            $required["the profile $($m.Groups[1].Value)"] = Join-Path $root "profiles\$($m.Groups[1].Value)"
+        foreach ($p in Get-ShippedProfileFiles) {
+            $required["the profile $($p.Name)"] = $p.Path
         }
         foreach ($what in $required.Keys) {
             if (-not (Test-Path $required[$what])) {

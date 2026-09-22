@@ -172,13 +172,16 @@
           <TextBlock Grid.Row="5" Grid.Column="0" Classes="label" Text="{DynamicResource main.label.routing}" Margin="0,10,0,0" />
           <TextBlock Grid.Row="5" Grid.Column="1" Classes="value" Text="{Binding RouteText}" Margin="0,10,0,0" ToolTip.Tip="{Binding RouteText}" />
 
-          <!-- Steam sits under Routing and above Packets on purpose: it belongs with what the
-               product DID for this connection, not with the counters. It is the one line here that
-               is not about speed - it says a blocked name is reachable again - so the tooltip has
-               to carry the part that surprises people, which is that downloads are deliberately
-               left alone because the provider's own path is the faster one for those. -->
-          <TextBlock Grid.Row="6" Grid.Column="0" Classes="label" Text="{DynamicResource main.label.steam}" Margin="0,10,0,0" />
-          <TextBlock Grid.Row="6" Grid.Column="1" Classes="value" Text="{Binding SteamText}" Margin="0,10,0,0" ToolTip.Tip="{Binding SteamTip}" />
+          <!-- Unblocking sits under Routing and above Packets on purpose: it belongs with what the
+               product DID, not with the counters. It is the one line here that is not about speed -
+               it says a blocked site is reachable again - so the tooltip has to carry the part that
+               surprises people, which is that downloads are deliberately left alone because the
+               provider's own path is the faster one for those.
+
+               It names the services rather than saying "on", because which ones are unblocked comes
+               from the server now and this window is the only place that knows. -->
+          <TextBlock Grid.Row="6" Grid.Column="0" Classes="label" Text="{DynamicResource main.label.unblock}" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="6" Grid.Column="1" Classes="value" Text="{Binding UnblockText}" Margin="0,10,0,0" ToolTip.Tip="{Binding UnblockTip}" />
 
           <TextBlock Grid.Row="7" Grid.Column="0" Classes="label" Text="{DynamicResource main.label.packets}" Margin="0,10,0,0" />
           <TextBlock Grid.Row="7" Grid.Column="1" Classes="value" Text="{Binding PacketsText}" Margin="0,10,0,0" />

@@ -555,43 +555,63 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    private bool _steamDns;
+    private bool _unblock;
 
     /// <summary>
     /// Whether the service has Steam's names answered over encrypted DNS right now.
     ///
     /// Reported separately from everything else on this screen because it is a separate product:
-    /// it fixes a block, not a ping, and a player whose Steam works while their ping did not move
+    /// it fixes a block, not a ping, and a player whose store works while their ping did not move
     /// has to be able to see which half did what.
     /// </summary>
-    public bool SteamDns
+    public bool Unblock
     {
-        get => _steamDns;
+        get => _unblock;
         private set
         {
-            if (!Set(ref _steamDns, value)) return;
-            Raise(nameof(SteamText));
-            Raise(nameof(SteamTip));
+            if (!Set(ref _unblock, value)) return;
+            Raise(nameof(UnblockText));
+            Raise(nameof(UnblockTip));
         }
     }
 
-    private string? _steamDnsDetail;
+    private string? _unblockDetail;
 
     /// <summary>
-    /// The service's own sentence about the Steam fix - how many names it answered, or why it is
+    /// The service's own sentence about unblocking - which services, how many names, or why it is
     /// off. Shown in the tooltip, never as the line itself: it is English, written by a process
     /// that cannot know the user's language, and the line has to be in theirs.
     /// </summary>
-    public string? SteamDnsDetail
+    public string? UnblockDetail
     {
-        get => _steamDnsDetail;
+        get => _unblockDetail;
         private set
         {
-            if (!Set(ref _steamDnsDetail, value)) return;
-            Raise(nameof(SteamTip));
+            if (!Set(ref _unblockDetail, value)) return;
+            Raise(nameof(UnblockTip));
             // The line itself reads this to tell "the service says off" from "the service never
             // mentioned it", so it has to be told when it changes.
-            Raise(nameof(SteamText));
+            Raise(nameof(UnblockText));
+        }
+    }
+
+    private List<string> _unblockServices = [];
+
+    /// <summary>
+    /// The services currently unblocked, by name, so the line can say WHICH rather than just "on".
+    ///
+    /// Which services those are is decided on the server and delivered in the profile, so this list
+    /// is the only thing that knows them: nothing in this build has a name of a blocked service
+    /// compiled into it any more.
+    /// </summary>
+    public List<string> UnblockServices
+    {
+        get => _unblockServices;
+        private set
+        {
+            if (!Set(ref _unblockServices, value)) return;
+            Raise(nameof(UnblockText));
+            Raise(nameof(UnblockTip));
         }
     }
 
@@ -696,11 +716,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// <summary>
     /// A dash only when the service did not report on this at all.
     ///
-    /// Unlike every other value on this card, it does NOT go blank on disconnect: the Steam fix
+    /// Unlike every other value on this card, it does NOT go blank on disconnect: unblocking
     /// runs with the service and not with the tunnel, so a player who has stopped boosting still
-    /// has working Steam and the line has to keep saying so.
+    /// has a working store and the line has to keep saying so.
     ///
-    /// That second case is why this is not simply <c>SteamDns ? on : off</c>. The field is additive,
+    /// That second case is why this is not simply <c>Unblock ? on : off</c>. The field is additive,
     /// so a service older than the feature sends nothing and the JSON default arrives here as
     /// false - which this line then announced as "not enabled", with a tooltip telling the player
     /// to press Connect to turn on something that build cannot do. Seen for real on 2026-09-20: the
@@ -710,12 +730,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// A service that HAS the feature always sends a detail line, whether it worked or not. So a
     /// missing detail means "not reported", and the honest answer to that is the dash.
     /// </summary>
-    public string SteamText
+    public string UnblockText
     {
         get
         {
-            if (!SteamDns && SteamDnsDetail is null) return Loc.T("value.none");
-            return Loc.T(SteamDns ? "steam.on" : "steam.off");
+            if (!Unblock && UnblockDetail is null) return Loc.T("value.none");
+            if (!Unblock) return Loc.T("unblock.off");
+
+            // Named, not just "on". Which services are unblocked is decided on the server now, so
+            // the only honest way for this line to say what it did is to repeat what came back.
+            return UnblockServices.Count == 0
+                ? Loc.T("unblock.on")
+                : Loc.F("unblock.onFor", string.Join(", ", UnblockServices));
         }
     }
 
@@ -724,14 +750,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// something to add - which it does when the fix could not be turned on, and that reason is
     /// the only place a player can read why.
     /// </summary>
-    public string SteamTip
+    public string UnblockTip
     {
         get
         {
-            var text = Loc.T(SteamDns ? "steam.tip.on" : "steam.tip.off");
-            return string.IsNullOrWhiteSpace(SteamDnsDetail)
+            var text = Loc.T(Unblock ? "unblock.tip.on" : "unblock.tip.off");
+            return string.IsNullOrWhiteSpace(UnblockDetail)
                 ? text
-                : text + Environment.NewLine + Environment.NewLine + SteamDnsDetail;
+                : text + Environment.NewLine + Environment.NewLine + UnblockDetail;
         }
     }
 
@@ -941,8 +967,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(LossText));
         Raise(nameof(RelayText));
         Raise(nameof(RouteText));
-        Raise(nameof(SteamText));
-        Raise(nameof(SteamTip));
+        Raise(nameof(UnblockText));
+        Raise(nameof(UnblockTip));
         Raise(nameof(GameText));
         Raise(nameof(PacketsText));
 
@@ -1062,8 +1088,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             ? DateTimeOffset.FromUnixTimeSeconds(unix)
             : null;
         ActiveRoutes = status.ActiveRoutes;
-        SteamDns = status.SteamDns;
-        SteamDnsDetail = status.SteamDnsDetail;
+        Unblock = status.Unblock;
+        UnblockDetail = status.UnblockDetail;
+        UnblockServices = status.UnblockServices;
         PacketsSent = status.PacketsSent;
         PacketsReceived = status.PacketsReceived;
     }
@@ -1089,8 +1116,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         // dropped, which means the service is gone - and the service going takes the name policy
         // with it, so the fix really is off. A tunnel disconnect is the opposite case: the service
         // is alive, Steam still works, and the line must keep saying so.
-        SteamDns = false;
-        SteamDnsDetail = null;
+        Unblock = false;
+        UnblockDetail = null;
+        UnblockServices = [];
 
         PacketsSent = 0;
         PacketsReceived = 0;

@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace GamePingBooster.BlockCheck;
 
 internal enum TargetKind
@@ -5,58 +7,143 @@ internal enum TargetKind
     /// <summary>Not blocked anywhere. If this one fails, the line or the tool is at fault, not the censor.</summary>
     Control,
 
-    /// <summary>Login, store, community, friends. Tiny traffic - the part worth tunnelling if it comes to that.</summary>
-    SteamControl,
+    /// <summary>Login, API, the pages people open. Small traffic - the part worth fixing.</summary>
+    Primary,
 
-    /// <summary>Game downloads. Must stay on the ISP's own path at full speed, so it is measured to prove it is clean.</summary>
-    SteamContent,
+    /// <summary>Downloads and media. Measured separately because what is true of one app's bulk path is not true of another's.</summary>
+    Bulk,
 }
 
 internal sealed record Target(string Host, TargetKind Kind, string Why);
 
+internal sealed record TargetSet(string App, string DisplayName, string Path, Target[] All);
+
 /// <summary>
-/// What gets probed, and why each name is on the list.
+/// Loads the names to probe from tools/blockcheck/targets.json.
 ///
-/// The split between <see cref="TargetKind.SteamControl"/> and <see cref="TargetKind.SteamContent"/>
-/// is the whole design question in one list. If the content names turn out to be clean - which is
-/// what a player reporting "Steam works and downloads are still fast under a DNS-only fix" implies -
-/// then they must never be routed through a relay, and this tool is the evidence for that decision.
+/// They used to be an array compiled into this file, which was fine while there was one blocked app
+/// and became the whole answer to "what do I put in the label?" the moment there were two: the list
+/// was not selectable, so there was nowhere to say which app a run was about. Everything else in
+/// this tool - the DNS probes, the handshakes, the verdicts - never knew which app it was looking at,
+/// so the list was the only thing standing between it and any other blocked service.
+///
+/// The file is committed and found by walking up from the binary, exactly as ProtocolCheck finds its
+/// vector file. Adding an app is then a data change with no build.
 /// </summary>
 internal static class Targets
 {
-    public static readonly Target[] All =
-    [
-        new("www.microsoft.com", TargetKind.Control,
-            "nobody blocks it; proves the line and this tool are working"),
+    public const string DefaultApp = "steam";
 
-        new("steamcommunity.com", TargetKind.SteamControl,
-            "the name players actually report as blocked"),
-        new("store.steampowered.com", TargetKind.SteamControl,
-            "the store, in the browser and inside the client's CEF"),
-        new("api.steampowered.com", TargetKind.SteamControl,
-            "WebAPI - the client asks it for the CM list before it can log in"),
-        new("login.steampowered.com", TargetKind.SteamControl,
-            "sign-in itself"),
-        new("help.steampowered.com", TargetKind.SteamControl,
-            "support; same infrastructure, useful as a second sample of the same path"),
+    private const string RelativePath = "tools/blockcheck/targets.json";
 
-        // Three CDNs rather than three names on one CDN. The first run had two Akamai names and a
-        // fourth that does not exist at all - every resolver answered NXDOMAIN, which the tool read
-        // as a failure of the content path and reported downloads as unclean. A target list is an
-        // assumption like any other and this one was wrong.
-        new("cdn.cloudflare.steamstatic.com", TargetKind.SteamContent,
-            "content delivery, Cloudflare-fronted - must stay direct"),
-        new("cdn.steamstatic.com", TargetKind.SteamContent,
-            "content delivery, Fastly - a second CDN, in case only one is filtered"),
-        new("client-update.akamai.steamstatic.com", TargetKind.SteamContent,
-            "client self-update and depot content over Akamai"),
-    ];
+    public static TargetSet Load(string app)
+    {
+        var path = Find();
+
+        using var document = JsonDocument.Parse(File.ReadAllBytes(path));
+        var root = document.RootElement;
+
+        if (!root.TryGetProperty("apps", out var apps))
+        {
+            throw new InvalidDataException($"{path} has no \"apps\" object.");
+        }
+
+        // Case-insensitively, because the app comes off a command line a human typed.
+        var match = apps.EnumerateObject()
+            .FirstOrDefault(p => string.Equals(p.Name, app, StringComparison.OrdinalIgnoreCase));
+
+        if (match.Value.ValueKind != JsonValueKind.Object)
+        {
+            var known = string.Join(", ", apps.EnumerateObject().Select(p => p.Name));
+            throw new InvalidDataException($"{path} declares no app called '{app}'. It has: {known}.");
+        }
+
+        var targets = new List<Target>();
+
+        // The control goes first and is not the app's to declare: every run needs one, and an app
+        // list that could omit it could produce a report with nothing to check itself against.
+        if (root.TryGetProperty("control", out var control))
+        {
+            targets.Add(new Target(
+                Required(control, "host", path),
+                TargetKind.Control,
+                Optional(control, "why")));
+        }
+
+        if (!match.Value.TryGetProperty("targets", out var declared) ||
+            declared.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidDataException($"{path}: app '{match.Name}' has no \"targets\" array.");
+        }
+
+        foreach (var entry in declared.EnumerateArray())
+        {
+            var host = Required(entry, "host", path);
+            var kind = Optional(entry, "kind").ToLowerInvariant() switch
+            {
+                "primary" => TargetKind.Primary,
+                "bulk" => TargetKind.Bulk,
+                var other => throw new InvalidDataException(
+                    $"{path}: '{host}' has kind '{other}'. It must be \"primary\" or \"bulk\" - " +
+                    "the verdict is read differently for each, so there is no sensible default."),
+            };
+
+            targets.Add(new Target(host, kind, Optional(entry, "why")));
+        }
+
+        if (targets.Count(t => t.Kind != TargetKind.Control) == 0)
+        {
+            throw new InvalidDataException($"{path}: app '{match.Name}' declares no names to probe.");
+        }
+
+        var displayName = match.Value.TryGetProperty("name", out var name) && name.GetString() is { } text
+            ? text
+            : match.Name;
+
+        return new TargetSet(match.Name, displayName, path, [.. targets]);
+    }
+
+    public static string[] KnownApps()
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllBytes(Find()));
+            return document.RootElement.TryGetProperty("apps", out var apps)
+                ? [.. apps.EnumerateObject().Select(p => p.Name)]
+                : [];
+        }
+        catch (Exception)
+        {
+            return [];
+        }
+    }
 
     public static string Label(TargetKind kind) => kind switch
     {
         TargetKind.Control => "control",
-        TargetKind.SteamControl => "steam control plane",
-        TargetKind.SteamContent => "steam content",
+        TargetKind.Primary => "primary",
+        TargetKind.Bulk => "bulk",
         _ => kind.ToString(),
     };
+
+    private static string Find()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            var candidate = Path.Combine(directory.FullName, RelativePath.Replace('/', Path.DirectorySeparatorChar));
+            if (File.Exists(candidate)) return candidate;
+            directory = directory.Parent;
+        }
+
+        throw new FileNotFoundException($"Could not find {RelativePath} in any parent directory.");
+    }
+
+    private static string Required(JsonElement element, string property, string path) =>
+        element.TryGetProperty(property, out var value) && value.GetString() is { Length: > 0 } text
+            ? text
+            : throw new InvalidDataException($"{path}: an entry is missing \"{property}\".");
+
+    private static string Optional(JsonElement element, string property) =>
+        element.TryGetProperty(property, out var value) ? value.GetString() ?? "" : "";
 }

@@ -124,7 +124,7 @@ public sealed class ServiceConfig
     public bool? DiscoverDestinations { get; set; }
 
     /// <summary>
-    /// Whether Steam's blocked names are answered over encrypted DNS - see SteamDns.
+    /// Whether blocked names are answered over encrypted DNS - see UnblockDns.
     ///
     /// ON unless switched off, and NOT tied to the tunnel. It shares nothing with a connection:
     /// no relay, no bandwidth, no route. It was tied to Connect in the first version and that was
@@ -135,9 +135,9 @@ public sealed class ServiceConfig
     /// written into every config.json can no longer be told from somebody choosing it, and a later
     /// release could then never change the default for anyone.
     /// </summary>
-    [JsonPropertyName("steamDns")]
+    [JsonPropertyName("unblock")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public bool? SteamDnsEnabled { get; set; }
+    public bool? UnblockEnabled { get; set; }
 
     /// <summary>
     /// Automatic moves between the ways into the relay in use - the relay itself and the entries in front

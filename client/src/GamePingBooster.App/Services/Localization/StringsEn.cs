@@ -30,11 +30,12 @@ internal static class StringsEn
         ["main.label.game"] = "Game",
         ["main.label.routing"] = "Routing",
         ["main.label.packets"] = "Packets",
-        ["main.label.steam"] = "Steam",
-        ["steam.on"] = "Unblocked",
-        ["steam.off"] = "Not enabled",
-        ["steam.tip.on"] = "Steam's store and community are answered over encrypted DNS, because this line answers them with a fake address. Downloads are not affected - they stay on your provider's own path, which is faster.",
-        ["steam.tip.off"] = "Steam name support is not running. The service will keep trying.",
+        ["main.label.unblock"] = "Unblocked",
+        ["unblock.on"] = "On",
+        ["unblock.onFor"] = "{0}",
+        ["unblock.off"] = "Not enabled",
+        ["unblock.tip.on"] = "Names this connection answers falsely are resolved over encrypted DNS instead, so these sites load normally. Downloads are not affected - they stay on your provider's own path, which is faster.",
+        ["unblock.tip.off"] = "Name unblocking is not running. The service will keep trying.",
         ["main.games.tip"] = "See supported games",
 
         ["main.setup.needed"] =

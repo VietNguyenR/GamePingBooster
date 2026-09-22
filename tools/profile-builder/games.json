@@ -124,6 +124,39 @@
       "azureRegions": [],
       "asns": [6507],
       "note": "Not captured yet. Riot publishes ports, not servers: the match is UDP 5000-5500 (and 7000-8000) from League of Legends.exe, which only runs during a match - LeagueClient.exe is the lobby and is not watched. Vietnam moved to Riot's own servers in January 2025 (VNG publishes), first hosted in Hong Kong, later on hardware in Vietnam. Whether those servers sit inside AS6507's announcements is unknown - an address outside them lands in observed-lol-unverified.txt, which is the first thing to read after a capture. AS6507 is also VALORANT's, so the two games may share prefixes; the builder's overlap rule decides that, never loosen it."
+    },
+
+    "apex": {
+      "name": "Apex Legends",
+      "watchProcess": "r5apex_dx12",
+      "probePort": null,
+      "observedPath": "observed-apex.txt",
+      "landmarkPath": null,
+      "tcpSessionsPath": "tcp-sessions-apex.txt",
+      "unverifiedPath": "observed-apex-unverified.txt",
+      "manualCidrPath": "manual-cidrs-apex.txt",
+      "profilePath": "../../profiles/apex-vn.json",
+      "awsRegions": ["ap-northeast-1", "ap-east-1"],
+      "azureRegions": [],
+      "asns": [],
+      "note": "Captured 2026-09-20. Gameplay is UDP from r5apex_dx12.exe to Respawn's own EC2 space on ports 10000-10500, in ap-northeast-1 (Tokyo) and ap-east-1 (Hong Kong) - both seen carrying a match, so both are declared.\n\nAPEX MEASURES EVERY DATACENTRE, ON THE GAMEPLAY PORTS. Read this before judging any apex address. 216.244.0.0/16 is Respawn's block spread across 11 AWS regions - Tokyo, Hong Kong, Frankfurt, Ohio, Virginia, Oregon, Sydney and more - and the client measures them from the lobby on the same ports it plays on. So probePort stays null and landmarkPath stays null: there is no separate probe port to key on, Test-ProbeEndpoint can never classify one, and both the capture (-MinPackets 500) and the service (NewServerPackets 500 in a 30 s window) let those measurements through as if they were servers.\n\nTell them apart by RATE - not by geography, not by packet count, and NOT by seconds: a discovery row's window is bounded by the recorder's 30 s report and 60 s rest, so a real match reported by a client looks short next to one the operator captured end to end. A match runs ~140 packets/s from its first second; a measurement runs 25-60.\n  216.244.36.123  123162 / 874 s = 141/s  ap-northeast-1  match     (capture)\n  216.244.53.123   87948 / 627 s = 140/s  ap-northeast-1  match     (capture)\n  216.244.26.243    8360 /  61 s = 137/s  ap-east-1       match     (discovery)\n  216.244.14.228    2593 /  43 s =  60/s  eu-central-1    measured  (capture)\n  216.244.19.192    1727 /  31 s =  56/s  eu-central-1    measured  (capture)\n  15.129.62.15       690 /  28 s =  25/s  ap-east-1       measured  (discovery)\nUnder about 100/s is a measurement however long it ran and wherever it is. 15.129.62.15 was briefly routed as asia-hk 15.129.62.0/23 on 2026-09-20 on its region alone, before the rate was compared; dropped the same day with -AllowCoverageLoss. ap-east-1 is declared because of 216.244.26.243, not because measurements keep arriving from Hong Kong. Eight more - seven eu-central-1, one us-east-2 - were rejected on /admin/discovery that day. Never add a region to explain a measurement: routing a measured path is the landmark rule, the game would compare a tunnelled datacentre against direct ones and could pick the wrong one.\n\nApex ships two executables from the same install, r5apex.exe on DX11 and r5apex_dx12.exe on DX12, and only the one named above is watched; launching without the DX12 option means capture waits forever."
+    },
+
+    "wot": {
+      "name": "World Of Tank",
+      "watchProcess": "WorldOfTanks",
+      "probePort": null,
+      "observedPath": "observed-wot.txt",
+      "landmarkPath": null,
+      "tcpSessionsPath": "tcp-sessions-wot.txt",
+      "unverifiedPath": "observed-wot-unverified.txt",
+      "manualCidrPath": "manual-cidrs-wot.txt",
+      "profilePath": "../../profiles/wot-vn.json",
+      "awsRegions": [],
+      "azureRegions": [],
+      "asns": [16509],
+      "discoveryPacketsPerSecond": 7,
+      "note": "Captured 2026-09-21.\n\nTHE QUIETEST GAME MEASURED, AND THE REASON discoveryPacketsPerSecond EXISTS. A World of Tanks match runs 9-16 packets a second, against PUBG's 40-60 and Apex's 140, so the client's built-in threshold of 500 packets in 30 seconds - 16.7 a second - sits just above every server this game plays on. Measured through the tunnel on 2026-09-22: the busiest 30-second window of a whole match was 457 packets, 91 per cent of the threshold and never over it. Eight addresses in one capture, 12.9-14.9 a second, every one of them under.\n\nThere IS a burst - 543 packets in 6 seconds, about 90 a second - when a battle loads, and it would clear 500 on its own. It does not help. The recorder only listens once the tunnel has carried no match traffic for 15 seconds, so when the game hands you to a server the profile lacks, listening starts long after the burst is over; and a mid-session server change has no burst at all - 282 packets in 29 seconds when it moved on 2026-09-22 at 13:52:54. Discovery found a new server here only if the game started on one.\n\n7 a second - 210 in a window - is under half the quietest match seen and four times the loudest address in any capture that was not a match. Raise it if this game's own idle traffic ever gets reported; do not raise it because a report was wrong for some other reason."
     }
   }
 }

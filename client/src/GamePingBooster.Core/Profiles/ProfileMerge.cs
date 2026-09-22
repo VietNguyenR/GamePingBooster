@@ -1,4 +1,4 @@
-namespace GamePingBooster.Core.Profiles;
+﻿namespace GamePingBooster.Core.Profiles;
 
 /// <summary>
 /// Combines separately stored game profiles into the one bundle the tunnel runs on, and finds which
@@ -37,6 +37,12 @@ public static class ProfileMerge
             SchemaVersion = bundles.Max(b => b.SchemaVersion),
             GeneratedUtc = bundles.Max(b => b.GeneratedUtc),
             Relays = primary.Relays,
+
+            // From the same bundle as the relays, for the same reason: it is one list served
+            // identically in every game's profile, not something to concatenate per game.
+            Unblock = primary.Unblock.Count > 0
+                ? primary.Unblock
+                : bundles.FirstOrDefault(b => b.Unblock.Count > 0)?.Unblock ?? [],
         };
 
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

@@ -41,7 +41,8 @@ internal sealed record TargetReport(
     TlsResult[] Tls,
     TlsResult[] TlsWithoutSni,
     bool AnswerContradicted,
-    bool PlaintextDisagreesWithDoh);
+    bool PlaintextDisagreesWithDoh,
+    string[] FilteredAddresses);
 
 internal static class Judge
 {
@@ -113,7 +114,15 @@ internal static class Judge
         // Nothing trustworthy worked. What stopped it decides whether DNS could ever have helped.
         var dohResults = tls.Where(t => dohAddresses.Contains(t.Address)).ToArray();
 
-        var reset = dohResults.Any(t => t.Outcome == TlsOutcome.ResetDuringHandshake);
+        // A stall counts the same as a reset, and getting this wrong cost two days.
+        //
+        // The middlebox does not answer the hello: it holds the connection open and sends the reset
+        // about nineteen seconds later. This tool gives a handshake eight seconds, so what it
+        // usually SEES is a timeout, and a test that looked only for ResetDuringHandshake reported
+        // "inconclusive" for a name whose evidence was complete and sitting in the same report -
+        // both addresses stalled with the name, both completed a handshake without it.
+        var stalled = dohResults.Any(t =>
+            t.Outcome is TlsOutcome.ResetDuringHandshake or TlsOutcome.HandshakeTimedOut);
         // A handshake with no SNI usually ends in a certificate for some other name - the server has
         // no idea which site was wanted, so it presents its default. That is a COMPLETED handshake
         // and it is the whole point of the control: the packets crossed, the TLS exchange ran to the
@@ -123,11 +132,11 @@ internal static class Judge
             dohAddresses.Contains(t.Address) &&
             t.Outcome is TlsOutcome.Ok or TlsOutcome.CertificateNotValid);
 
-        if (reset && noSniCompleted)
+        if (stalled && noSniCompleted)
         {
             return (Verdict.SniFiltering,
-                "the real address completes a handshake when no name is sent and is reset when the " +
-                "name is sent");
+                "the real address completes a handshake when no name is sent, and stalls when the " +
+                "name is sent - the name is what is being filtered");
         }
 
         if (dohResults.Length > 0 && dohResults.All(t =>
@@ -144,15 +153,42 @@ internal static class Judge
                 "is terminating TLS in the middle");
         }
 
-        if (reset)
+        if (stalled)
         {
             return (Verdict.SniFiltering,
-                "reset mid-handshake on the real address; the no-SNI control did not complete either, so " +
-                "this is a filter of some kind but not proven to key on the name");
+                "the real address never finished a handshake; the no-SNI control did not complete " +
+                "either, so this is a filter of some kind but not proven to key on the name");
         }
 
         var detail = dohResults.Select(t => t.Address + " " + TlsProbes.Describe(t.Outcome));
         return (Verdict.Inconclusive, "the real address did not serve a valid certificate - " + string.Join(", ", detail));
+    }
+
+    /// <summary>
+    /// Addresses that are filtered while OTHER addresses for the same name work.
+    ///
+    /// This exists because the first version of this tool hid the thing it was built to find. On
+    /// 2026-09-20 it printed "handshake stalled" for one of store.steampowered.com's addresses and
+    /// "no SNI -> wrong certificate" for the same one - a completed handshake the moment the name
+    /// was left out - and then reported the name as DNS POISONING and moved on, because
+    /// <see cref="Decide"/> stops as soon as ANY trustworthy address works. Two days later the
+    /// store was still slow for exactly that reason and it had to be found again by hand.
+    ///
+    /// A name whose addresses are partly filtered is a separate finding from how it is blocked, so
+    /// it is computed separately and never short-circuited.
+    /// </summary>
+    public static string[] PartlyFiltered(IReadOnlyList<TlsResult> tls)
+    {
+        // Only meaningful when something DID work: if every address fails, that is a plain block
+        // and Decide already says so.
+        if (!tls.Any(t => t.Authentic)) return [];
+
+        return
+        [
+            .. tls.Where(t => t.Outcome is TlsOutcome.ResetDuringHandshake or TlsOutcome.HandshakeTimedOut)
+                  .Select(t => t.Address)
+                  .Distinct()
+        ];
     }
 
     public static string Describe(Verdict verdict) => verdict switch
@@ -179,26 +215,27 @@ internal static class Judge
         if (control.Length > 0 && control.All(r => r.Verdict is not (Verdict.Ok or Verdict.OkDifferentAddresses)))
         {
             return "The control name failed too. Something is wrong with this line or this run - " +
-                   "do not read anything into the Steam results.";
+                   "do not read anything into the rest of these results.";
         }
 
-        var steam = reports.Where(r => r.Kind != Targets.Label(TargetKind.Control)).ToArray();
-        // A name that does not resolve anywhere says nothing about the content path either way, so
-        // it is left out of the judgement rather than counted against it.
-        var content = steam
-            .Where(r => r.Kind == Targets.Label(TargetKind.SteamContent) && r.Verdict != Verdict.NoSuchName)
+        var appNames = reports.Where(r => r.Kind != Targets.Label(TargetKind.Control)).ToArray();
+        // A name that does not resolve anywhere says nothing about the bulk path either way, so it
+        // is left out of the judgement rather than counted against it.
+        var bulk = appNames
+            .Where(r => r.Kind == Targets.Label(TargetKind.Bulk) && r.Verdict != Verdict.NoSuchName)
             .ToArray();
-        var contentClean = content.Length > 0 &&
-            content.All(r => r.Verdict is Verdict.Ok or Verdict.OkDifferentAddresses);
+        var bulkClean = bulk.Length > 0 &&
+            bulk.All(r => r.Verdict is Verdict.Ok or Verdict.OkDifferentAddresses);
 
-        var poisoned = steam.Where(r => r.Verdict is Verdict.DnsPoisoning).Select(r => r.Host).ToArray();
-        var sni = steam.Where(r => r.Verdict is Verdict.SniFiltering).Select(r => r.Host).ToArray();
-        var dead = steam.Where(r => r.Verdict is Verdict.IpBlocked).Select(r => r.Host).ToArray();
+        var poisoned = appNames.Where(r => r.Verdict is Verdict.DnsPoisoning).Select(r => r.Host).ToArray();
+        var sni = appNames.Where(r => r.Verdict is Verdict.SniFiltering).Select(r => r.Host).ToArray();
+        var dead = appNames.Where(r => r.Verdict is Verdict.IpBlocked).Select(r => r.Host).ToArray();
 
-        if (poisoned.Length == 0 && sni.Length == 0 && dead.Length == 0)
+        if (poisoned.Length == 0 && sni.Length == 0 && dead.Length == 0 &&
+            reports.All(r => r.FilteredAddresses.Length == 0))
         {
-            return "Nothing on this line is blocked. Either the ISP does not filter Steam, or something " +
-                   "on this machine is already working around it.";
+            return "Nothing on this line is blocked. Either the ISP does not filter this service, or " +
+                   "something on this machine is already working around it.";
         }
 
         var lines = new List<string>();
@@ -213,7 +250,17 @@ internal static class Judge
         if (sni.Length > 0)
         {
             lines.Add("SNI filtering on: " + string.Join(", ", sni) + ".");
-            lines.Add("DNS cannot fix these - the connection dies after the name is sent. They need the tunnel.");
+
+            // Deliberately not "these need the tunnel", which is what this said until the resolver
+            // learned to check its own answers. A CDN name has many edges and only some sit behind
+            // the filter, so the first thing to try is handing out one that completes a handshake -
+            // measured, not assumed. The tunnel is only the answer when NO edge works, and this
+            // tool cannot tell which case it is from one address: it probes what the resolvers
+            // named, not the whole CDN.
+            lines.Add("Encrypted DNS alone does not fix these: the connection dies after the name is sent. " +
+                      "But the addresses here are only the ones the resolvers happened to name - if any " +
+                      "other edge of the same CDN completes a handshake, answering with that one fixes it " +
+                      "without a tunnel. The tunnel is the answer only when none does.");
         }
 
         if (dead.Length > 0)
@@ -233,10 +280,28 @@ internal static class Judge
                       ". Fix the target list.");
         }
 
-        lines.Add(contentClean
-            ? "Content names are clean - downloads must stay on the ISP's own path. Do not route them."
-            : "Content names are NOT clean. Read the per-name rows before deciding anything about downloads, " +
-              "because tunnelling them is what the relay cannot afford.");
+        // Reported for every name, whatever its verdict. A name can be DNS-poisoned AND have half
+        // its addresses filtered, and on the line this was written for, one name was exactly that.
+        var partly = reports.Where(r => r.FilteredAddresses.Length > 0).ToArray();
+        if (partly.Length > 0)
+        {
+            lines.Add("Partly filtered - some addresses work and some are reset mid-handshake:");
+            foreach (var report in partly)
+            {
+                lines.Add($"  {report.Host}: {string.Join(", ", report.FilteredAddresses)}");
+            }
+
+            lines.Add("Whether these names feel fast is then luck of which address the resolver hands out. " +
+                      "Encrypted DNS alone does not fix it - the answer has to be checked before it is used.");
+        }
+
+        // Never inferred from another app. Steam's bulk names turned out to resolve to caches
+        // inside the country, which made the ISP's own answer the FASTER one for downloads - a fact
+        // about Steam on that line, not a rule, and the reason every app declares its own bulk names.
+        lines.Add(bulkClean
+            ? "Bulk names are clean - downloads must stay on the ISP's own path. Do not route them."
+            : "Bulk names are NOT clean. Read the per-name rows before deciding anything about downloads, " +
+              "because carrying them is what a relay cannot afford.");
 
         return string.Join(Environment.NewLine, lines);
     }

@@ -8,20 +8,23 @@ namespace GamePingBooster.Service.Dns;
 /// A DNS server on loopback that answers the handful of names the ISP lies about, and forwards
 /// everything else to the resolver the machine was already using.
 ///
+/// Which names those are is not this type's business - it asks the policy, which comes from the
+/// profile the licence server delivers.
+///
 /// It listens on 127.0.0.53 rather than 127.0.0.1 so it cannot collide with whatever else a
 /// developer or a player has bound to the obvious loopback address, and so the address in the
 /// adapter's DNS list is recognisably ours when somebody reads it back later.
 ///
 /// Two rules decide everything:
 ///
-///   scoped name    asked over DoH, because the ISP's answer for it is a lie (127.0.0.1)
+///   claimed name   asked over DoH, because the ISP's answer for it is a lie (127.0.0.1)
 ///   anything else  relayed to the ISP's own resolver, unread and unchanged
 ///
-/// The second rule is not laziness, it is the design. The ISP's answers are BETTER for Steam's
-/// content CDNs - they name caches inside the country that connect in 10 ms - and they are the
-/// only correct answers for a captive portal, a corporate split-horizon name, or a router's own
-/// hostname. A resolver that "helpfully" sent everything abroad would break all three while
-/// fixing nothing. See <see cref="SteamNames"/> for what is scoped and why.
+/// The second rule is not laziness, it is the design. The ISP's answers are BETTER for a content
+/// CDN - they name caches inside the country that connect in 10 ms - and they are the only correct
+/// answers for a captive portal, a corporate split-horizon name, or a router's own hostname. A
+/// resolver that "helpfully" sent everything abroad would break all three while fixing nothing.
+/// See <see cref="UnblockPolicy"/> for what is claimed and why.
 ///
 /// Both transports are served. Windows falls back to TCP whenever a UDP answer comes back
 /// truncated, and a resolver that only spoke UDP would look like an intermittent failure on
@@ -35,7 +38,9 @@ internal sealed class LocalResolver : IAsyncDisposable
     private const int Port = 53;
 
     private readonly IReadOnlyList<IPAddress> _upstream;
+    private readonly UnblockPolicy _policy;
     private readonly DohUpstream _doh;
+    private readonly WorkingEdges _edges;
     private readonly Action<string> _log;
     private readonly CancellationTokenSource _stopping = new();
 
@@ -48,14 +53,19 @@ internal sealed class LocalResolver : IAsyncDisposable
     private long _forwarded;
     private long _failed;
 
-    public LocalResolver(IReadOnlyList<IPAddress> upstream, Action<string> log)
+    public LocalResolver(IReadOnlyList<IPAddress> upstream, UnblockPolicy policy, Action<string> log)
     {
         _upstream = upstream;
+        _policy = policy;
         _log = log;
         _doh = new DohUpstream(log);
+        _edges = new WorkingEdges(_doh, log);
     }
 
     public long ScopedQueries => Interlocked.Read(ref _scoped);
+
+    /// <summary>Addresses dropped for failing a TLS handshake - see <see cref="WorkingEdges"/>.</summary>
+    public long RejectedEdges => _edges.Rejected;
     public long ForwardedQueries => Interlocked.Read(ref _forwarded);
     public long FailedQueries => Interlocked.Read(ref _failed);
 
@@ -69,7 +79,7 @@ internal sealed class LocalResolver : IAsyncDisposable
         if (_upstream.Count == 0)
         {
             throw new InvalidOperationException(
-                "No upstream resolver was captured, so non-Steam names could not be answered.");
+                "No upstream resolver was captured, so unclaimed names could not be answered.");
         }
 
         var endpoint = new IPEndPoint(ListenAddress, Port);
@@ -104,7 +114,7 @@ internal sealed class LocalResolver : IAsyncDisposable
         _udpLoop = Task.Run(() => ServeUdpAsync(_stopping.Token));
         _tcpLoop = Task.Run(() => ServeTcpAsync(_stopping.Token));
 
-        _log($"Steam resolver listening on {endpoint}, forwarding everything else to " +
+        _log($"Unblock resolver listening on {endpoint}, forwarding everything else to " +
              string.Join(", ", _upstream.Select(u => u.ToString())) + ".");
     }
 
@@ -126,7 +136,7 @@ internal sealed class LocalResolver : IAsyncDisposable
             catch (ObjectDisposedException) { break; }
             catch (SocketException ex)
             {
-                _log($"Steam resolver UDP receive failed: {ex.SocketErrorCode}");
+                _log($"Unblock resolver UDP receive failed: {ex.SocketErrorCode}");
                 continue;
             }
 
@@ -146,7 +156,7 @@ internal sealed class LocalResolver : IAsyncDisposable
                 catch (ObjectDisposedException) { }
                 catch (Exception ex)
                 {
-                    _log($"Steam resolver failed to answer a UDP query: {ex.Message}");
+                    _log($"Unblock resolver failed to answer a UDP query: {ex.Message}");
                 }
             }, ct);
         }
@@ -167,7 +177,7 @@ internal sealed class LocalResolver : IAsyncDisposable
             catch (ObjectDisposedException) { break; }
             catch (SocketException ex)
             {
-                _log($"Steam resolver TCP accept failed: {ex.SocketErrorCode}");
+                _log($"Unblock resolver TCP accept failed: {ex.SocketErrorCode}");
                 continue;
             }
 
@@ -205,7 +215,7 @@ internal sealed class LocalResolver : IAsyncDisposable
                     catch (OperationCanceledException) { }
                     catch (Exception ex)
                     {
-                        _log($"Steam resolver failed to answer a TCP query: {ex.Message}");
+                        _log($"Unblock resolver failed to answer a TCP query: {ex.Message}");
                     }
                 }
             }, ct);
@@ -223,8 +233,30 @@ internal sealed class LocalResolver : IAsyncDisposable
     {
         var id = DnsWire.ReadId(query);
 
-        if (DnsWire.TryReadQuestion(query, out var name, out _) && SteamNames.IsScoped(name))
+        if (DnsWire.TryReadQuestion(query, out var name, out var type) && _policy.ClaimedBy(name) is { } app)
         {
+            // A records only go through the edge check. Everything else about these names - AAAA,
+            // the HTTPS records browsers now ask for, anything invented later - is relayed as it
+            // arrives, because the check has nothing to say about them and synthesising an answer
+            // would mean dropping whatever the upstream knew that this code does not.
+            if (type == DnsWire.TypeA)
+            {
+                // The service's canary travels with the question: it is the name proven to work on
+                // this line, and the only thing worth asking when every address for THIS name is
+                // filtered.
+                var edges = await _edges.ForAsync(name, app.Canary, ct).ConfigureAwait(false);
+                if (edges is not null)
+                {
+                    Interlocked.Increment(ref _scoped);
+                    var built = DnsWire.BuildAnswer(query, edges, WorkingEdges.AnswerTtlSeconds);
+                    DnsWire.WriteId(built, id);
+                    return built;
+                }
+
+                // No address survived, or no upstream answered. Falls through to relaying the
+                // upstream's own reply, which is what this did before the check existed.
+            }
+
             var answer = await _doh.ResolveAsync(query, query.Length, ct).ConfigureAwait(false);
             if (answer is not null)
             {

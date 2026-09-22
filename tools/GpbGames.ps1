@@ -90,6 +90,13 @@ function ConvertTo-GpbGame {
         AzureRegions      = @(@($Game.azureRegions) | Where-Object { $_ })
         GlobalAccelerator = [bool]$Game.globalAccelerator
         Asns              = @(@($Game.asns) | Where-Object { $null -ne $_ } | ForEach-Object { [int]$_ })
+
+        # Packets a second that make an address a server of this game, for the client's discovery.
+        # Null means the client's own default (500 in 30 s, 16.7 a second), which is right for every
+        # game whose match is louder than that. World of Tanks runs 9-16 and declares 7. Measure it
+        # from the game's own capture before setting one - observed-<game>.txt has packets and
+        # seconds per address - and never set it to quieten a game that is simply not running.
+        DiscoveryRate     = if ($null -ne $Game.discoveryPacketsPerSecond) { [double]$Game.discoveryPacketsPerSecond } else { $null }
         Note              = $Game.note
     }
 }

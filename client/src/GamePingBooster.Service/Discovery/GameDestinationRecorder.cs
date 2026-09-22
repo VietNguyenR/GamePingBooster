@@ -28,10 +28,12 @@ namespace GamePingBooster.Service.Discovery;
 ///              because nothing else can end it: that match never touches the tunnel, so leaving it
 ///              is invisible until listening resumes.
 ///
-/// A new server is one address the game sent at least <see cref="NewServerPackets"/> packets to
-/// within <see cref="Window"/>, outside the profile's ranges, not one of its landmarks and not on
-/// this machine's own network. Measured on PUBG, 2026-09-17: the match server took about 60 packets
-/// a second, 1,800 in thirty; the busiest datacentre probe took 27 in three minutes.
+/// A new server is one address the game sent enough packets to within <see cref="Window"/>, outside
+/// the profile's ranges, not one of its landmarks and not on this machine's own network. How many is
+/// enough is the game's own business - <see cref="PacketsFor"/> - because games differ by more than
+/// ten times: measured on PUBG, 2026-09-17, the match server took about 60 packets a second, 1,800 in
+/// thirty, and the busiest datacentre probe took 27 in three minutes; World of Tanks, measured through
+/// the tunnel on 2026-09-22, takes 9-16 a second and would never reach PUBG's number.
 ///
 /// A busy address INSIDE the ranges while listening is logged as a known server, not reported. It
 /// means a match left the tunnel for a server the profile already has - routes being reinstalled
@@ -56,10 +58,15 @@ internal sealed class GameDestinationRecorder : IDisposable
     private const string SessionName = "GamePingBooster-Discovery";
 
     /// <summary>
-    /// Packets to one address within <see cref="Window"/> that make it a server. 500 since 2026-09-17: the
-    /// first real detection took 1,129 in 28 s - about 40 a second, not the 60 of the first capture - so
-    /// 1,000 would have missed a match running a little slower. The busiest datacentre probe is 27 in
-    /// three minutes, still twenty times below.
+    /// Packets to one address within <see cref="Window"/> that make it a server, for a game whose profile
+    /// declares no rate of its own. 500 since 2026-09-17: the first real detection took 1,129 in 28 s -
+    /// about 40 a second, not the 60 of the first capture - so 1,000 would have missed a match running a
+    /// little slower. The busiest datacentre probe is 27 in three minutes, still twenty times below.
+    ///
+    /// It stays the default because it is right for every game measured so far except one - Apex is the
+    /// reason it must not be lowered for everyone, its lobby measures eleven datacentres at 25-60 packets
+    /// a second on the gameplay ports. A game quieter than this says so in its profile; see
+    /// <see cref="GameEntry.DiscoveryPacketsPerSecond"/>.
     /// </summary>
     internal const int NewServerPackets = 500;
 
@@ -136,6 +143,17 @@ internal sealed class GameDestinationRecorder : IDisposable
         _log = log;
     }
 
+    /// <summary>
+    /// Packets within <see cref="Window"/> that make an address a server of <paramref name="game"/>:
+    /// the rate its profile declares - already brought inside safe bounds by
+    /// <see cref="GameEntry.DiscoveryRate"/> - or <see cref="NewServerPackets"/> when it declares none.
+    ///
+    /// Rounded up, so a declared rate is never quietly made easier to reach than it reads.
+    /// </summary>
+    internal static int PacketsFor(GameEntry game) => game.DiscoveryRate is { } rate
+        ? (int)Math.Ceiling(rate * Window.TotalSeconds)
+        : NewServerPackets;
+
     /// <summary>A game from the profile is running. Does nothing if that game is already watched.</summary>
     public void GameStarted(GameEntry game) => Enqueue(() =>
     {
@@ -207,6 +225,10 @@ internal sealed class GameDestinationRecorder : IDisposable
             .Select(l => IPAddress.TryParse(l, out var a) ? a : null)
             .Where(a => a is not null).Select(a => a!).ToHashSet();
 
+        /// <summary>Settled once from the profile, so every comparison in this session uses one number
+        /// and the log line that names it cannot drift from the one that decides.</summary>
+        private readonly int _newServerPackets = PacketsFor(game);
+
         private readonly long _started = Stopwatch.GetTimestamp();
         private readonly HashSet<uint> _gamePids = [];
         private readonly Queue<(long At, long? Packets)> _tunnelSamples = new();
@@ -246,8 +268,12 @@ internal sealed class GameDestinationRecorder : IDisposable
 
         public void Start()
         {
+            var declared = Game.DiscoveryPacketsPerSecond is { } rate
+                ? $"{rate:0.#} packets/s declared for this game"
+                : "the default rate";
             _log($"Discovery: watching {Game.Name} - {_ranges.Count} range(s) and {_landmarks.Count} landmark(s) " +
-                 "in the profile. Listening only while the tunnel carries none of its UDP.");
+                 $"in the profile. A new server is {_newServerPackets:N0} packets to one address in " +
+                 $"{Window.TotalSeconds:F0} s ({declared}). Listening only while the tunnel carries none of its UDP.");
             _timer = new Timer(_ => Poll(), null, TimeSpan.Zero, PollInterval);
         }
 
@@ -466,7 +492,7 @@ internal sealed class GameDestinationRecorder : IDisposable
             }
         }
 
-        /// <summary>Looks for one address that took <see cref="NewServerPackets"/> within the window.</summary>
+        /// <summary>Looks for one address that took this game's threshold of packets within the window.</summary>
         private void Evaluate(long now)
         {
             if (_table is not { } table) return;
@@ -485,7 +511,7 @@ internal sealed class GameDestinationRecorder : IDisposable
             // A check on the reported server that has listened a whole window without finding it busy:
             // that match is over, and this listening is for the next one.
             if (_waitingOn is { } waited && seconds >= Window.TotalSeconds * 0.8 &&
-                (sent.GetValueOrDefault(waited) - baseline.GetValueOrDefault(waited)) < NewServerPackets)
+                (sent.GetValueOrDefault(waited) - baseline.GetValueOrDefault(waited)) < _newServerPackets)
             {
                 _log($"Discovery: {Destinations.Mask(waited)} went quiet - that match is over. Listening for the next one.");
                 _waitingOn = null;
@@ -494,7 +520,7 @@ internal sealed class GameDestinationRecorder : IDisposable
             foreach (var row in rows.OrderByDescending(r => r.Sent))
             {
                 var packets = row.Sent - baseline.GetValueOrDefault(row.Address);
-                if (packets < NewServerPackets) continue;
+                if (packets < _newServerPackets) continue;
                 if (_landmarks.Contains(row.Address)) continue;
 
                 if (_ranges.Any(r => r.Contains(row.Address)))

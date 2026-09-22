@@ -11,6 +11,8 @@ using GamePingBooster.Service.Native;
 using GamePingBooster.Service.Network;
 using System.Security.Cryptography;
 
+using GamePingBooster.Service.Dns;
+
 namespace GamePingBooster.Service.Tunnel;
 
 /// <summary>
@@ -31,6 +33,16 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     private readonly Action<string> _log;
 
     private ProfileBundle? _profile;
+
+    /// <summary>
+    /// The services the delivered profile says to unblock, or the built-in list when it carries
+    /// none - see UnblockPolicy.
+    ///
+    /// Exposed rather than acted on here: unblocking a name has nothing to do with a tunnel, and
+    /// the engine is not where that decision belongs. It is only the thing that happens to hold the
+    /// profile the list arrives in.
+    /// </summary>
+    public UnblockPolicy UnblockPolicy => UnblockPolicy.FromProfile(_profile, _log);
     private WintunAdapter? _adapter;
     private TunnelClient? _tunnel;
     private RouteManager? _routes;
@@ -447,8 +459,17 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         }
         else
         {
-            throw new FileNotFoundException(
-                $"No profile at {_config.ProfilePath} and nothing from the licence server either.");
+            // Two sentences, because the two installations have nothing to do with each other.
+            // A self-hosted machine has no licence server and never will, so telling its owner
+            // that nothing came from one sends them looking for a server they deliberately do
+            // not run - and the file they actually need is the one named here, beside the
+            // service. The licensed wording stays as it was: there the profile really does
+            // arrive from the server, and the shipped file is only the fallback.
+            throw new NoProfileAvailableException(licensed
+                ? $"No profile at {_config.ProfilePath} and nothing from the licence server either."
+                : $"No profile at {_config.ProfilePath}, and none installed beside the service " +
+                  $"at {shipped}. A self-hosted installation reads the game's address ranges " +
+                  "from that file.");
         }
 
         _profile = ProfileMerge.Merge(bundles);
@@ -2778,7 +2799,18 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             // The credential may be a pre-shared key OR a licence token. Requiring the key would
             // disable Connect on a licensed installation, which has no key at all and is not
             // supposed to have one.
-            Configured = (_config.HasKey || _token is not null) && Relays.Count > 0,
+            //
+            // Relays alone is not the whole answer, though the sentence above says it should be:
+            // it reads the PROFILE's list, and the self-hosted addresses only ever reach it
+            // through ApplySelfHostedRelay, which does nothing when there is no profile to apply
+            // them to. So a self-hosted machine with an address and a key typed in - a complete
+            // configuration, and one that needs no licence server at all - reported itself
+            // unconfigured, and the UI answered the only way it can: a dead Connect button and a
+            // banner asking for the address and key that were already there. What is missing on
+            // that machine is the profile, which is a different sentence and not this flag's to
+            // say; Connect reports it, and names the file.
+            Configured = (_config.HasKey || _token is not null) &&
+                         (Relays.Count > 0 || _config.RelayEndpoints.Count > 0),
             TunnelPingMs = _tunnel?.LastRttMs,
             // The real thing when the game's own server answers an echo through the tunnel, and the
             // estimate when it does not.
@@ -2987,6 +3019,16 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         {
             await LoadProfileAsync(ct).ConfigureAwait(false);
         }
+        catch (NoProfileAvailableException)
+        {
+            // Not a failure, and not worth a word to the user. Before the first sign-in there is
+            // no profile anywhere - nothing has been pushed and the installer ships none - so
+            // every save from the settings screen ended in a red banner about a missing file the
+            // user had not asked for and could not yet have. Saving settings is not what fetches
+            // a profile; signing in is.
+            _log("Relay settings updated (no profile to reload yet).");
+            return null;
+        }
         catch (Exception ex)
         {
             // The settings ARE saved at this point, so this is not a failure of the save. Say so,
@@ -3162,3 +3204,18 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     }
 }
 
+
+/// <summary>
+/// There is no profile to load: nothing has been pushed, and no file was installed beside the
+/// service either.
+///
+/// Its own type because one caller has to tell it apart from every other reason a load can fail.
+/// A damaged file, a bad signature or an unreadable directory are faults and read as faults; this
+/// one is the ordinary state of a machine that has not signed in yet, and the profile arrives
+/// with the sign-in. It still derives from FileNotFoundException so the callers that only log the
+/// message keep behaving exactly as before.
+/// </summary>
+internal sealed class NoProfileAvailableException : FileNotFoundException
+{
+    public NoProfileAvailableException(string message) : base(message) { }
+}

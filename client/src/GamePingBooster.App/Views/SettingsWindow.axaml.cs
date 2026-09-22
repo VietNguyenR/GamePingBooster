@@ -85,7 +85,6 @@ public partial class SettingsWindow : SurfaceWindow
             return;
         }
 
-        _awaitingReply = true;
         try
         {
             // Its own verb, sent first and not awaited for a verdict: it is a single switch the
@@ -96,6 +95,21 @@ public partial class SettingsWindow : SurfaceWindow
                 await _pipe.SendAsync(new CommandMessage { Verb = "set-quality-sharing", Enabled = vm.QualitySharing });
             }
 
+            // Nothing for the service to write, so nothing to send and nothing to wait for. This
+            // screen also carries the language, which this app saves by itself the moment it is
+            // picked - and sending set-relay for that made the service reload its profile, which
+            // fails on a machine that has not signed in yet. A save that changed only the
+            // language was reported as a failure because of a file it never needed.
+            if (!vm.RelaySettingsChanged)
+            {
+                vm.Saved = true;
+                Close();
+                return;
+            }
+
+            // Set before the send, never after: the reply can arrive while SendAsync is still
+            // returning, and a flag set afterwards would miss it and leave the window open.
+            _awaitingReply = true;
             await _pipe.SendAsync(new CommandMessage
             {
                 Verb = "set-relay",

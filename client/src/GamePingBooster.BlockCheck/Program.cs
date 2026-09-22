@@ -50,6 +50,7 @@ internal static class Program
     private static async Task<int> Main(string[] args)
     {
         string? label = null;
+        string? app = null;
         string? jsonPath = null;
         var anyway = false;
 
@@ -62,9 +63,24 @@ internal static class Program
                 case "--help" or "-h" or "/?": Usage(); return 0;
                 default:
                     if (args[i].StartsWith('-')) { Console.Error.WriteLine($"unknown option '{args[i]}'"); Usage(); return 2; }
-                    label ??= args[i];
+
+                    // Label first, app second. That order because the label is the argument nobody
+                    // can leave out and still have a comparable run, while the app has a default.
+                    if (label is null) label = args[i];
+                    else app ??= args[i];
                     break;
             }
+        }
+
+        TargetSet targets;
+        try
+        {
+            targets = Targets.Load(app ?? Targets.DefaultApp);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or InvalidDataException)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return 2;
         }
 
         using var cancellation = new CancellationTokenSource();
@@ -72,8 +88,9 @@ internal static class Program
 
         var startedAt = DateTimeOffset.Now;
         Console.WriteLine();
-        Console.WriteLine("Game Ping Booster - block check");
+        Console.WriteLine($"Game Ping Booster - block check: {targets.DisplayName}");
         Console.WriteLine($"  {startedAt:yyyy-MM-dd HH:mm:ss zzz}" + (label is null ? "" : $"   label: {label}"));
+        Console.WriteLine($"  names from {targets.Path}");
         Console.WriteLine();
 
         var line = Line.Read();
@@ -120,13 +137,13 @@ internal static class Program
             Timeout = TimeSpan.FromSeconds(10),
         };
 
-        Console.WriteLine($"Probing {Targets.All.Length} names: plaintext DNS to every resolver Windows declares and");
+        Console.WriteLine($"Probing {targets.All.Length} names: plaintext DNS to every resolver Windows declares and");
         Console.WriteLine("to 1.1.1.1 / 8.8.8.8, the same questions over DoH, then TLS to every address that comes back.");
         Console.WriteLine();
 
         var reports = new List<TargetReport>();
 
-        foreach (var target in Targets.All)
+        foreach (var target in targets.All)
         {
             if (cancellation.IsCancellationRequested) break;
             reports.Add(await ProbeAsync(http, line, target, cancellation.Token));
@@ -139,11 +156,14 @@ internal static class Program
         Console.WriteLine(summary);
         Console.WriteLine();
 
+        // The app is in the filename as well as the report: a folder of runs from several ISPs is
+        // only comparable if you can see at a glance which ones are about the same thing.
         var path = jsonPath ?? Path.Combine(
-            Directory.GetCurrentDirectory(), $"blockcheck-{startedAt:yyyyMMdd-HHmmss}.json");
+            Directory.GetCurrentDirectory(), $"blockcheck-{targets.App}-{startedAt:yyyyMMdd-HHmmss}.json");
 
         var run = new RunReport(
             "gpb-blockcheck",
+            targets.App,
             startedAt.ToString("o"),
             label,
             line.Adapters,
@@ -256,6 +276,13 @@ internal static class Program
             }
         }
 
+        var filtered = Judge.PartlyFiltered(tls);
+        if (filtered.Length > 0)
+        {
+            Warn($"    {filtered.Length} address(es) reset mid-handshake while others worked: " +
+                 string.Join(", ", filtered));
+        }
+
         var (verdict, reason) = Judge.Decide(doh, ispResults, tls, withoutSni);
 
         var colour = verdict switch
@@ -277,7 +304,7 @@ internal static class Program
             target.Host, Targets.Label(target.Kind), target.Why, verdict, reason,
             systemAddresses, systemError,
             [.. ispResults], [.. publicPlain], [.. doh], [.. tls], [.. withoutSni],
-            ispResults.Any(r => r.Contradicted), disagrees);
+            ispResults.Any(r => r.Contradicted), disagrees, filtered);
     }
 
     /// <summary>
@@ -383,16 +410,25 @@ internal static class Program
 
     private static void Usage()
     {
-        Console.WriteLine("gpb-blockcheck [label] [--json <path>] [--anyway]");
+        Console.WriteLine("gpb-blockcheck [label] [app] [--json <path>] [--anyway]");
         Console.WriteLine();
-        Console.WriteLine("  label     goes in the report, e.g. viettel-hcm. Name the ISP and the city.");
-        Console.WriteLine("  --json    where to write the measurements (default: blockcheck-<timestamp>.json here)");
+        Console.WriteLine("  label     WHICH LINE this was run on. The app is the next argument, not this one.");
+        Console.WriteLine("            <isp>-<city>, plus the line type when it is unusual. No date: the");
+        Console.WriteLine("            report is already timestamped. e.g. vnpt-hcm, viettel-hn, 4g-viettel-hcm");
+        Console.WriteLine();
+        Console.WriteLine($"  app       which blocked service to probe. Default {Targets.DefaultApp}.");
+        var known = Targets.KnownApps();
+        if (known.Length > 0) Console.WriteLine("            declared: " + string.Join(", ", known));
+        Console.WriteLine("            add one to tools/blockcheck/targets.json - no rebuild needed");
+        Console.WriteLine();
+        Console.WriteLine("  --json    where to write the measurements (default: blockcheck-<app>-<timestamp>.json here)");
         Console.WriteLine("  --anyway  run even though a VPN or DNS proxy looks active. Rarely right.");
     }
 }
 
 internal sealed record RunReport(
     string Tool,
+    string App,
     string StartedAt,
     string? Label,
     string[] Adapters,

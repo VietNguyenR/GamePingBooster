@@ -28,7 +28,32 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         _licenceUrl = currentLicenceUrl ?? string.Empty;
         _initialQualitySharing = qualitySharing;
         _qualitySharing = qualitySharing ?? true;
+
+        // Kept so Save can tell whether there is anything for the service to do. See
+        // RelaySettingsChanged.
+        _initialEndpoints = SplitLines(_endpoints);
+        _initialLicenceUrl = _licenceUrl.Trim();
     }
+
+    private readonly List<string> _initialEndpoints;
+    private readonly string _initialLicenceUrl;
+
+    /// <summary>
+    /// Whether anything the SERVICE owns actually moved.
+    ///
+    /// The language did not: it belongs to the person, this app saves it, and it applies the
+    /// moment it is picked. Save used to send set-relay regardless, which made the service reload
+    /// the profile on every save - and a machine that has not signed in yet has no profile to
+    /// reload, so changing the language reported a red banner about a missing file the user had
+    /// never asked for.
+    ///
+    /// Anything at all in the key box counts as a change: blank means "keep the stored one", so a
+    /// non-blank box is by definition something new to send.
+    /// </summary>
+    public bool RelaySettingsChanged =>
+        !string.IsNullOrWhiteSpace(Psk) ||
+        LicenceUrl.Trim() != _initialLicenceUrl ||
+        !EndpointList.SequenceEqual(_initialEndpoints, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Whether connection quality is sent after each match. Read back from the service, which owns
@@ -75,7 +100,9 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     }
 
     /// <summary>The non-empty lines, which is what actually gets sent.</summary>
-    public List<string> EndpointList => Endpoints
+    public List<string> EndpointList => SplitLines(Endpoints);
+
+    private static List<string> SplitLines(string value) => value
         .Split('\n')
         .Select(line => line.Trim())
         .Where(line => line.Length > 0)

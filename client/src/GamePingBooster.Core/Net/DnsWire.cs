@@ -120,17 +120,7 @@ public static class DnsWire
     /// </summary>
     public static byte[] BuildFailure(ReadOnlySpan<byte> query, int rcode)
     {
-        // The question section is echoed back, as a reply must, so the length is however much of
-        // the original message the question occupied.
-        var end = HeaderLength;
-        while (end < query.Length && query[end] != 0)
-        {
-            if ((query[end] & 0xC0) != 0) break;
-            end += 1 + query[end];
-        }
-
-        end = Math.Min(query.Length, end + 1 + 4);   // root label, QTYPE, QCLASS
-
+        var end = QuestionEnd(query);
         var reply = new byte[end];
         query[..end].CopyTo(reply);
 
@@ -139,6 +129,50 @@ public static class DnsWire
         reply[6] = 0; reply[7] = 0;                            // ANCOUNT
         reply[8] = 0; reply[9] = 0;                            // NSCOUNT
         reply[10] = 0; reply[11] = 0;                          // ARCOUNT
+        return reply;
+    }
+
+    /// <summary>
+    /// Builds a reply to <paramref name="query"/> carrying the given IPv4 addresses as A records.
+    ///
+    /// The one place this library writes an answer rather than relaying one, and it exists for a
+    /// narrow reason: when the resolver has decided which of a name's addresses actually work on
+    /// this line, it has to be able to say so. Everything else is still passed through untouched.
+    ///
+    /// The name in each record is the compression pointer 0xC00C - offset 12, which is where the
+    /// question's name always starts. That is how every real nameserver writes it, and it keeps the
+    /// record fixed at 16 bytes however long the name is.
+    /// </summary>
+    public static byte[] BuildAnswer(ReadOnlySpan<byte> query, IReadOnlyList<IPAddress> addresses, uint ttl)
+    {
+        var questionEnd = QuestionEnd(query);
+
+        var reply = new byte[questionEnd + (addresses.Count * 16)];
+        query[..questionEnd].CopyTo(reply);
+
+        reply[2] = (byte)(0x80 | (reply[2] & 0x01));   // QR, keeping RD
+        reply[3] = 0x80;                               // RA, RCODE 0
+        reply[6] = (byte)(addresses.Count >> 8);
+        reply[7] = (byte)addresses.Count;
+        reply[8] = 0; reply[9] = 0;                    // NSCOUNT
+        reply[10] = 0; reply[11] = 0;                  // ARCOUNT
+
+        var p = questionEnd;
+        foreach (var address in addresses)
+        {
+            var bytes = address.GetAddressBytes();
+            if (bytes.Length != 4) throw new ArgumentException("A records carry IPv4 only", nameof(addresses));
+
+            reply[p++] = 0xC0; reply[p++] = 0x0C;                        // name -> offset 12
+            reply[p++] = 0; reply[p++] = (byte)TypeA;
+            reply[p++] = 0; reply[p++] = 1;                              // IN
+            reply[p++] = (byte)(ttl >> 24); reply[p++] = (byte)(ttl >> 16);
+            reply[p++] = (byte)(ttl >> 8); reply[p++] = (byte)ttl;
+            reply[p++] = 0; reply[p++] = 4;                              // RDLENGTH
+            bytes.CopyTo(reply, p);
+            p += 4;
+        }
+
         return reply;
     }
 
@@ -212,6 +246,25 @@ public static class DnsWire
         5 => "REFUSED",
         _ => $"RCODE{rcode}",
     };
+
+    /// <summary>
+    /// Where the question section ends - the offset a reply's answer records start at.
+    ///
+    /// A reply must echo the question back, so both <see cref="BuildFailure"/> and
+    /// <see cref="BuildAnswer"/> need this and it is written once. Clamped to the message length
+    /// rather than trusted, because these messages come off a socket.
+    /// </summary>
+    private static int QuestionEnd(ReadOnlySpan<byte> query)
+    {
+        var end = HeaderLength;
+        while (end < query.Length && query[end] != 0)
+        {
+            if ((query[end] & 0xC0) != 0) break;
+            end += 1 + query[end];
+        }
+
+        return Math.Min(query.Length, end + 1 + 4);   // root label, QTYPE, QCLASS
+    }
 
     /// <summary>
     /// Lower-cased without a culture, because DNS names are ASCII and case-insensitive by the

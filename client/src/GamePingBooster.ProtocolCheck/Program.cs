@@ -308,6 +308,30 @@ internal static class Program
         Check("profile: a profile without landmarksRouted reads false", !p.Games[0].LandmarksRouted,
             "PUBG's routed-landmark warning would go quiet");
 
+        // World of Tanks runs 9-16 packets a second and the built-in threshold is 16.7, so this
+        // field is the whole of that game's discovery. A profile that carries it and a client that
+        // ignores it look identical from the server, which is why the name is checked here.
+        static GamePingBooster.Core.Profiles.ProfileBundle Rate(string declared) => Parse(
+            $$"""
+            {"schemaVersion":1,"games":[{"id":"wot","name":"World Of Tank","processNames":["WorldOfTanks.exe"],
+             {{declared}}"regions":[]}],"relays":[]}
+            """);
+
+        Check("profile: discoveryPacketsPerSecond is read under that exact name",
+            Rate("\"discoveryPacketsPerSecond\":7,").Games[0].DiscoveryRate == 7,
+            "World of Tanks would keep the 500-packet default and discover nothing");
+        Check("profile: a game that declares no rate has none",
+            p.Games[0].DiscoveryRate is null,
+            "PUBG would stop using the recorder's default");
+        Check("profile: a rate under the floor is clamped up, not obeyed",
+            Rate("\"discoveryPacketsPerSecond\":0,").Games[0].DiscoveryRate
+                == GamePingBooster.Core.Profiles.GameEntry.MinDiscoveryRate,
+            "a zero from the server would report every address the game touches");
+        Check("profile: a rate over the ceiling is clamped down",
+            Rate("\"discoveryPacketsPerSecond\":100000,").Games[0].DiscoveryRate
+                == GamePingBooster.Core.Profiles.GameEntry.MaxDiscoveryRate,
+            "a fat-fingered value would switch that game's discovery off silently");
+
         var merged = GamePingBooster.Core.Profiles.ProfileMerge.Merge([c, p]);
         Check("merge: every game is kept, primary first", merged.Games.Select(g => g.Id).SequenceEqual(["cs2", "pubg"]),
             string.Join(", ", merged.Games.Select(g => g.Id)));

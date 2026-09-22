@@ -353,24 +353,34 @@ public sealed class StatusMessage
     [JsonPropertyName("packetsDroppedFaults")] public long PacketsDroppedFaults { get; set; }
 
     /// <summary>
-    /// Whether the Steam name fix is on - a handful of names answered over encrypted DNS because
-    /// the ISP answers them with 127.0.0.1.
+    /// Whether name unblocking is on - a handful of names answered over encrypted DNS because the
+    /// line answers them with a fake address.
     ///
     /// Nothing to do with the tunnel, the relay or a game, and reported separately for that reason:
-    /// a player whose Steam works and whose ping did not improve has to be able to see which half
+    /// a player whose store works and whose ping did not improve has to be able to see which half
     /// did what. Downloads are deliberately NOT part of it and stay on the ISP's own path, where
     /// the in-country caches are.
     ///
     /// Additive, so no contract version bump: an older UI ignores the field and a newer UI reads
     /// false from an older service.
     /// </summary>
-    [JsonPropertyName("steamDns")] public bool SteamDns { get; set; }
+    [JsonPropertyName("unblock")] public bool Unblock { get; set; }
 
     /// <summary>
-    /// One line about the Steam fix in English - how many names it answered, or why it is off.
-    /// Null on a service too old to have it.
+    /// One line about unblocking in English - which services, how many names it answered, or why it
+    /// is off. Null on a service too old to have it, which is how the UI tells "off" from "this
+    /// build cannot do it" - see MainViewModel.SteamText.
     /// </summary>
-    [JsonPropertyName("steamDnsDetail")] public string? SteamDnsDetail { get; set; }
+    [JsonPropertyName("unblockDetail")] public string? UnblockDetail { get; set; }
+
+    /// <summary>
+    /// The services currently unblocked, by display name, so the UI can name them in the player's
+    /// own sentence rather than repeating the service's English line.
+    ///
+    /// Empty when off, and empty from a service too old to send it - which is why
+    /// <see cref="UnblockDetail"/> and not this field decides whether the feature exists at all.
+    /// </summary>
+    [JsonPropertyName("unblockServices")] public List<string> UnblockServices { get; set; } = [];
 
     /// <summary>
     /// This machine's device public key, 65 bytes as lowercase hex, or null on a service too old
