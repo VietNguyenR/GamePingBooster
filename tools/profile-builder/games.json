@@ -173,6 +173,22 @@
       "asns": [16509],
       "discoveryPacketsPerSecond": 7,
       "note": "Captured 2026-09-21.\n\nTHE QUIETEST GAME MEASURED, AND THE REASON discoveryPacketsPerSecond EXISTS. A World of Tanks match runs 9-16 packets a second, against PUBG's 40-60 and Apex's 140, so the client's built-in threshold of 500 packets in 30 seconds - 16.7 a second - sits just above every server this game plays on. Measured through the tunnel on 2026-09-22: the busiest 30-second window of a whole match was 457 packets, 91 per cent of the threshold and never over it. Eight addresses in one capture, 12.9-14.9 a second, every one of them under.\n\nThere IS a burst - 543 packets in 6 seconds, about 90 a second - when a battle loads, and it would clear 500 on its own. It does not help. The recorder only listens once the tunnel has carried no match traffic for 15 seconds, so when the game hands you to a server the profile lacks, listening starts long after the burst is over; and a mid-session server change has no burst at all - 282 packets in 29 seconds when it moved on 2026-09-22 at 13:52:54. Discovery found a new server here only if the game started on one.\n\n7 a second - 210 in a window - is under half the quietest match seen and four times the loudest address in any capture that was not a match. Raise it if this game's own idle traffic ever gets reported; do not raise it because a report was wrong for some other reason."
+    },
+
+    "deltaforce": {
+      "name": "Delta Force",
+      "watchProcess": "DeltaForceClient-Win64-Shipping",
+      "probePort": null,
+      "observedPath": "observed-deltaforce.txt",
+      "landmarkPath": null,
+      "tcpSessionsPath": "tcp-sessions-deltaforce.txt",
+      "unverifiedPath": "observed-deltaforce-unverified.txt",
+      "manualCidrPath": "manual-cidrs-deltaforce.txt",
+      "profilePath": "../../profiles/deltaforce-vn.json",
+      "awsRegions": [],
+      "azureRegions": [],
+      "asns": [],
+      "note": "Not captured yet. The cross-check is empty on purpose until the first capture shows where the servers are, so ./gpb profile will refuse to build rather than write a profile that looks finished. Read the first capture before declaring anything: which provider and region the gameplay addresses belong to (then awsRegions, azureRegions or asns), the port column (whether the game probes regions on a port of its own - probePort stays null until one is seen), and the packets/second of each address, since a match and a lobby measurement are told apart by rate."
     }
   }
 }
