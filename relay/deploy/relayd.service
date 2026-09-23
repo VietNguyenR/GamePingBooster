@@ -35,7 +35,7 @@ EnvironmentFile=-/etc/gpb/relayd.env
 # occurrence in the file, comments included, so a comment naming one would be rewritten into
 # nonsense in the unit that actually gets installed.
 ExecStart=/usr/local/bin/relayd \
-  -listen :51820 \
+  -listen :__LISTEN_PORT__ \
   -tun gpb0 \
   -subnet 10.77.0.0/24 \
   -mtu 1400 \

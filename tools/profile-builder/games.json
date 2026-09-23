@@ -107,7 +107,23 @@
       "awsRegions": [],
       "azureRegions": [],
       "asns": [6507],
-      "note": "Not captured yet. Riot publishes ports, not servers: the match is UDP 5000-5500 (and 7000-8000) from League of Legends.exe, which only runs during a match - LeagueClient.exe is the lobby and is not watched. Vietnam moved to Riot's own servers in January 2025 (VNG publishes), first hosted in Hong Kong, later on hardware in Vietnam. Whether those servers sit inside AS6507's announcements is unknown - an address outside them lands in observed-lol-unverified.txt, which is the first thing to read after a capture. AS6507 is also VALORANT's, so the two games may share prefixes; the builder's overlap rule decides that, never loosen it."
+      "note": "Captured 2026-09-18 and 2026-09-22 from Hanoi, six sessions. Gameplay is UDP from League of Legends.exe, which only runs during a match - LeagueClient.exe is the lobby and is not watched (see lolc). Every session went to ONE server, 151.106.247.7 on UDP 7331, about 54 packets/s (120728 over 2233 s). Riot documents 5000-5500 and 7000-8000; 7331 is outside the first and the profile routes by address anyway, so never key anything on those ranges. 151.106.247.0/24 is announced by AS6507 exactly, so the profile routes that /24 and nothing wider. It does not overlap TFT (151.106.248.16/28) or VALORANT (151.106.248.0/28, 43.229.65.0/24); the builder's overlap rule decides that, never loosen it.\n\nNO LANDMARK EXISTS, AND THAT IS WHY landmarkPath IS null. Measured 2026-09-23: the server answers no ICMP echo (20/20 lost), no TCP on 80, 443, 7331, 5223, 8080 or 2099 (no SYN-ACK and no RST), and none of the 1016 addresses in 151.106.246-249.x answer ICMP either. tracert dies after the ISP (Viettel, 27.68.236.211). So the client compares relays on the first leg only and cannot measure the player's own connection to the game - it cannot tell whether the tunnel helps. The candidate is the last hop before AS6507 that still answers, found by `traceroute -n -U -p 7331 151.106.247.7` from each relay and from a player's line; it is a landmark only if it sits within a millisecond or two of the server.\n\nThe game process's TCP is HTTPS 443 only - Cloudflare, AWS us-west-2, CloudFront - none of it Riot's AS and none blocked, so lobbyAddresses stays empty. Only one server has been seen, from one Hanoi line; players elsewhere may be put on another, and at 54/s discovery reports it."
+    },
+
+    "lolc": {
+      "name": "League of Legends Client",
+      "watchProcess": "LeagueClient",
+      "probePort": null,
+      "observedPath": "observed-lol-client.txt",
+      "landmarkPath": null,
+      "tcpSessionsPath": "tcp-sessions-lol-client.txt",
+      "unverifiedPath": "observed-lol-client-unverified.txt",
+      "manualCidrPath": "manual-cidrs-lol-client.txt",
+      "profilePath": "../../profiles/lol-client-vn.json",
+      "awsRegions": [],
+      "azureRegions": [],
+      "asns": [],
+      "note": "The League of Legends lobby, captured for diagnosis only (TCP, 2026-09-22) - it is not a game to route. LeagueClient talks HTTPS 443 to Cloudflare (104.16-18.x, 172.64.x), AWS us-west-2 (35.8x.x), Google (34.111.148.117) and 32.18x.x.x, nothing in Riot's AS6507, nothing blocked. None of it is latency-sensitive, so never build a profile from this entry: everything in it would be routed through a relay for no gain. The match itself is League of Legends.exe - see lol."
     },
 	
 	"tft": {

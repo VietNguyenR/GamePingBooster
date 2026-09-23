@@ -126,8 +126,9 @@ foreach ($game in $profileData.games) {
     }
     if ($landmarks.Count -eq 0) {
         $warnings += ("Game '$($game.id)' declares no landmarks, so relays can only be compared on " +
-                      "the leg to the relay - the leg from the relay to the game server is invisible. " +
-                      "a server that is worse both ways.")
+                      "the leg to the relay - the leg from the relay to the game server is invisible, " +
+                      "and so is the player's own connection, so the client cannot tell whether the " +
+                      "tunnel helps at all.")
     }
 
     foreach ($region in $game.regions) {

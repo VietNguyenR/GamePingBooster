@@ -49,6 +49,7 @@ BIN_SRC="${HERE}/../relayd"
 
 MAX_CLIENTS=0
 MIN_TIER=0
+LISTEN_PORT=51820
 PSK_FILE=""
 LICENCE_KEY=""
 FORCE_PSK=no
@@ -61,6 +62,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --min-tier)
       MIN_TIER="${2:-}"
+      shift 2
+      ;;
+    --listen)
+      LISTEN_PORT="${2:-}"
       shift 2
       ;;
     --psk-file)
@@ -81,7 +86,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "usage: $0 [--max-clients N] [--min-tier N] [--psk-file PATH | --psk | --licence-key PATH] [--report-url URL]" >&2
+      echo "usage: $0 [--max-clients N] [--min-tier N] [--listen PORT] [--psk-file PATH | --psk | --licence-key PATH] [--report-url URL]" >&2
       exit 2
       ;;
   esac
@@ -124,6 +129,23 @@ fi
 # working, so nobody would notice for weeks - the dashboard would simply say the box is dead.
 if [[ -n "$REPORT_URL" && "$REPORT_URL" != https://* && "$REPORT_URL" != http://* ]]; then
   echo "--report-url must be a URL, got '${REPORT_URL}'" >&2
+  exit 2
+fi
+
+if ! [[ "$LISTEN_PORT" =~ ^[0-9]+$ ]] || (( LISTEN_PORT < 1 || LISTEN_PORT > 65535 )); then
+  echo "--listen must be a UDP port number, got '${LISTEN_PORT}'" >&2
+  exit 2
+fi
+
+# A machine can be an entry for other relays as well as a relay of its own, and an entry's port is
+# DNATed in PREROUTING - before relayd's socket ever sees a packet. A relay installed on a port an
+# entry here already forwards comes up "active", listening, and unreachable: every handshake goes
+# to the other relay instead. That is how the VN box sat on 2026-09-23, relayd on 51820 behind an
+# entry forwarding 51820 to Singapore. setup-entry.sh warns in the other direction.
+if iptables -t nat -S PREROUTING 2>/dev/null | grep -q -- "--comment gpb-entry-${LISTEN_PORT}\b"; then
+  echo "UDP ${LISTEN_PORT} is already an entry on this machine - it forwards to:" >&2
+  iptables -t nat -S PREROUTING | grep -- "--comment gpb-entry-${LISTEN_PORT}\b" >&2
+  echo "relayd would listen there and never receive a packet. Pick another port in RELAY_<NAME>_LISTEN." >&2
   exit 2
 fi
 
@@ -300,7 +322,7 @@ if [[ -z "$RELAY_PUBKEY" ]]; then
 fi
 
 echo "==> Configuring the kernel and NAT"
-bash "${HERE}/setup-nat.sh"
+GPB_PORT="$LISTEN_PORT" bash "${HERE}/setup-nat.sh"
 
 if [[ "$AUTH_MODE" == token ]]; then
   AUTH_FLAG="-licence-key /etc/gpb/licence.pub"
@@ -308,7 +330,7 @@ else
   AUTH_FLAG="-psk-file /etc/gpb/psk"
 fi
 
-echo "==> Installing the systemd unit (${AUTH_MODE} mode, max-clients ${MAX_CLIENTS}, min-tier ${MIN_TIER})"
+echo "==> Installing the systemd unit (${AUTH_MODE} mode, UDP ${LISTEN_PORT}, max-clients ${MAX_CLIENTS}, min-tier ${MIN_TIER})"
 # Substituted into a temporary copy, never into the file in the payload: substituting in place
 # would leave a second run of this script with the placeholder already gone, so it would quietly
 # keep the OLD number - the kind of bug that shows up as "I changed the limit and nothing
@@ -318,7 +340,8 @@ echo "==> Installing the systemd unit (${AUTH_MODE} mode, max-clients ${MAX_CLIE
 # PATH, so with sed's usual / the expression would end early inside /etc/gpb and the whole
 # command would fail with "unknown option to s". __MAX_CLIENTS__ keeps / because a number
 # contains none.
-sed -e "s/__MAX_CLIENTS__/${MAX_CLIENTS}/" \
+sed -e "s/__LISTEN_PORT__/${LISTEN_PORT}/" \
+    -e "s/__MAX_CLIENTS__/${MAX_CLIENTS}/" \
     -e "s/__MIN_TIER__/${MIN_TIER}/" \
     -e "s|__AUTH_FLAG__|${AUTH_FLAG}|" \
     "${HERE}/relayd.service" > "/tmp/relayd.service.$$"
@@ -348,7 +371,7 @@ echo
 echo "================================================================"
 echo " The relay is running."
 echo
-echo "   Endpoint for the client :  ${PUBLIC_IP}:51820"
+echo "   Endpoint for the client :  ${PUBLIC_IP}:${LISTEN_PORT}"
 if [[ "$MAX_CLIENTS" -eq 0 ]]; then
   echo "   Clients at once         :  no limit beyond the address pool"
 else

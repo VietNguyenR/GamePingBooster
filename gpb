@@ -181,7 +181,7 @@ relay_licence_key() {
 # throughout: sudo resets the environment, so a variable arrives empty on the far end and the
 # relay comes up misconfigured while the deploy reports success.
 relay_install_args() {
-    args="--max-clients $(relay_max_clients "$1")"
+    args="--max-clients $(relay_max_clients "$1") --listen $(relay_listen "$1")"
     case "$(relay_mode "$1")" in
         token)
             # The payload always names this licence.pub, independent of its source path on this
@@ -207,12 +207,21 @@ relay_install_args() {
     printf '%s' "$args"
 }
 
+
+# The UDP port relayd listens on. Until 2026-09-23 this reached only the printed endpoint, never
+# install.sh, so every relay listened on 51820 whatever gpb.conf said - and the VN box, whose 51820
+# is an entry forwarding to Singapore, never received a handshake.
+relay_listen() {
+    listen=$(relay_field "$1" LISTEN)
+    [ -n "$listen" ] || listen=51820
+    case "$listen" in *[!0-9]*) die "RELAY_$(printf '%s' "$1" | tr 'a-z' 'A-Z')_LISTEN is '$listen'. It must be a UDP port number." ;; esac
+    printf '%s' "$listen"
+}
+
 relay_endpoint() {
     host=$(relay_field "$1" HOST)
     [ -n "$host" ] || return 0
-    listen=$(relay_field "$1" LISTEN)
-    [ -n "$listen" ] || listen=51820
-    printf '%s:%s' "$host" "$listen"
+    printf '%s:%s' "$host" "$(relay_listen "$1")"
 }
 
 relay_names() {

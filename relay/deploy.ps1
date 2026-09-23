@@ -160,7 +160,10 @@ function Get-RelayInstallArgs {
     # These are arguments rather than environment variables because sudo resets the environment.
     # The public key is always called licence.pub in the payload, so neither its local path nor a
     # Windows path can leak into the remote command line. The private licence key is never read.
+    # --listen too: RELAY_<NAME>_LISTEN used to reach only the printed endpoint, so every relay listened
+    # on 51820 whatever gpb.conf said.
     $args = "--max-clients $($Relay.MaxClients) --min-tier $($Relay.MinTier)"
+    if ($Relay.Listen) { $args += " --listen $($Relay.Listen)" }
     if ($Relay.Mode -eq 'token') {
         $args += ' --licence-key ../licence.pub'
     } else {

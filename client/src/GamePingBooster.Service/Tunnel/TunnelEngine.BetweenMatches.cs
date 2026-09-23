@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Profiles;
 using GamePingBooster.Core.Quality;
+using GamePingBooster.Service.Network;
 
 namespace GamePingBooster.Service.Tunnel;
 
@@ -150,7 +151,11 @@ internal sealed partial class TunnelEngine
             {
                 path = new PathMeasurement(target.RegionName, 0, target.Landmark);
             }
-            if (path is null)
+            // Staying is right for a rescan, which moves only to something measured faster. It is wrong when the relay
+            // must be left: a game with no landmark - Apex, whose servers answer nothing - kept the player on a relay
+            // the operator took off it (Da Nang, 2026-09-23). Leaving needs no second leg, only somewhere to go, so the
+            // relays that carry the game are compared on the leg to the relay, as a connect does without a landmark.
+            if (path is null && !forGame)
             {
                 _log($"Between matches: the path through {current.Name} to the game's region was never measured, so " +
                      "there is nothing to compare a relay against - staying.");
@@ -161,23 +166,28 @@ internal sealed partial class TunnelEngine
             double hereMs;
             if (forGame)
             {
-                _log($"Measuring the relays that carry {_game?.Name} to {path.RegionName}, the median of " +
-                     $"{RescanScore.Samples} echoes each, to leave {current.Name} [{current.Id}].");
+                _log(path is null
+                    ? $"{_game?.Name} has no landmark to measure the way to its servers, so the relays that carry it are " +
+                      $"compared on the leg to the relay, to leave {current.Name} [{current.Id}]."
+                    : $"Measuring the relays that carry {_game?.Name} to {path.RegionName}, the median of " +
+                      $"{RescanScore.Samples} echoes each, to leave {current.Name} [{current.Id}].");
                 hereSamples = [];
                 hereMs = double.PositiveInfinity;
             }
             else
             {
+                // Not null: this is a rescan, and a rescan without a path returned above.
+                var live = path!;
                 _log($"Between matches: the game has been silent {SilenceOf(tunnel).TotalSeconds:F0} s - re-measuring the relays " +
-                     $"to {path.RegionName} against {current.Name} [{current.Id}], the median of {RescanScore.Samples} echoes each.");
-                hereSamples = await SampleLiveAsync(tunnel, path.Landmark, token).ConfigureAwait(false);
+                     $"to {live.RegionName} against {current.Name} [{current.Id}], the median of {RescanScore.Samples} echoes each.");
+                hereSamples = await SampleLiveAsync(tunnel, live.Landmark, token).ConfigureAwait(false);
                 if (RescanScore.Median(hereSamples) is not { } measured)
                 {
                     _log($"Between matches: {current.Name} answered too few echoes to be compared - staying.");
                     return;
                 }
                 hereMs = measured;
-                _log($"  {current.Name} [{current.Id}], in use: {hereMs:F0} ms to {path.RegionName}");
+                _log($"  {current.Name} [{current.Id}], in use: {hereMs:F0} ms to {live.RegionName}");
             }
 
             foreach (var relay in others)
@@ -291,7 +301,7 @@ internal sealed partial class TunnelEngine
     /// One handshake attempt, not the two a connect allows: a relay that does not answer inside two seconds
     /// is not one to move to, and every second spent waiting on it brings the next match closer.
     /// </summary>
-    private async Task<RelayProbe?> MeasureCandidateAsync(RelayEntry way, byte[] psk, PathMeasurement path, CancellationToken ct)
+    private async Task<RelayProbe?> MeasureCandidateAsync(RelayEntry way, byte[] psk, PathMeasurement? path, CancellationToken ct)
     {
         TunnelClient? client = null;
         try
@@ -299,6 +309,14 @@ internal sealed partial class TunnelEngine
             client = new TunnelClient(ParseEndpoint(way.Endpoint), AuthFor(way, psk), _clientId, _log);
             await client.HandshakeAsync(attempts: 1, ct).ConfigureAwait(false);
             var legOne = await client.MeasureRelayRttAsync(attempts: 3, ct).ConfigureAwait(false) ?? client.HandshakeRttMs;
+
+            // No landmark: only a move off a relay not used for the game gets here, and it is scored on this leg alone -
+            // every candidate the same way, so no relay wins by a number the others were not measured on.
+            if (path is null)
+            {
+                _log($"  {way.Name} [{way.Id}]: {legOne:F0} ms to the relay");
+                return new RelayProbe(way, legOne, legOne) { Client = client };
+            }
 
             var samples = new List<double?>(RescanScore.Samples);
             for (var i = 0; i < RescanScore.Samples; i++)
@@ -334,7 +352,7 @@ internal sealed partial class TunnelEngine
     /// reconnect path took over.
     /// </summary>
     private async Task<TunnelClient?> MoveToRelayAsync(TunnelClient old, RelayProbe chosen, TunnelClient client, double? wasMs,
-        PathMeasurement path, CancellationToken ct)
+        PathMeasurement? path, CancellationToken ct)
     {
         var adapter = _adapter;
         var routes = _routes;
@@ -363,7 +381,7 @@ internal sealed partial class TunnelEngine
             old.Dispose();
 
             _relay = target;
-            _path = new PathMeasurement(path.RegionName, Math.Max(0, nowMs - chosen.LegOneMs), path.Landmark);
+            _path = path is null ? null : new PathMeasurement(path.RegionName, Math.Max(0, nowMs - chosen.LegOneMs), path.Landmark);
             ForgetDirectPing();
             _pendingDoorMove = null;
             _movedFromDoor = null;
@@ -385,8 +403,10 @@ internal sealed partial class TunnelEngine
             if (wasMs is not { } was)
             {
                 var gameName = _game?.Name ?? "";
+                FallBackToAutomatic(previous.Name, gameName);
                 _log($"Moved from {previous.Name} [{previous.Id}], which is not used for {gameName}, to {target.Name} " +
-                     $"[{target.Id}] in {swapMs:F0} ms - {nowMs:F0} ms to {path.RegionName}. The lobby reconnects on its own.");
+                     $"[{target.Id}] in {swapMs:F0} ms - {nowMs:F0} ms {(path is null ? "to the relay" : $"to {path.RegionName}")}. " +
+                     "The lobby reconnects on its own.");
                 SetState(TunnelState.Connected, new StatusText("svc.movedForGame",
                     $"Connected to {target.Name} - {previous.Name} is not used for {gameName}",
                     target.Name, previous.Name, gameName));
@@ -395,7 +415,7 @@ internal sealed partial class TunnelEngine
 
             var saved = was - nowMs;
             _log($"Between matches: moved from {previous.Name} [{previous.Id}] to {target.Name} [{target.Id}] in {swapMs:F0} ms - " +
-                 $"{nowMs:F0} ms against {was:F0} ms to {path.RegionName}, {saved:F0} ms faster. The lobby reconnects on its own.");
+                 $"{nowMs:F0} ms against {was:F0} ms to {path!.RegionName}, {saved:F0} ms faster. The lobby reconnects on its own.");
             SetState(TunnelState.Connected, new StatusText("svc.rescanMoved",
                 $"Connected to {target.Name} - moved from {previous.Name} between matches, {saved:F0} ms faster",
                 target.Name, previous.Name, saved.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)));
@@ -460,21 +480,22 @@ internal sealed partial class TunnelEngine
     }
 
     /// <summary>
-    /// The game the main window's relay list is for: the one being played or connected for, else the one the next
-    /// connect would be for. Null with no profile.
+    /// The game being played right now, which is the only thing that rules a relay out - in the main window's list,
+    /// in the choice saved from it, and at connect. Null when no game in the profile is open.
+    ///
+    /// Until 2026-09-23 this fell back to the game the next connect would guess - the last one played - so a player
+    /// who had last played PUBG found Hong Kong greyed out while picking a relay for VALORANT, and could only pick it
+    /// with VALORANT already open. With no game open there is nothing to rule a relay out for: the choice stands,
+    /// and when a game opens that the relay does not carry, the tunnel moves to one that does (LeaveRelayNotForGame).
     /// </summary>
     private GameEntry? GameForRelayList()
     {
-        if (_game is { } game) return game;
-        if (_profile is not { Games.Count: > 0 }) return null;
-        try
-        {
-            return ChooseGameForConnect(null);
-        }
-        catch (Exception)
-        {
-            return null;
-        }
+        // Connected: the watcher already knows, and _game is the game it last saw start.
+        if (_watcher is { } watcher) return watcher.IsGameRunning ? _game : null;
+
+        if (_profile is not { Games.Count: > 0 } profile) return null;
+        var running = GameProcessWatcher.FindRunning(profile.Games.SelectMany(g => g.ProcessNames));
+        return running is null ? null : ProfileMerge.FindByProcess(profile.Games, running);
     }
 
     /// <summary>

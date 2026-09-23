@@ -801,6 +801,32 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     }
 
     /// <summary>
+    /// Puts the relay choice back to automatic, because the game being played does not use the relay that was chosen
+    /// and the tunnel has just been put on another. The main window shows the saved choice, so leaving it would keep
+    /// showing a relay the player is not on. The session counts as automatic from here too, so rescans between
+    /// matches go on as they would for any automatic connection. Never fails the caller.
+    /// </summary>
+    private void FallBackToAutomatic(string relayName, string gameName)
+    {
+        _chosenByHandAtConnect = null;
+        _choiceAtConnect = null;
+        if (RelayChoice is null) return;
+
+        var previous = _config.DefaultRelayId;
+        _config.DefaultRelayId = null;
+        try
+        {
+            _config.Save();
+            _log($"Relay choice: automatic - {relayName} is not used for {gameName}.");
+        }
+        catch (Exception ex)
+        {
+            _config.DefaultRelayId = previous;
+            _log($"Could not put the relay choice back to automatic: {ex.Message}");
+        }
+    }
+
+    /// <summary>
     /// Why the tunnel is not on the chosen relay, when it is up and that is so; null otherwise. Worked out
     /// here, beside the state it describes, rather than in the UI from a relay id - which would be an
     /// entry's id whenever the tunnel came in through one.
@@ -1016,16 +1042,20 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         var relays = RelaysForGame(_game);
         var paths = RelayPaths.Expand(relays);
 
-        // A relay the operator has taken off this game is not used for it, chosen or not. The choice stays
-        // saved: it is one choice for every game, and the next game may be one this relay carries.
-        if (!string.IsNullOrWhiteSpace(preferredId) &&
+        // A relay the operator has taken off the game being PLAYED is not used for it, chosen or not, and the choice
+        // goes back to automatic so the main window shows what the tunnel is really doing (FallBackToAutomatic). With no
+        // game open the choice is taken as it is - _game is only a guess from the last session, and the player may
+        // be connecting for another game. LeaveRelayNotForGame moves the tunnel if the game that opens needs it.
+        var playing = GameForRelayList();
+        if (!string.IsNullOrWhiteSpace(preferredId) && playing is not null &&
             _profile.Relays.Concat(RelayPaths.Expand(_profile.Relays))
                 .FirstOrDefault(r => r.Id.Equals(preferredId, StringComparison.OrdinalIgnoreCase)) is { } picked &&
-            !RelayPaths.Serves(picked, _game?.Id))
+            !RelayPaths.Serves(picked, playing.Id))
         {
-            _log($"{picked.Name} [{picked.Id}], the relay chosen in the app, is not used for {_game?.Name} - choosing " +
+            _log($"{picked.Name} [{picked.Id}], the relay chosen in the app, is not used for {playing.Name} - choosing " +
                  "the fastest of the ones that are.");
             preferredId = null;
+            FallBackToAutomatic(picked.Name, playing.Name);
         }
 
         if (!string.IsNullOrWhiteSpace(preferredId))
@@ -1034,7 +1064,9 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             // rule would measure it, so an entry in front of it can still win. When nothing about it
             // answers, the player gets the fastest relay rather than no connection - the status says so
             // (RelayChoiceNote), and the choice stays saved for the next connect.
-            var chosen = relays.FirstOrDefault(r => r.Id.Equals(preferredId, StringComparison.OrdinalIgnoreCase));
+            // From every relay, not only the guessed game's: a choice that survived the check above is one the
+            // game being played allows, or there is no game open to disallow it.
+            var chosen = _profile.Relays.FirstOrDefault(r => r.Id.Equals(preferredId, StringComparison.OrdinalIgnoreCase));
             if (chosen is not null)
             {
                 _log($"Using {chosen.Name} [{chosen.Id}], the relay chosen in the app.");
@@ -1373,7 +1405,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         {
             _log("No region could be measured, so the relays are compared on the first leg only. " +
                  "The profile declares no landmark for any region, or none of them answered - " +
-                 "and pick a region that is worse both ways.");
+                 "so the relay nearest the game server cannot be told apart, and neither can " +
+                 "whether the tunnel beats your own connection.");
         }
         else
         {
@@ -2415,6 +2448,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     // over to the game itself. Its routes are already in.
                     return;
                 }
+                LeaveRelayNotForGame(detected);
                 RememberLastGame(detected);
 
                 // The game can start while the tunnel is down and the reconnect loop is sweeping
@@ -3109,9 +3143,18 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             _log($"{game.Name} is running - moving the routes over from {previous.Name}. Relays were " +
                  $"measured for {previous.Name} at connect; the next connect measures them for {game.Name}.");
         }
+    }
 
-        // A relay the operator has taken off this game is left now, not at the next connect - see
-        // MoveOffRelayNotForGameAsync. The supervisor makes the move; this only asks for it.
+    /// <summary>
+    /// A relay the operator has taken off the game that just opened is left now, not at the next connect - see
+    /// RescanBetweenMatchesAsync with forGame. The supervisor makes the move; this only asks for it.
+    ///
+    /// Checked on every game start, not only when the game differs from the one connected for: with no game open
+    /// a relay chosen in the app is connected to whatever game it carries (GameForRelayList), so the tunnel can be
+    /// on a relay the guessed game itself does not use - chosen for VALORANT, the last game PUBG, PUBG opened.
+    /// </summary>
+    private void LeaveRelayNotForGame(GameEntry game)
+    {
         if (_relay is { } relay && _tunnel is not null && !RelayPaths.Serves(relay, game.Id))
         {
             _log($"{relay.Name} [{relay.Id}] is not used for {game.Name} - moving to one that is.");

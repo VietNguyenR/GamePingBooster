@@ -191,7 +191,8 @@ public sealed class RelayOption
 
     /// <summary>
     /// The name of the game this relay does not carry, when it is one of those set in /admin/relays - the game
-    /// being played, or the one the next connect is for. Null when the relay can be chosen. Shown greyed out
+    /// being played, and only while it is open: with no game open every relay can be chosen, and the tunnel moves
+    /// off one the game does not carry when that game starts. Null when the relay can be chosen. Shown greyed out
     /// with that name rather than left out, so a player who remembers the relay can see why it is gone. An
     /// older service never sets it.
     /// </summary>
