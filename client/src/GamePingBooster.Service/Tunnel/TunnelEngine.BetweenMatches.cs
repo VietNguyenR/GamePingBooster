@@ -375,8 +375,10 @@ internal sealed partial class TunnelEngine
             // replaces the old relay's pin, which is harmless now: the old tunnel sends one Disconnect and no more.
             routes.PinRelayRoute(ParseEndpoint(target.Endpoint).Address);
 
-            // With a Disconnect: this relay is being left, and its address goes back to its pool. Dispose also
-            // stops both pumps, which must be gone before the new tunnel starts its own on the same adapter.
+            // With a Disconnect: this relay is being left, and its address goes back to its pool. The adapter's
+            // reader is taken off it first, so what the game sends during the swap waits in the adapter and leaves
+            // through the new relay; Dispose then stops the old downlink.
+            StopUplink();
             _tunnel = null;
             old.Dispose();
 
@@ -393,7 +395,7 @@ internal sealed partial class TunnelEngine
             {
                 routes.ConfigureAdapter(adapter.InterfaceIndex, client.Session.ClientIp, prefixLength: 24, client.Session.Mtu);
             }
-            client.StartPumping(adapter, ct);
+            StartTunnel(client, ct);
             var swapMs = Stopwatch.GetElapsedTime(swapStarted).TotalMilliseconds;
 
             // After the pumps, off the critical half second: the routes were never taken out, so this only puts

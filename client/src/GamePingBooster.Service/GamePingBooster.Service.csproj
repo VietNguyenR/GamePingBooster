@@ -25,6 +25,12 @@
     <ProjectReference Include="..\GamePingBooster.Core\GamePingBooster.Core.csproj" />
   </ItemGroup>
 
+  <!-- The packet path driven in-process against a fake relay (docs/MULTI-TUNNEL.md, 10.2). A developer
+       tool, never shipped: it only needs to see TunnelClient, AdapterPump and IPacketDevice. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="GamePingBooster.TunnelCheck" />
+  </ItemGroup>
+
   <!-- wintun.dll must sit next to the exe. Download the officially signed build from wintun.net. -->
   <ItemGroup>
     <None Include="..\..\native\wintun\wintun.dll" Condition="Exists('..\..\native\wintun\wintun.dll')" CopyToOutputDirectory="PreserveNewest" Link="wintun.dll" />

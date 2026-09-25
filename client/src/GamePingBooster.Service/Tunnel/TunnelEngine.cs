@@ -45,6 +45,13 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     public UnblockPolicy UnblockPolicy => UnblockPolicy.FromProfile(_profile, _log);
     private WintunAdapter? _adapter;
     private TunnelClient? _tunnel;
+
+    /// <summary>
+    /// The adapter's one reader, pointed at <see cref="_tunnel"/>. Lives as long as the adapter session - see
+    /// AdapterPump for why, and <see cref="StartTunnel"/> / <see cref="StopUplink"/> for the only two ways its
+    /// target changes.
+    /// </summary>
+    private AdapterPump? _pump;
     private RouteManager? _routes;
     private GameProcessWatcher? _watcher;
 
@@ -584,7 +591,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             PinDoors();
 
             _routes.ConfigureAdapter(_adapter.InterfaceIndex, session.ClientIp, prefixLength: 24, session.Mtu);
-            _tunnel.StartPumping(_adapter, token);
+            StartTunnel(_tunnel, token);
 
             // The lobby goes on the tunnel NOW, before the game exists, rather than with the game
             // routes below. See GameEntry.LobbyAddresses: the lobby is a TCP connection the game
@@ -2330,6 +2337,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         // relay is worse than no line, because the whole point is comparing one against another.
         if (_tunnel is not null) LogGameDestinations(_tunnel);
 
+        StopUplink();
         Abandon(_tunnel);
         _tunnel = null;
         ResetThroughputBaseline();
@@ -2440,7 +2448,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                         InstallRoutes();
                     }
 
-                    client.StartPumping(adapter, ct);
+                    StartTunnel(client, ct);
                     _error = null;
                     SetState(TunnelState.Connected,
                         new StatusText("svc.reconnected", $"Reconnected to {relay.Name}", relay.Name));
@@ -2759,6 +2767,11 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         phases?.Mark("routes");
 
         if (_tunnel is not null) LogGameDestinations(_tunnel);
+
+        // The uplink first: it reads the adapter on every packet and must be gone before the session ends
+        // below, and gone before the tunnel it sends on is disposed.
+        _pump?.Dispose();
+        _pump = null;
         _tunnel?.Dispose();
         _tunnel = null;
         phases?.Mark("tunnel");
@@ -2792,6 +2805,15 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         }
         phases?.Mark("spike recorder");
 
+        // Anything a reconnect racing this teardown put in place after the tunnel was disposed above: the
+        // supervisor is only cancelled after that, and a handshake that succeeded in between starts a tunnel
+        // and the adapter's reader again (StartTunnel). Both must be gone before the session ends - the reader
+        // is inside the ring on every packet - and neither may be left running for the next connect.
+        _pump?.Dispose();
+        _pump = null;
+        _tunnel?.Dispose();
+        _tunnel = null;
+
         // Deleting the adapter comes last, and it is also the safety brake: any route still
         // pointing at it disappears along with it. The session and the adapter are timed apart:
         // keeping the adapter between connects would save the second and not the first.
@@ -2812,6 +2834,30 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         }
         phases?.Mark("rest");
     }
+
+    /// <summary>
+    /// Puts a handshaken tunnel to work: its downlink and keepalive start, and the adapter's reader is pointed
+    /// at it. The ONE way a tunnel starts carrying traffic - connect, reconnect and a move between matches all
+    /// come through here. The reader is created on the first call after the adapter session opens.
+    /// </summary>
+    private void StartTunnel(TunnelClient tunnel, CancellationToken ct)
+    {
+        var adapter = _adapter ?? throw new InvalidOperationException("There is no virtual adapter to pump.");
+        tunnel.StartPumping(adapter, ct);
+
+        if (_pump is null)
+        {
+            _pump = new AdapterPump(adapter, _log);
+            _pump.Start();
+        }
+        _pump.SetHome(tunnel);
+    }
+
+    /// <summary>
+    /// Stops the adapter's reader from sending on the tunnel in use, BEFORE that tunnel is put away. What Windows
+    /// sends meanwhile waits in the adapter for the next tunnel - see AdapterPump.
+    /// </summary>
+    private void StopUplink() => _pump?.SetHome(null);
 
     /// <summary>
     /// The virtual adapter for a connect, with a session open: the one kept from the last connect when there
