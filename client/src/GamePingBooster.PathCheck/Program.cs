@@ -40,6 +40,10 @@ internal static partial class Program
         PlannerChecks();
 
         Console.WriteLine();
+        Console.WriteLine("Region routing mode:");
+        RoutingModeChecks();
+
+        Console.WriteLine();
         if (_failures == 0)
         {
             Console.WriteLine("All path checks passed.");

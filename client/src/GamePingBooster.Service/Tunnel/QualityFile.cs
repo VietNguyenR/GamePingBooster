@@ -33,6 +33,40 @@ internal sealed record RelayMoveRecord(
     string FollowEnded);
 
 /// <summary>
+/// One pass of the region planner, for <see cref="QualityFile.WriteRegionPlan"/>. <paramref name="Mode"/> is the
+/// resolved mode ("record" or "on") and <paramref name="Acted"/> whether the plan was applied - false for every
+/// record until multi-tunnel is wired. <paramref name="Stopped"/> says why a pass is incomplete, null when complete.
+/// </summary>
+internal sealed record RegionPlanRecord(
+    DateTimeOffset AtUtc,
+    string Mode,
+    string ModeSource,
+    bool Acted,
+    string HomeRelay,
+    bool AllowDirect,
+    int MaxTunnels,
+    double MeasureSeconds,
+    string? Stopped,
+    IReadOnlyList<string> RelaysMeasured,
+    IReadOnlyList<RegionPlanEntry> Regions);
+
+/// <summary>
+/// One region of a plan: the median on each path, the path chosen and why. <paramref name="ViaWay"/> names the way
+/// into each relay that gave its number - the relay's own id or an entry's. No addresses: the landmark is named by
+/// its region.
+/// </summary>
+internal sealed record RegionPlanEntry(
+    string RegionId,
+    bool HasLandmark,
+    double? HomeMs,
+    double? DirectMs,
+    IReadOnlyDictionary<string, double> ViaMs,
+    IReadOnlyDictionary<string, string> ViaWay,
+    string Path,
+    double? ChosenMs,
+    string Reason);
+
+/// <summary>
 /// The spike recorder's record: one JSON object per line, one file per day, under
 /// %ProgramData%\GamePingBooster\quality.
 ///
@@ -41,6 +75,7 @@ internal sealed record RelayMoveRecord(
 /// by eye. <c>"type":"match"</c> is one match with how many spikes it had and what normal looked
 /// like - the denominator, without which "eight spikes on sg-3" cannot be told from "sg-3 is busy".
 /// <c>"type":"switch"</c> is one decision of entry switching and the minute after it - see WriteMove.
+/// <c>"type":"regionPlan"</c> is one pass of the region planner - see WriteRegionPlan.
 /// Spikes also carry <c>door</c>, the way into the relay in use, and <c>ticks.doors</c>, the probes down
 /// the others, when entry switching is not off.
 ///
@@ -285,6 +320,66 @@ internal sealed class QualityFile(Action<string> log)
 
         w.WriteEndObject();
     });
+
+    /// <summary>
+    /// A pass of the region planner - docs/MULTI-TUNNEL.md 5.5 and TunnelEngine.PlanRegionsAsync. <c>"type":"regionPlan"</c>:
+    /// for every region of the game the median to its landmark through home, over the player's own line and through
+    /// each other relay measured, the path the planner chose from them and why. In record mode nothing was moved, and
+    /// these records are the evidence for turning it on: how often a region would leave home, by how much, and how
+    /// often the player's own line would win.
+    /// </summary>
+    public void WriteRegionPlan(RegionPlanRecord plan, QualityMeta meta) => Append((w, id) => WriteRegionPlanJson(w, id, plan, meta));
+
+    /// <summary>
+    /// The line <see cref="WriteRegionPlan"/> appends, apart from the file so TunnelCheck can hold it to
+    /// testdata/region-plan-record.json - the shape the licence server parses - without touching the real queue.
+    /// </summary>
+    internal static void WriteRegionPlanJson(Utf8JsonWriter w, string id, RegionPlanRecord plan, QualityMeta meta)
+    {
+        w.WriteStartObject();
+        w.WriteString("id", id);
+        w.WriteString("type", "regionPlan");
+        w.WriteNumber("schema", Schema);
+        w.WriteString("utc", plan.AtUtc);
+        WriteMeta(w, meta);
+
+        w.WriteString("mode", plan.Mode);
+        w.WriteString("modeSource", plan.ModeSource);
+        w.WriteBoolean("acted", plan.Acted);
+        w.WriteString("home", plan.HomeRelay);
+        w.WriteBoolean("allowDirect", plan.AllowDirect);
+        w.WriteNumber("maxTunnels", plan.MaxTunnels);
+        w.WriteNumber("measureSeconds", Round(plan.MeasureSeconds));
+        w.WriteBoolean("complete", plan.Stopped is null);
+        String(w, "stopped", plan.Stopped);
+
+        w.WriteStartArray("relaysMeasured");
+        foreach (var relay in plan.RelaysMeasured) w.WriteStringValue(relay);
+        w.WriteEndArray();
+
+        w.WriteStartArray("regions");
+        foreach (var region in plan.Regions)
+        {
+            w.WriteStartObject();
+            w.WriteString("id", region.RegionId);
+            w.WriteBoolean("hasLandmark", region.HasLandmark);
+            Number(w, "homeMs", region.HomeMs, 1);
+            Number(w, "directMs", region.DirectMs, 1);
+            w.WriteStartObject("viaMs");
+            foreach (var (relay, ms) in region.ViaMs.OrderBy(kv => kv.Key, StringComparer.Ordinal)) w.WriteNumber(relay, Round(ms));
+            w.WriteEndObject();
+            w.WriteStartObject("viaWay");
+            foreach (var (relay, way) in region.ViaWay.OrderBy(kv => kv.Key, StringComparer.Ordinal)) w.WriteString(relay, way);
+            w.WriteEndObject();
+            w.WriteString("path", region.Path);
+            Number(w, "chosenMs", region.ChosenMs, 1);
+            w.WriteString("reason", region.Reason);
+            w.WriteEndObject();
+        }
+        w.WriteEndArray();
+
+        w.WriteEndObject();
+    }
 
     private static void DoorFigures(Utf8JsonWriter w, string name, DoorStats stats)
     {

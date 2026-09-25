@@ -505,14 +505,14 @@ internal sealed partial class TunnelEngine
     /// Whether a relay's address falls inside a range this connection routes into the tunnel. Nothing is pinned
     /// for a candidate while it is measured, so such a probe would travel inside the tunnel in use.
     /// </summary>
-    private bool IsRoutedIntoTunnel(RelayEntry way)
+    private bool IsRoutedIntoTunnel(RelayEntry way) =>
+        IPEndPoint.TryParse(way.Endpoint, out var endpoint) && IsRoutedIntoTunnel(endpoint.Address);
+
+    /// <summary>Whether <paramref name="address"/> falls inside a range of the current game - see the overload above.</summary>
+    private bool IsRoutedIntoTunnel(IPAddress address)
     {
-        if (_game is null || !IPEndPoint.TryParse(way.Endpoint, out var endpoint) ||
-            endpoint.Address.AddressFamily != AddressFamily.InterNetwork)
-        {
-            return false;
-        }
-        var value = ToUInt32(endpoint.Address);
+        if (_game is null || address.AddressFamily != AddressFamily.InterNetwork) return false;
+        var value = ToUInt32(address);
         foreach (var cidr in _game.Regions.SelectMany(r => r.Cidrs))
         {
             var parts = cidr.Split('/');

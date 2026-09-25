@@ -827,6 +827,9 @@ internal sealed class SpikeRecorder : IQualitySink
     /// <summary>A move to another relay between matches, once its follow-up is over. See QualityFile.WriteRelayMove.</summary>
     public void WriteRelayMove(RelayMoveRecord move, QualityMeta meta) => _file.WriteRelayMove(move, meta);
 
+    /// <summary>One pass of the region planner. See QualityFile.WriteRegionPlan.</summary>
+    public void WriteRegionPlan(RegionPlanRecord plan, QualityMeta meta) => _file.WriteRegionPlan(plan, meta);
+
     private QualityMeta Meta(Context context) => new(
         AppVersion,
         context.GameId,

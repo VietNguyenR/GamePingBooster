@@ -1658,6 +1658,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         _matchGap = new GamePingBooster.Core.Quality.MatchGap();
         _moveFollow = null;
         _moveOffForGame = false;
+        ResetRegionPlanning();
 
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
         try
@@ -1701,6 +1702,10 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                         continue;
                     }
                     await WatchForMatchGapAsync(tunnel, ct).ConfigureAwait(false);
+
+                    // After the rescan, never beside it: both handshake other relays, and two handshakes to one
+                    // relay fight over its session. Picks up whichever tunnel the rescan left.
+                    if (_tunnel is { } current) await PlanRegionsIfDueAsync(current, ct).ConfigureAwait(false);
                     continue;
                 }
                 _pendingDoorMove = null;

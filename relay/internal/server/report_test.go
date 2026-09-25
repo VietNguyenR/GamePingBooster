@@ -99,7 +99,7 @@ func TestSnapshotOmitsIdentityInPSKMode(t *testing.T) {
 	if len(rep.Devices) != 1 {
 		t.Fatalf("devices = %d, want 1", len(rep.Devices))
 	}
-	if rep.Devices[0].UserID != "" || rep.Devices[0].DeviceKey != "" {
+	if rep.Devices[0].UserID != "" || rep.Devices[0].DeviceKey != "" || rep.Devices[0].ClientID != "" {
 		t.Errorf("PSK session carries an identity: %+v", rep.Devices[0])
 	}
 }

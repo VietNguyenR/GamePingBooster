@@ -37,6 +37,7 @@ internal static partial class Program
             ("Teardown", TeardownNeverTouchesAnEndedSession),
             ("Faults", Faults),
             ("Latency", LatencyAddedByThePump),
+            ("Region plan record", ARegionPlanRecordKeepsItsShape),
         };
 
         foreach (var (title, run) in scenarios)

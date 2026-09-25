@@ -163,6 +163,18 @@ public sealed class ServiceConfig
     public string? EntrySwitching { get; set; }
 
     /// <summary>
+    /// Multi-tunnel for this machine: "off", "record" or "on" - see Core's RegionRouting and
+    /// docs/MULTI-TUNNEL.md. An override: unset, the game's own setting from the profile decides, and without
+    /// one, "off". Anything unrecognised reads as "record". A game whose landmarks are routed (CS2) is off
+    /// whatever this says.
+    ///
+    /// UNSET BY DEFAULT and never written back while unset, for the reason EntrySwitching gives.
+    /// </summary>
+    [JsonPropertyName("regionRouting")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? RegionRouting { get; set; }
+
+    /// <summary>
     /// Re-measuring every relay and entry in the gap after a match, and moving to a clearly faster one before
     /// the next - see TunnelEngine.RescanBetweenMatchesAsync. Only on automatic relay choice: a relay picked
     /// from the list is never left. Unset means on; false is the way to stop it on one machine. Never written

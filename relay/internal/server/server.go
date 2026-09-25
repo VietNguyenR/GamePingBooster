@@ -146,6 +146,13 @@ type sessionIdent struct {
 	// server stores exactly these bytes against a Device row, so it is the one field that maps a
 	// live session back to a real machine and account.
 	deviceKey []byte
+
+	// clientID is the installation id from the handshake. Chosen by the client and signed with
+	// the device key, so it names an installation and proves nothing about a person - which is
+	// all it is used for: a client with a tunnel per game region holds a session on several
+	// relays, and the id lets the reports be read as one client (docs/MULTI-TUNNEL.md, section
+	// 7). Never a reservation key in token mode; see handleHandshakeToken.
+	clientID protocol.ClientID
 }
 
 func (s *session) touch() { s.lastSeen.Store(time.Now().UnixNano()) }
@@ -465,10 +472,10 @@ func (s *Server) handleHandshakePSK(pkt []byte, from netip.AddrPort) {
 }
 
 func (s *Server) handleHandshakeToken(pkt []byte, from netip.AddrPort) {
-	// The client id in the packet is deliberately discarded here. It is signed, so it cannot be
-	// altered in transit, but it is still a value the client picked for itself - and in token
-	// mode the reservation is keyed on the device instead. See below.
-	tok, _, nonce, err := protocol.VerifyHandshakeReqToken(s.cfg.LicencePub, pkt, time.Now())
+	// The client id in the packet is signed, so it cannot be altered in transit, but it is still
+	// a value the client picked for itself - so it only ever goes into the report, never into
+	// the reservation, which is keyed on the device instead. See below.
+	tok, clientID, nonce, err := protocol.VerifyHandshakeReqToken(s.cfg.LicencePub, pkt, time.Now())
 
 	// An expired token is the one failure worth answering: the signature verified, so this is a
 	// real customer whose subscription lapsed, not a stranger probing the port. Everything else
@@ -515,6 +522,7 @@ func (s *Server) handleHandshakeToken(pkt []byte, from netip.AddrPort) {
 	sess, ok := s.allocSession(from, resKey, sessionIdent{
 		userID:    tok.UserID,
 		deviceKey: tok.DeviceKeyRaw(),
+		clientID:  clientID,
 	})
 	if !ok {
 		s.respondToken(protocol.StatusPoolFull, protocol.SessionID{}, netip.Addr{}, 0, nonce, from)
@@ -813,6 +821,11 @@ func (s *Server) allocSession(from netip.AddrPort, resKey protocol.ClientID, ide
 			f := from
 			live.addr.Store(&f)
 			live.touch()
+			// The identity this handshake just proved replaces the one the session was minted
+			// with. Same device - the reservation key says so - but a reinstalled client resuming
+			// its live session has a new client id, and a report still naming the old one would
+			// make one installation look like two. Written under s.mu, which Snapshot reads under.
+			live.ident = ident
 			return live, true
 		}
 	}

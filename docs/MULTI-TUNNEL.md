@@ -8,6 +8,23 @@ Status, 2026-09-25:
   `GamePingBooster.TunnelCheck` (section 10.2) and a Native AOT publish with no new warnings.
 - The multi-tunnel core (`Core/Paths`, `Core/Net/InnerNat.cs`) and `GamePingBooster.PathCheck` exist but are
   not wired in.
+- **Phase B, relay side built, not deployed** (2026-09-25): the handshake's client id is kept in the session
+  and reported as `client_id` (token mode only), refreshed when a reinstalled client resumes its session.
+  Checked by `TestTheReportNamesTheInstallationOfTheLiveHandshake`.
+- **Phase C, client side built, not released** (2026-09-26). `RegionRouting.Resolve` (config.json, then the
+  game's `regionRouting`, else off; routed landmarks always off) decides; in `record` and `on` alike the
+  supervisor runs one measuring pass per connection, game and home relay (`TunnelEngine.RegionPlan.cs`): in
+  the lobby - the game's UDP under 3 packets a second for two passes, so a lobby trickle does not block it -
+  every region with a landmark is measured through home (live tunnel), over the player's own line (ICMP,
+  skipped for a routed landmark) and through every other relay that carries the game, each way in, fastest
+  kept; median of 8, 6 answered. `RegionPlanner.Plan` decides, the log shows every number and choice, and a
+  `"type":"regionPlan"` quality record carries them - no addresses. **Nothing is moved**; `on` records what
+  it would do and says so. The pass stops for a match loading (game UDP past 10 + 3/s) or a home tunnel
+  quiet 5 s and is tried again (3 tries), and a 40 s budget ends it as incomplete. It runs on the supervisor
+  after the between-matches rescan, never beside it. Checked by PathCheck (mode resolution and the profile
+  fields) and TunnelCheck, which holds the record to `testdata/region-plan-record.json` byte for byte.
+  Not done yet: `ProbeGameServerAsync`'s single slot (5.6) - a lobby echo that meets the in-game ping loop
+  counts as unanswered, so a region can read "no answer through home" and follow home in the record.
 
 Two deliberate differences in Phase A, both in the failure direction: an unexpected exception while sending
 one packet now costs that packet and a log line instead of ending the uplink for good (the old loop left a
@@ -35,8 +52,8 @@ its region the same way. It opens **one** tunnel, and every region of the game g
 That assumption is true for PUBG. It is false for the games added since:
 
 - **Delta Force** puts the same player on Ho Chi Minh City (Zenlayer), Hong Kong, Singapore, Jakarta and
-  Bangkok match to match (discovery sightings, 2026-09-24). Production now has those as five regions,
-  placed by RTT from the relays, with a landmark on Hong Kong only.
+  Bangkok match to match (discovery sightings, 2026-09-24). Its profile has those as five regions, with a
+  landmark on Hong Kong only.
 - **Naraka: Bladepoint** plays in Tokyo (GCP) and Ho Chi Minh City (Zenlayer) on the AS region.
 - **Domestic servers are not safe to leave alone.** A Vietnamese line can reach a server in Ho Chi Minh
   City through Hong Kong: 20 ms becomes 60-80. League of Legends is 100% Vietnamese servers and players
@@ -83,7 +100,7 @@ Two facts from production make this safe, and both were checked, not assumed:
 | G4 | With the mode off, the client behaves as it does today. | Phase A ships the refactored data plane with one tunnel and no behaviour change, and is soaked before any multi-tunnel code can run (section 9). | FakeRelay harness `SingleTunnelMatchesLegacy`; live soak |
 | G5 | Never two paths into one relayd. A second handshake to a relay in use moves that session's return address and blackholes the live tunnel (`allocSession` resume path, `server.go`). | Planner assigns regions to **relays**, not to doors; measurement through a relay in use goes through its live tunnel (`ProbeGameServerAsync`), never a new handshake; door choice stays entry switching's. | PathCheck `OnePathPerRelay`; code review rule in 5.6 |
 | G6 | A tunnel that dies takes only its own regions to the player's own line; the others carry on. | Per-tunnel supervisor (5.7) | FakeRelay harness `OneRelayDies` |
-| G7 | Three ways back to one tunnel without a release: `regionRouting` in config.json, the game's mode in /admin/catalog, and an automatic collapse on any internal fault in the dispatcher. | 8.1, 5.9 | FakeRelay harness `DispatcherFaultCollapses` |
+| G7 | Three ways back to one tunnel without a release: `regionRouting` in config.json, the game's `regionRouting` in the profile, and an automatic collapse on any internal fault in the dispatcher. | 8.1, 5.9 | FakeRelay harness `DispatcherFaultCollapses` |
 | G8 | "Direct" (the player's own line) is chosen only when allowed for the game and faster than both home and the best relay the plan can still use (within `MaxTunnels`) by the same margin. | `RegionPlanner` rule 5 | PathCheck `DirectOnlyWhenAllowedAndFaster` |
 | G9 | Connect is not slower. Connect chooses home exactly as today; everything else is measured afterwards, in the lobby. | 5.5 | PhaseTimer line in the log |
 
@@ -211,11 +228,11 @@ revives one after that sees a new exit, as it would after any reconnect today.
   go without touching another's (today `RemoveGameRoutes` takes all of them).
 - **Pins.** Every relay with a tunnel open is pinned to the physical adapter, and so is every way into
   it (entries). Today `PinRelayRoute` holds one prefix and `PinDoorRoutes` one relay's doors; both
-  become sets keyed by relay. A relay address inside a game range is already refused on import
-  (`planProfileImport`), and the pins are the backstop.
+  become sets keyed by relay. A profile must never route a relay's address, and the pins are the backstop
+  if one does.
 - **Overlap.** The region table refuses a game whose regions overlap (a /20 in one containing a /32 in
   another): longest-prefix-match across two regions has no single answer. Such a game runs single-tunnel
-  and the log names the pair. The import only refuses exact duplicates today; section 7 adds this.
+  and the log names the pair. A profile must never contain such a pair (section 7); this is the backstop.
 
 ### 5.5 Deciding: the planner
 
@@ -246,7 +263,7 @@ When it runs:
 - **Lobby, after connect**: one background pass once the tunnel is up and no game UDP is flowing. Relays
   not open are handshaken once (1 attempt), measured against every landmark, then kept only if the plan
   uses them - otherwise Disconnect. Relays open are measured through their live tunnel (G5). Direct is
-  an ICMP echo over the physical line: landmarks are never inside a routed range (the import and
+  an ICMP echo over the physical line: landmarks are never inside a routed range (the profile rules and
   `WarnAboutRoutedLandmarks` enforce it), so the echo cannot fall into the tunnel.
 - **After a match**: the region that match played in is re-measured - replacing today's
   `RescanBetweenMatchesAsync`, which does the same for the one region there is. The budget stays 30 s.
@@ -317,34 +334,31 @@ the next connect. A bug in new code costs its benefit, not the player's match.
 | VALORANT | off | Riot Direct answers every region on the same addresses - there is nothing to tell apart |
 | CS2 | **off** | its landmarks are its relays and are routed (`landmarksRouted`); a direct measurement cannot be taken while routes are in |
 
-**Do not add hk-2 or sg-1 to Delta Force's relays (/admin/relays) before its mode is `on`.** Today the
-client would choose the relay for the Hong Kong landmark alone and send the HCM matches through Hong
-Kong: 57-96 ms from hk-2 to the Zenlayer servers against 22 from vn-2 (measured 2026-09-25).
+With one tunnel, a relay that is fast to Hong Kong is chosen for the Hong Kong landmark alone and then
+carries the HCM matches too: 57-96 ms from a Hong Kong relay to the Zenlayer servers against 22 from a
+Vietnamese one (measured 2026-09-25). This is the case multi-tunnel exists for.
 
 ## 7. Server side
 
-### 7.1 web-service
+### 7.1 Profile
 
-- `Game.regionRouting` (`off` | `record` | `on`, default `record`, `off` for SDR games) and
-  `Game.regionDirect` (bool, default false). Served in the profile as `regionRouting` / `regionDirect`
-  on the game; set on /admin/catalog. Like `entrySwitching`: read at connect, never mid-match.
-- **Shared-key flag.** `recordSharedKeys` counts active sessions per device key across relays; every
-  multi-tunnel player would be flagged. Group by (device key, client id) instead: two sessions from one
-  installation are one player. Needs the client id in the relay report (7.2). Until every relay reports
-  it, a device whose sessions are all on different relays and come from one client IP is not flagged.
-- **Import**: refuse a game whose regions overlap (5.4), with the pair named.
-- **Quality**: a `regionPlan` record per planner pass (every region, every number, the choice, the mode)
-  and the path on each match summary. This is the evidence for G2 in the field (section 10.4).
-- /admin/catalog: per region, whether it has a landmark and "follows home" when not.
+- Each game carries `regionRouting` (`off` | `record` | `on`) and `regionDirect` (bool). Like
+  `entrySwitching`: read at connect, never mid-match. A profile without them reads as `off` and no direct.
+  An SDR game (`landmarksRouted`) is always `off`.
+- A profile never has two regions of one game overlapping (5.4), and never routes a relay or a landmark.
+- **Quality**: the client uploads a `regionPlan` record per planner pass (every region, every number, the
+  choice, the mode) and the path on each match summary. This is the evidence for G2 in the field
+  (section 10.4).
 
 ### 7.2 relay
 
-- Keep the client id from the handshake (`VerifyHandshakeReqToken` returns it; `handleHandshakeToken`
-  discards it today) in `sessionIdent`, and report it. It is chosen by the client and signed, so it
-  identifies an installation, not a person - the same trust it has in PSK mode today.
+- Keep the client id from the handshake (`VerifyHandshakeReqToken` returns it) in `sessionIdent`, and
+  report it as `client_id`, so sessions of one installation on several relays can be recognised as one
+  client. It is chosen by the client and signed, so it identifies an installation, not a person - the
+  same trust it has in PSK mode. Built.
 - Nothing else. No wire change: multi-tunnel is several ordinary sessions on several relays.
-- Capacity: a player holds at most `MaxTunnels` sessions, on **different** relays. Watch
-  `sessions` on /admin/relays against `MaxClients` (30-50) once `on` spreads.
+- Capacity: a player holds at most `MaxTunnels` sessions, on **different** relays. Watch session counts
+  against `MaxClients` (30-50) once `on` spreads.
 
 ## 8. Configuration
 
@@ -355,19 +369,21 @@ Kong: 57-96 ms from hk-2 to the Zenlayer servers against 22 from vn-2 (measured 
   change; a written default would pin every PC).
 - `record` runs the planner and uploads what `on` would have done, and opens **no** secondary tunnel. The
   only cost is the lobby measurement pass.
+- To try it on one PC: `"regionRouting": "record"` in `%ProgramData%\GamePingBooster\config.json`, then
+  connect with the game open and wait in the lobby; the log shows `Region plan ...`.
 
 ## 9. Rollout
 
 | Phase | What ships | Exit criteria |
 |---|---|---|
 | A | `AdapterPump` with one tunnel. `InnerNat`, region table and sticky table present but a single tunnel never rewrites. | Harness `SingleTunnelMatchesLegacy` green; one week on the owner's PC and one tester with in-game ping and spike counts unchanged against the week before |
-| B | web-service fields + import overlap check + shared-key grouping; relays redeployed with client id in reports | `check:` scripts green; /admin/relays shows client ids |
+| B | Profile fields served; relays redeployed with client id in reports | Relay reports carry client ids |
 | C | Planner in `record`, all games but CS2/VALORANT | A week of `regionPlan` records: how often a region would leave home, by how much, how often direct would win |
 | D | `on` via config.json on the owner's PC, Delta Force | Matches in two regions in one session; match summaries show the planned path carried each; no reconnects attributable to the dispatcher |
-| E | `on` for Delta Force in /admin/catalog | Section 10.4 metrics hold for a week |
+| E | `on` for Delta Force in the served profile | Section 10.4 metrics hold for a week |
 | F | `regionDirect` for one game, record first | Direct chosen only where the in-match probe agrees it was faster |
 
-Every phase can be undone by the switch in 8.1 or the admin mode without a release.
+Every phase can be undone by the switch in 8.1 or the game's served mode, without a release.
 
 ## 10. Test plan
 
@@ -420,7 +436,7 @@ Still to write, with the multi-tunnel wiring: `TwoRegionsTwoRelays`, `RemapUnder
 ### 10.3 Existing suites
 
 ProtocolCheck (wire format) and QualityCheck (spike detector) unchanged and green. Go: the client-id
-report. web-service: `check:` for overlap refusal and shared-key grouping.
+report.
 
 ### 10.4 In the field
 
@@ -450,7 +466,6 @@ Read for this design, 2026-09-25: `TunnelClient.cs` (pumps, probes, MoveTo), `Tu
 selection, ChooseDoor, reconnect, routes, teardown, status), `TunnelEngine.BetweenMatches.cs`,
 `RouteManager.cs`, `WintunAdapter.cs`, `GameProfile.cs`, `RelayPaths.cs`, `EntrySwitching.cs`,
 `BetweenMatches.cs` (RescanScore), `DoorSwitchPolicy.cs` margins; relay `server.go` (handshake, anti-spoof,
-roaming, Probe, allocSession/reservations, MaxClients), `cmd/relayd` flags (subnet, MTU); web-service
-`profile-import.server.ts` (ownership, retire rules), `shared-key.server.ts`, `profile.server.ts`;
-Wintun's `api/wintun.h` for thread safety. Production data: Delta Force regions and relays
-(read-only, 2026-09-25), relay RTT to every Delta Force and Naraka server.
+roaming, Probe, allocSession/reservations, MaxClients), `cmd/relayd` flags (subnet, MTU); Wintun's
+`api/wintun.h` for thread safety. Measured: relay RTT to every Delta Force and Naraka server
+(2026-09-25).

@@ -76,6 +76,33 @@ internal static class LandmarkProbe
         return results;
     }
 
+    /// <summary>
+    /// <paramref name="count"/> echoes over the physical path, <paramref name="spacing"/> apart, null for each
+    /// unanswered - the samples a median is taken of, where the connect's region choice takes a best-of.
+    /// The region planner compares this with medians through tunnels, so it has to be the same instrument.
+    /// </summary>
+    public static async Task<List<double?>> SampleAsync(IPAddress address, int count, TimeSpan spacing, int timeoutMs,
+        CancellationToken ct)
+    {
+        var payload = new byte[32];
+        var samples = new List<double?>(count);
+        using var ping = new Ping();
+        for (var i = 0; i < count; i++)
+        {
+            if (i > 0) await Task.Delay(spacing, ct).ConfigureAwait(false);
+            try
+            {
+                var reply = await ping.SendPingAsync(address, timeoutMs, payload).ConfigureAwait(false);
+                samples.Add(reply.Status == IPStatus.Success ? reply.RoundtripTime : null);
+            }
+            catch (PingException)
+            {
+                samples.Add(null);
+            }
+        }
+        return samples;
+    }
+
     /// <summary>Best of <see cref="Attempts"/> echoes over the physical path, or null if silent.</summary>
     private static async Task<double?> MeasureAsync(IPAddress address, CancellationToken ct)
     {
