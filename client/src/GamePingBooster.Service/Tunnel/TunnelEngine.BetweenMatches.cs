@@ -385,6 +385,7 @@ internal sealed partial class TunnelEngine
             ForgetDirectPing();
             _pendingDoorMove = null;
             _movedFromDoor = null;
+            _connectLeftDoor = null;
 
             _tunnel = client;
             ResetThroughputBaseline();

@@ -45,7 +45,9 @@ public sealed class DoorDecision
 /// when it came in through one - while a game is running.
 ///
 /// WHAT IT COMPARES. relayd's own round trip down the current way (the recorder's pong, B) against the
-/// same round trip down each other way (a Probe), quarter second by quarter second. Nothing else. That
+/// same round trip down each other way (a Probe), quarter second by quarter second - in a match and, since
+/// 2026-09-24, in the lobby (<see cref="QualityTick.Lobby"/>): a player who sits at 100 ms in the lobby blames
+/// the relay long before a match starts, and moving there drops nothing. Nothing else. That
 /// pairing is the whole method, because of what it cancels out: every way crosses the same Wi-Fi and
 /// the same home router before it, and reaches the same relayd and the same route to the game after it.
 /// A Wi-Fi burst, a busy relay or a slow datacentre route rises on every way at once and never makes one
@@ -84,6 +86,10 @@ public sealed class DoorDecision
 /// window is what the lower bar costs: a way that was bad must be good for four times as long as "worse"
 /// asks. The five minutes still apply first. A move back is not itself returned from.
 ///
+/// A connect that started on an entry because it was faster than the direct road (TunnelEngine.ChooseDoorAsync)
+/// is the same detour, and <see cref="StartedOnDetour"/> opens the same way back - without the five minutes,
+/// since no decision of this policy made it.
+///
 /// Pure logic, like SpikeDetector: fed settled ticks, holds no clock and no sockets.
 /// </summary>
 public sealed class DoorSwitchPolicy
@@ -106,7 +112,7 @@ public sealed class DoorSwitchPolicy
     /// <summary>Probes the other way may lose in the window and still count as clean.</summary>
     internal const int MaxOtherLost = 2;
 
-    internal static double Margin(double otherMs) => Math.Max(10.0, 0.15 * otherMs);
+    public static double Margin(double otherMs) => Math.Max(10.0, 0.15 * otherMs);
 
     /// <summary>How long the way a decision left must have been better before the tunnel goes back to it.</summary>
     public const int ReturnWindowTicks = 2 * 60 * SpikeDetector.TicksPerSecond;
@@ -133,7 +139,7 @@ public sealed class DoorSwitchPolicy
 
         // A hole, no game, nothing to compare, or a different set of ways from the ticks already held:
         // none of it is evidence about this way against the others, so the window starts again.
-        var comparable = tick.Active && tick.DoorIds is { Length: > 0 } && tick.CurrentDoor is not null;
+        var comparable = (tick.Active || tick.Lobby) && tick.DoorIds is { Length: > 0 } && tick.CurrentDoor is not null;
         if (!continuous || !comparable || (_window.Count > 0 && !SamePath(_window.Peek(), tick)))
         {
             _window.Clear();
@@ -162,6 +168,17 @@ public sealed class DoorSwitchPolicy
             _leftTo = decision.Return ? null : decision.To;
         }
         return decision;
+    }
+
+    /// <summary>
+    /// The tunnel was put on <paramref name="to"/> at connect because it was faster than <paramref name="from"/>,
+    /// the relay's direct road. Going back to <paramref name="from"/> is then judged by the return rule, as after a
+    /// move this policy made. Closed again, like that one, as soon as the tunnel is anywhere else.
+    /// </summary>
+    public void StartedOnDetour(string from, string to)
+    {
+        _leftFrom = from;
+        _leftTo = to;
     }
 
     private static bool SamePath(QualityTick a, QualityTick b) =>

@@ -23,6 +23,14 @@ public sealed class QualityTick(long index, DateTimeOffset startUtc)
     public bool Active { get; set; }
 
     /// <summary>
+    /// The game was running with no match under way - the lobby, the agent select, a queue. Only relayd's pong
+    /// (B) and the Probes down the other ways in were sent, for <see cref="DoorSwitchPolicy"/>, which may move a
+    /// player in the lobby as well as in a match. Not <see cref="Active"/>: nothing else reads these ticks, so
+    /// the lobby is never a match, a spike or a baseline.
+    /// </summary>
+    public bool Lobby { get; set; }
+
+    /// <summary>
     /// A0: ICMP to the home router. The one probe that separates the player's own network - Wi-Fi,
     /// cable, router - from everything past it. Many routers answer pings to themselves late or not
     /// at all, which is why it only ever CONFIRMS a verdict and never raises one.

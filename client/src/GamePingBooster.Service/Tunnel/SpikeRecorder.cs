@@ -56,7 +56,8 @@ internal sealed class SpikeRecorder : IQualitySink
         string? GameId,
         bool GameRunning,
         IReadOnlyList<DoorProbes.Door> Doors,
-        bool MovesEnabled);
+        bool MovesEnabled,
+        string? ConnectLeftDoor = null);
 
     private static readonly long TickLength = Stopwatch.Frequency / SpikeDetector.TicksPerSecond;
 
@@ -193,6 +194,9 @@ internal sealed class SpikeRecorder : IQualitySink
     private ulong _doorsSession;
     private int _doorProbeTicks;
 
+    /// <summary>The connect-time detour last handed to the policy, and the session it was for - so it is handed over once.</summary>
+    private (string Door, ulong Session)? _detourSeen;
+
     /// <summary>
     /// A decision being followed for the minute after it, so that its record says what happened next. Touched
     /// only by the recorder's own loop - Step, and EndMatch after it - so it takes no lock.
@@ -321,6 +325,15 @@ internal sealed class SpikeRecorder : IQualitySink
             _doorProbeTicks = 0;
         }
 
+        // A connect that started on an entry because the direct road was slow: the policy treats it as a move it
+        // made, so the road is gone back to once it recovers. See DoorSwitchPolicy.StartedOnDetour.
+        if (context.ConnectLeftDoor is { } left && context.EntryId is { } entry && session != 0 &&
+            _detourSeen != (left, session))
+        {
+            _detourSeen = (left, session);
+            _policy.StartedOnDetour(left, entry);
+        }
+
         var cadence = tunnel?.TakeCadence();
         // A few packets, not one. Counter-Strike 2 keeps a standby Steam relay alive with a single small
         // packet every ~46 s even in the menus, and counting that as play flipped the recorder into a
@@ -332,6 +345,9 @@ internal sealed class SpikeRecorder : IQualitySink
         // go in at connect, and a launcher talking to them looked like a match on 2026-09-15.
         var active = tunnel is not null && context.GameRunning &&
                      _lastActivityAt != 0 && now - _lastActivityAt < ActiveFor;
+
+        // The game open with no match: only the ways in are compared - see QualityTick.Lobby.
+        var lobby = !active && tunnel is not null && context.GameRunning && _doors is not null;
 
         QualityTick tick;
         lock (_gate)
@@ -349,8 +365,8 @@ internal sealed class SpikeRecorder : IQualitySink
                 Put(new QualityTick(missed, utcNow - TimeSpan.FromMilliseconds((index - missed) * SpikeDetector.TickMs)));
             }
 
-            tick = new QualityTick(index, utcNow) { Active = active, LocalLagMs = localLag };
-            if (active && _doors is { } doors)
+            tick = new QualityTick(index, utcNow) { Active = active, Lobby = lobby, LocalLagMs = localLag };
+            if ((active || lobby) && _doors is { } doors)
             {
                 tick.CurrentDoor = context.EntryId ?? context.RelayId;
                 tick.DoorIds = doors.Ids;
@@ -380,6 +396,12 @@ internal sealed class SpikeRecorder : IQualitySink
             tick.LineUpMbps = _lineUp;
 
             SendProbes(tunnel, tick, context, now);
+        }
+        else if (lobby && tunnel is not null)
+        {
+            tick.RelayProcessSent = true;
+            tunnel.SendQualityPing();
+            SendDoorProbes(tick, context);
         }
 
         List<SpikeEvent>? closed = null;
@@ -486,7 +508,13 @@ internal sealed class SpikeRecorder : IQualitySink
             tunnel.SendQualityEcho(path.Target, Register(ProbeKind.ServerPath, tick.Index, path.Ttl), path.Ttl);
         }
 
-        // The other ways into the relay, one Probe each, the same quarter second as the pong they are compared with.
+        SendDoorProbes(tick, context);
+        WalkStep(tunnel, tick.Index, now);
+    }
+
+    /// <summary>The other ways into the relay, one Probe each, the same quarter second as the pong they are compared with.</summary>
+    private void SendDoorProbes(QualityTick tick, Context context)
+    {
         if (_doors is { } doors && tick.DoorSent is { } doorSent)
         {
             for (var slot = 0; slot < doorSent.Length; slot++)
@@ -504,8 +532,6 @@ internal sealed class SpikeRecorder : IQualitySink
                      "is measured or moved on this connection until the relay is updated.");
             }
         }
-
-        WalkStep(tunnel, tick.Index, now);
     }
 
     private ushort Register(ProbeKind kind, long tickIndex, byte ttl)

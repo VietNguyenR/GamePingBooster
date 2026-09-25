@@ -77,6 +77,8 @@ internal static class Program
         AWayLeftWithTheWorseTailIsNotReturnedTo();
         NothingIsReturnedToWhenTheMoveWasNotMade();
         AMoveToAFasterWayDoesNotBounceBack();
+        TheLobbyIsJudgedToo();
+        ADetourTakenAtConnectIsLeftOnceTheRoadRecovers();
 
         Console.WriteLine();
         Console.WriteLine("Between matches:");
@@ -683,6 +685,51 @@ internal static class Program
         Check("a move to a way that stays faster is not undone", w.Decisions.Count == 1, $"{w.Decisions.Count} decision(s)");
     }
 
+    private static void TheLobbyIsJudgedToo()
+    {
+        // 2026-09-23 20:03: VALORANT open in the lobby, hk at 73-115 ms, and nothing compared it with anything.
+        var lobby = new Ways { Current = "hk", Others = ["vn-2-hk"], Mode = TickMode.Lobby };
+        lobby.Run(120, 98, 50);
+        Check("in the lobby, a way 48 ms slower is left like in a match",
+            lobby.Decisions.Count == 1 && lobby.Decisions[0].To == "vn-2-hk", $"{lobby.Decisions.Count} decision(s)");
+
+        var closed = new Ways { Current = "hk", Others = ["vn-2-hk"], Mode = TickMode.Idle };
+        closed.Run(400, 98, 50);
+        Check("  ...but not with the game closed", closed.Decisions.Count == 0, $"{closed.Decisions.Count} decision(s)");
+
+        var intoMatch = new Ways { Current = "hk", Others = ["vn-2-hk"], Mode = TickMode.Lobby };
+        intoMatch.Run(60, 98, 50);
+        intoMatch.Mode = TickMode.Match;
+        intoMatch.Run(60, 98, 50);
+        Check("  ...and the lobby's seconds count towards the match's thirty", intoMatch.Decisions.Count == 1,
+            $"{intoMatch.Decisions.Count} decision(s)");
+    }
+
+    private static void ADetourTakenAtConnectIsLeftOnceTheRoadRecovers()
+    {
+        // The connect started on vn-2-hk because hk was slow. hk is back at 43 against 53: inside the "worse" margin,
+        // so only the return rule can bring the player back - as after the 2026-09-18 move off sg-4.
+        var plain = new Ways { Current = "vn-2-hk", Others = ["hk"] };
+        plain.Run(DoorSwitchPolicy.ReturnWindowTicks * 2, 53, 43);
+        Check("without a detour at connect, 43 against 53 moves nobody", plain.Decisions.Count == 0,
+            $"{plain.Decisions.Count} decision(s)");
+
+        var detour = new Ways { Current = "vn-2-hk", Others = ["hk"] };
+        detour.Policy.StartedOnDetour("hk", "vn-2-hk");
+        detour.Run(DoorSwitchPolicy.ReturnWindowTicks - 1, 53, 43);
+        Check("  ...with one, not before two minutes", detour.Decisions.Count == 0, $"{detour.Decisions.Count} decision(s)");
+        detour.Run(1, 53, 43);
+        Check("  ...then back to hk, with no five-minute wait",
+            detour.Decisions is [{ Return: true, From: "vn-2-hk", To: "hk" }],
+            string.Join(", ", detour.Decisions.Select(d => $"{d.From}->{d.To}{(d.Return ? " (return)" : "")}")));
+
+        var elsewhere = new Ways { Current = "vn-1-hk", Others = ["hk", "vn-2-hk"] };
+        elsewhere.Policy.StartedOnDetour("hk", "vn-2-hk");
+        elsewhere.Run(DoorSwitchPolicy.ReturnWindowTicks * 2, _ => 53, _ => 43, _ => 60);
+        Check("  ...and never while the tunnel is on another way", elsewhere.Decisions.Count == 0,
+            $"{elsewhere.Decisions.Count} decision(s)");
+    }
+
     // ------------------------------------------------------------------ between matches
 
     /// <summary>The supervisor's five-second readings of the tunnel's game UDP count, at a given rate.</summary>
@@ -790,6 +837,8 @@ internal static class Program
     /// The pongs down the current way and the probes down the others, quarter second by quarter second. Values
     /// are the round trip to relayd; null is sent and never answered.
     /// </summary>
+    private enum TickMode { Match, Lobby, Idle }
+
     private sealed class Ways
     {
         private readonly Random _random = new(20260916);
@@ -799,6 +848,7 @@ internal static class Program
         public List<DoorDecision> Decisions { get; } = [];
         public string Current { get; set; } = "sg-2";
         public string[] Others { get; set; } = ["sg-2-vn"];
+        public TickMode Mode { get; set; } = TickMode.Match;
 
         public void Run(int ticks, double? current, params double?[] others) =>
             Run(ticks, _ => current, others.Select(o => (Func<int, double?>)(_ => o)).ToArray());
@@ -810,7 +860,8 @@ internal static class Program
                 var tick = new QualityTick(_index, new DateTimeOffset(2026, 9, 15, 12, 18, 0, TimeSpan.Zero)
                     .AddMilliseconds(_index * SpikeDetector.TickMs))
                 {
-                    Active = true,
+                    Active = Mode == TickMode.Match,
+                    Lobby = Mode == TickMode.Lobby,
                     RelayProcessSent = true,
                     RelayProcessMs = current(i) is { } c ? c + Noise() : null,
                     CurrentDoor = Current,

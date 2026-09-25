@@ -1039,6 +1039,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         string? preferredId, byte[] psk, CancellationToken ct)
     {
         if (_profile!.Relays.Count == 0) throw new InvalidOperationException("The profile declares no relays.");
+        _connectLeftDoor = null;
         var relays = RelaysForGame(_game);
         var paths = RelayPaths.Expand(relays);
 
@@ -1150,6 +1151,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             }
 
             var best = ChooseByEndToEnd(scored, target);
+            best = await ChooseDoorAsync(best, probes, psk, ct).ConfigureAwait(false);
             var tunnel = await OpenChosenAsync(best, probes, psk, ct).ConfigureAwait(false);
             return (best.Relay, tunnel);
         }
@@ -1236,6 +1238,74 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
              "on your own connection - not enough of a difference. Trying the entries that reach the same " +
              "relays by another route.");
         return true;
+    }
+
+    /// <summary>
+    /// With the relay chosen, measures the other ways into it and starts on the fastest - entry switching's own
+    /// rule, applied before the first packet instead of thirty seconds into a match.
+    ///
+    /// Until 2026-09-24 a connect always started on the relay's direct road when no landmark could be measured,
+    /// since ShouldTryEntries only tries entries against a region. VALORANT has none, and on 2026-09-23 a player
+    /// on hk connected at 79, 98, 104 and 109 ms while vn-2-hk answered in about 50 and vn-1-hk in about 60. Entry
+    /// switching only watched during a match, so in the lobby the player saw 100 ms, blamed the relay, and began
+    /// picking relays by hand.
+    ///
+    /// Comparing the first leg alone is fair here, unlike across relays: every way ends at the same relayd, and
+    /// the leg from it to the game server is the same whichever way the packets came in. The margin is the
+    /// switch policy's (<see cref="GamePingBooster.Core.Quality.DoorSwitchPolicy.Margin"/>), so a connect never starts on a way the policy
+    /// would not have moved to. Best of three against best of three favours the direct road on a jittery evening,
+    /// which is the side to err on: an entry is a detour.
+    ///
+    /// Only when entry switching is on for the relay. Record mode watches and must not act, and a relay whose
+    /// entries were already scored against a region went through ChooseByEndToEnd with them.
+    /// </summary>
+    private async Task<RelayProbe> ChooseDoorAsync(RelayProbe best, List<RelayProbe> probes, byte[] psk, CancellationToken ct)
+    {
+        _connectLeftDoor = null;
+        var profile = _profile;
+        if (profile is null || best.Relay.ViaRelayId is not null) return best;
+
+        var relayId = best.Relay.Id;
+        var (mode, _) = EntrySwitching.Resolve(_config.EntrySwitching, best.Relay.EntrySwitching);
+        if (mode != EntrySwitchingMode.On) return best;
+
+        var doors = RelayPaths.DoorsOf(profile.Relays, relayId)
+            .Where(d => d.ViaRelayId is not null)
+            .ToList();
+        if (doors.Count == 0 || probes.Any(p => p.Relay.ViaRelayId is not null &&
+                                                RelayPaths.RelayIdOf(p.Relay).Equals(relayId, StringComparison.OrdinalIgnoreCase)))
+        {
+            return best;
+        }
+
+        _log($"Entry switching: measuring the other ways into {best.Relay.Name} before starting on one.");
+        var measured = new List<RelayProbe> { best };
+        foreach (var door in doors)
+        {
+            // One path to a relay open at a time - see SelectRelayAsync.
+            CloseProbesOf(probes, relayId);
+            if (await ProbeAsync(door, psk, target: null, ct).ConfigureAwait(false) is { } probe)
+            {
+                probes.Add(probe);
+                measured.Add(probe);
+            }
+        }
+
+        var fastest = measured.MinBy(p => p.LegOneMs)!;
+        if (ReferenceEquals(fastest, best) || best.LegOneMs - fastest.LegOneMs < GamePingBooster.Core.Quality.DoorSwitchPolicy.Margin(fastest.LegOneMs))
+        {
+            _log($"Entry switching: starting on {best.Relay.Name} [{best.Relay.Id}] at {best.LegOneMs:F0} ms" +
+                 (ReferenceEquals(fastest, best)
+                     ? " - no other way in is faster."
+                     : $" - {fastest.Relay.Id} at {fastest.LegOneMs:F0} ms is not faster by " +
+                       $"{GamePingBooster.Core.Quality.DoorSwitchPolicy.Margin(fastest.LegOneMs):F0} ms or more."));
+            return best;
+        }
+
+        _log($"Entry switching: starting on {fastest.Relay.Name} [{fastest.Relay.Id}] at {fastest.LegOneMs:F0} ms rather " +
+             $"than {best.Relay.Id} at {best.LegOneMs:F0} ms - the same relay, reached by a faster road right now.");
+        _connectLeftDoor = best.Relay.Id;
+        return fastest;
     }
 
     /// <summary>
@@ -1786,7 +1856,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         var switching = _switching;
         var doors = relay is not null && _tunnel is not null && switching != EntrySwitchingMode.Off ? DoorsBeside(relay) : [];
         return new SpikeRecorder.Context(_tunnel, relayId, entryId, relay?.Name, relayAddress,
-            path?.Landmark, path?.RegionName, _game?.Id, gameRunning, doors, switching == EntrySwitchingMode.On);
+            path?.Landmark, path?.RegionName, _game?.Id, gameRunning, doors, switching == EntrySwitchingMode.On,
+            _connectLeftDoor);
     }
 
     // ------------------------------------------------------------ moving between ways into the relay
@@ -1800,6 +1871,13 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     /// <summary>The way the tunnel was on before its last move, while that move is young enough to undo. Supervisor only.</summary>
     private string? _movedFromDoor;
     private long _movedAtTick;
+
+    /// <summary>
+    /// The relay's direct road, when this connection started on an entry because the entry was faster (ChooseDoorAsync).
+    /// Handed to the switch policy as the way left, so the return rule brings the tunnel back once the road recovers.
+    /// Cleared by anything that puts the tunnel on another relay.
+    /// </summary>
+    private volatile string? _connectLeftDoor;
 
     /// <summary>How long after a move silence on the new way sends the tunnel back, and how much silence that takes.</summary>
     private static readonly TimeSpan MoveBackWithin = TimeSpan.FromSeconds(30);
@@ -2312,6 +2390,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                         routes.PinRelayRoute(ParseEndpoint(relay.Endpoint).Address);
                         pinned = relay;
                         _relay = relay;
+                        _connectLeftDoor = null;
 
                         // The second-leg offset belonged to the relay we just left, and this one
                         // may be a continent further from the game server. There is no chance to

@@ -44,6 +44,16 @@ internal sealed class WorkingEdges
     /// </summary>
     private const int MaxCandidates = 6;
 
+    /// <summary>
+    /// How long a name's own addresses get before borrowed edges join the race. A working edge
+    /// answers in about 90 ms, so a name that is fine never borrows; a filtered one hangs for the
+    /// whole budget, so waiting longer than this only delays the rescue.
+    /// </summary>
+    private static readonly TimeSpan HeadStart = TimeSpan.FromMilliseconds(300);
+
+    /// <summary>After the first working edge, how long to wait for others that are about to finish.</summary>
+    private static readonly TimeSpan Grace = TimeSpan.FromMilliseconds(100);
+
     private readonly DohUpstream _doh;
     private readonly Action<string> _log;
 
@@ -144,58 +154,45 @@ internal sealed class WorkingEdges
         }
 
         var tried = candidates.Take(MaxCandidates).ToArray();
-        var (good, bad) = await ProbeSetAsync(tried, name, ct).ConfigureAwait(false);
-        var borrowedCount = 0;
 
-        if (good.Length == 0)
+        // One round for everything, cancelled the moment an answer is settled. A filtered edge does
+        // not fail, it hangs for the whole budget, and waiting for every probe to report meant one
+        // hanging address cost 2.5 s even when a good one had answered in 90 ms. Measured
+        // 2026-09-24: the overlay's first store lookup took 5069 ms, two full budgets back to back,
+        // for an edge that handshakes in under a tenth of a second.
+        using var round = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var probes = tried.Select(a => ProbeOneAsync(a, name, round.Token)).ToList();
+
+        var borrowed = Array.Empty<IPAddress>();
+
+        // Give the name's own addresses a head start, then borrow in parallel rather than after.
+        // Most names never get this far: their own edge answers inside the head start and nothing
+        // is borrowed, so a normal lookup costs what it did before.
+        if (!await AnyWorksAsync(probes, HeadStart).ConfigureAwait(false))
         {
-            // The name's own answer is entirely filtered. Before giving up, try the edges that
-            // recently worked for a sibling name - measured to serve these sites with a valid
-            // certificate for each - and probe them for THIS name so nothing is assumed.
-            var shortlist = _pool
-                .Where(p => p.Value > DateTimeOffset.UtcNow)
-                .Select(p => p.Key)
-                .ToList();
-
-            // Nothing in the pool. Rather than give up - which is what happened on a real machine
-            // on 2026-09-22, where the store fell back to a filtered address while a perfectly good
-            // edge was one query away - go and find one: resolve a name of the same service that is
-            // known to work, which fills the pool as a side effect.
-            //
-            // The canary, specifically. It is the one name this service has already proven answers
-            // correctly on this line, and it costs one DoH round trip plus one handshake.
-            if (shortlist.Count == 0 && sibling is not null && sibling != name)
-            {
-                _log($"Unblock: every address for {name} is filtered and nothing is known to work yet - " +
-                     $"asking {sibling} for a usable edge.");
-
-                // Null sibling on the way in: this must not be able to recurse.
-                var fromSibling = await ForAsync(sibling, null, ct).ConfigureAwait(false);
-                if (fromSibling is not null) shortlist.AddRange(fromSibling);
-            }
-
-            var borrowed = shortlist
-                .Distinct()
-                .Where(a => !tried.Contains(a))
-                .Take(MaxCandidates)
-                .ToArray();
-
-            borrowedCount = borrowed.Length;
-
-            if (borrowed.Length > 0)
-            {
-                var (rescued, alsoBad) = await ProbeSetAsync(borrowed, name, ct).ConfigureAwait(false);
-                bad += alsoBad;
-
-                if (rescued.Length > 0)
-                {
-                    _log($"Unblock: every address the upstreams gave for {name} is filtered on this " +
-                         $"line; answering with {rescued.Length} edge(s) proven for another name of the same service " +
-                         $"({clock.ElapsedMilliseconds} ms).");
-                    good = rescued;
-                }
-            }
+            borrowed = await ShortlistAsync(name, sibling, tried, ct).ConfigureAwait(false);
+            probes.AddRange(borrowed.Select(a => ProbeOneAsync(a, name, round.Token)));
         }
+
+        // Once something works, a short grace to collect whatever else is about to finish - two
+        // good edges are worth more than one - then drop the rest.
+        if (await AnyWorksAsync(probes, Timeout.InfiniteTimeSpan).ConfigureAwait(false))
+        {
+            await Task.WhenAny(Task.WhenAll(probes), Task.Delay(Grace)).ConfigureAwait(false);
+        }
+
+        // Only what finished before the cancel is a verdict. A probe cut off here reports false,
+        // but it was abandoned, not rejected, and counting it would blame edges that did nothing.
+        var settled = probes.Where(p => p.IsCompleted).Select(p => p.Result).ToArray();
+        round.Cancel();
+        await Task.WhenAll(probes).ConfigureAwait(false);
+
+        var good = settled.Where(r => r.Works).Select(r => r.Address).ToArray();
+        var bad = settled.Length - good.Length;
+        var abandoned = probes.Count - settled.Length;
+
+        Interlocked.Add(ref _probed, settled.Length);
+        Interlocked.Add(ref _rejected, bad);
 
         if (good.Length == 0)
         {
@@ -209,15 +206,23 @@ internal sealed class WorkingEdges
             // timing accident and fixes itself. Guessing between them from a player's log cost an
             // evening once already.
             _log($"Unblock: no address for {name} completed a handshake ({clock.ElapsedMilliseconds} ms) - " +
-                 $"{tried.Length} from the resolvers, {borrowedCount} borrowed, {_pool.Count} in the pool. " +
+                 $"{tried.Length} from the resolvers, {borrowed.Length} borrowed, {_pool.Count} in the pool. " +
                  "Relaying the upstream answer unchanged.");
             return [];
         }
 
-        if (bad > 0)
+        if (!good.Any(tried.Contains))
+        {
+            _log($"Unblock: no address the upstreams gave for {name} worked in time on this line; " +
+                 $"answering with {good.Length} edge(s) proven for another name of the same service " +
+                 $"({clock.ElapsedMilliseconds} ms).");
+        }
+
+        if (bad > 0 || abandoned > 0)
         {
             _log($"Unblock: {name} -> {string.Join(", ", good.Select(a => a.ToString()))} " +
-                 $"({bad} address(es) dropped for failing a TLS handshake, {clock.ElapsedMilliseconds} ms).");
+                 $"({bad} address(es) dropped for failing a TLS handshake, {abandoned} still pending " +
+                 $"and abandoned, {clock.ElapsedMilliseconds} ms).");
         }
 
         var expires = DateTimeOffset.UtcNow.Add(Lifetime);
@@ -227,20 +232,82 @@ internal sealed class WorkingEdges
         return good;
     }
 
-    /// <summary>Handshakes against every address at once and splits them into good and bad.</summary>
-    private async Task<(IPAddress[] Good, int Bad)> ProbeSetAsync(
-        IPAddress[] addresses, string name, CancellationToken ct)
+    /// <summary>
+    /// Edges proven for other names, for when the name's own addresses are not answering: the
+    /// sibling's first, then the rest of the pool, most recently proven first.
+    /// </summary>
+    private async Task<IPAddress[]> ShortlistAsync(
+        string name, string? sibling, IPAddress[] tried, CancellationToken ct)
     {
-        var results = await Task.WhenAll(
-            addresses.Select(async address => (Address: address,
-                Works: await EdgeProber.WorksAsync(address, name, ct).ConfigureAwait(false))))
-            .ConfigureAwait(false);
+        var shortlist = new List<IPAddress>();
 
-        var good = results.Where(r => r.Works).Select(r => r.Address).ToArray();
+        // The canary's edges FIRST, always - not only when the pool is empty. The pool holds
+        // every address proven for ANY claimed name, and most of those are not the CDN at all:
+        // api/login/chat/valvesoftware are Valve's own servers and fail this name's certificate.
+        // On 2026-09-24 the Steam overlay asked for those names before the store, the pool held
+        // 7 addresses, the cap took 6 of them in dictionary order, and the one Akamai edge that
+        // works (just proven for steamcommunity.com) was the one left out. The store fell back
+        // to the filtered answer inside the game while the Steam client, which asks for the
+        // store first, was fine.
+        //
+        // The canary is the one name this service has already proven answers correctly on this
+        // line. When its verdict is fresh this costs nothing; when not, one DoH round trip plus
+        // one handshake.
+        if (sibling is not null && sibling != name)
+        {
+            if (!(_known.TryGetValue(sibling, out var known) && known.Expires > DateTimeOffset.UtcNow))
+            {
+                _log($"Unblock: no address for {name} answered within {HeadStart.TotalMilliseconds:0} ms " +
+                     $"and {sibling} has no fresh verdict - asking it for a usable edge.");
+            }
 
-        Interlocked.Add(ref _probed, addresses.Length);
-        Interlocked.Add(ref _rejected, results.Length - good.Length);
+            // Null sibling on the way in: this must not be able to recurse.
+            var fromSibling = await ForAsync(sibling, null, ct).ConfigureAwait(false);
+            if (fromSibling is not null) shortlist.AddRange(fromSibling);
+        }
 
-        return (good, results.Length - good.Length);
+        shortlist.AddRange(_pool
+            .Where(p => p.Value > DateTimeOffset.UtcNow)
+            .OrderByDescending(p => p.Value)
+            .Select(p => p.Key));
+
+        return shortlist
+            .Distinct()
+            .Where(a => !tried.Contains(a))
+            .Take(MaxCandidates)
+            .ToArray();
+    }
+
+    private static async Task<(IPAddress Address, bool Works)> ProbeOneAsync(
+        IPAddress address, string name, CancellationToken ct) =>
+        (address, await EdgeProber.WorksAsync(address, name, ct).ConfigureAwait(false));
+
+    /// <summary>
+    /// True as soon as any probe reports a working edge; false once all have failed or the wait
+    /// is over. Never throws and never cancels anything.
+    /// </summary>
+    private static async Task<bool> AnyWorksAsync(
+        IReadOnlyList<Task<(IPAddress Address, bool Works)>> probes, TimeSpan wait)
+    {
+        var deadline = wait == Timeout.InfiniteTimeSpan ? null : Task.Delay(wait);
+        var pending = probes.ToList();
+
+        while (true)
+        {
+            // Snapshot first: a probe finishing between the check and the removal must not be
+            // dropped unread.
+            var done = pending.Where(p => p.IsCompleted).ToList();
+            if (done.Any(p => p.Result.Works)) return true;
+            pending.RemoveAll(done.Contains);
+            if (pending.Count == 0) return false;
+
+            var next = Task.WhenAny(pending);
+            if (deadline is not null && await Task.WhenAny(next, deadline).ConfigureAwait(false) == deadline)
+            {
+                return false;
+            }
+
+            await next.ConfigureAwait(false);
+        }
     }
 }
