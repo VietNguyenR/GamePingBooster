@@ -44,6 +44,10 @@ internal static partial class Program
         RoutingModeChecks();
 
         Console.WriteLine();
+        Console.WriteLine("Which tunnel carries the match:");
+        CarrierChecks();
+
+        Console.WriteLine();
         if (_failures == 0)
         {
             Console.WriteLine("All path checks passed.");

@@ -23,8 +23,8 @@ Status, 2026-09-25:
   quiet 5 s and is tried again (3 tries), and a 40 s budget ends it as incomplete. It runs on the supervisor
   after the between-matches rescan, never beside it. Checked by PathCheck (mode resolution and the profile
   fields) and TunnelCheck, which holds the record to `testdata/region-plan-record.json` byte for byte.
-  Not done yet: `ProbeGameServerAsync`'s single slot (5.6) - a lobby echo that meets the in-game ping loop
-  counts as unanswered, so a region can read "no answer through home" and follow home in the record.
+  `ProbeGameServerAsync`'s single slot (5.6) - a lobby echo that met the in-game ping loop counted as
+  unanswered, so a region could read "no answer through home" - became four slots in D2.
   First live pass 2026-09-26 (PUBG, home sg-2): complete in 22 s, match after it unaffected; asia-kr would
   leave for hk-2 (67 ms against 108 through home), asia-sg stays.
 - **Phase D1 built, not soaked** (2026-09-26). In `on`, the plan is put in force (`TunnelEngine.MultiTunnel.cs`):
@@ -53,8 +53,24 @@ Status, 2026-09-25:
   region, relays with a tunnel open measured through it, the plan in force passed in for hysteresis, and the
   new plan applied at once - safe at any moment because servers in use keep their tunnel. Home no longer
   moves between matches in `on`; each region gets its own relay instead. `record` keeps the rescan. The
-  quality record says which pass it was (`trigger`: `connect` or `after-match`). Still to do in D2: the
-  in-game ping, spike recorder, match summary and app status following the tunnel that carries the match.
+  quality record says which pass it was (`trigger`: `connect` or `after-match`).
+- **Phase D2, second half built, not soaked** (2026-09-26). The in-game ping, the spike recorder, the match
+  summary and the app follow the tunnel carrying the match (5.8), chosen by `MatchCarrier` (Core/Paths): home
+  until another tunnel carries a match's rate (5 packets/s) for 3 s and more than the carrier; a stall never
+  moves it; home again after 60 s of nothing on the other tunnel (past the recorder's 30 s end of a match, so
+  the summary names the relay that carried it) or at once when that tunnel closes. The in-game ping loop
+  updates it once a second and probes the match server through the carrier; the estimate uses a second-leg
+  measurement per tunnel (home's `_path` is never overwritten by a match on another relay). The recorder
+  attaches to the carrier - its pongs, echoes and cadence - with no ways in and no moves on another relay
+  (entry switching stays home's), and discards what a tunnel counted before it listened. Records carry
+  `"carried": "home" | "other"` only while region routing is in force; a region plan's record is always
+  written with home's context. Status: relay name, address, pings and loss are the carrier's, packet
+  counters sum every tunnel, and `homeRelayName` + `regionPaths` name home and each region's own relay - the
+  app shows them in the relay line's tooltip. `ProbeGameServerAsync` has four slots now (5.6), so the in-game
+  ping and a planner pass on one tunnel no longer read each other's echo as "no answer". PathCheck
+  `CarrierChecks` (named rules + 20 000 random seconds on three tunnels), TunnelCheck: three echoes at once,
+  `"carried"` only when set, `TheRecorderFollowsTheTunnelCarryingTheMatch`. Still home-only: entry switching
+  on another relay, the 30 s throughput line (other tunnels have their own every 30 s), `direct`.
 
 Two deliberate differences in Phase A, both in the failure direction: an unexpected exception while sending
 one packet now costs that packet and a log line instead of ending the uplink for good (the old loop left a
@@ -315,8 +331,8 @@ relay with the most ways into it.
   live tunnel. This is G5, and the reason `RescanBetweenMatchesAsync` skips the current relay today.
 - **Never measure another way into a relay in use by handshake** - that is DoorProbes' `Probe` (0x8),
   which relayd answers without moving anything.
-- **`ProbeGameServerAsync` has one slot.** The in-game ping loop and the planner would contend; the slot
-  becomes a small table (4) keyed by id and sequence.
+- **`ProbeGameServerAsync` had one slot.** The in-game ping loop and the planner contended; it is a table of
+  4 now, each echo matched by its own id and sequence (D2).
 - **Median of 8, 6 answered**, the same instrument on every path compared. Connect's best-of-3 stays
   where it is (choosing home) and is never compared with a median.
 - **Landmarks are never routed.** SDR games (`landmarksRouted`) are the exception, and they are off
@@ -337,17 +353,20 @@ every tunnel:
 
 ### 5.8 What follows the active tunnel
 
-The active tunnel is the one that carried the most game UDP in the last second (summed from the
-per-tunnel `GameServerTally`s, which now sit behind the dispatcher).
+The active tunnel ("carrier", `MatchCarrier`) is read from the per-tunnel `GameServerTally` UDP counts once a
+second: home until another tunnel carries at least 5 game packets a second for 3 s and more than the carrier.
+It is sticky on purpose - "the busiest in the last second" would hand a stall on the carrier to home, and a
+stall is what the spike recorder is there to record. It goes back to home after 60 s of nothing, or at once
+when its tunnel closes.
 
 | Today reads `_tunnel` for | Now |
 |---|---|
-| In-game ping (`ProbeGamePingAsync`) | the active tunnel's primary destination; a direct match is measured by plain ICMP over the physical line |
-| Spike recorder, match summary | the active tunnel; a match played direct records "direct" and no relay |
-| Entry switching (door probes, policy, `MoveToDoor`) | the active tunnel's relay; the others keep their door |
+| In-game ping (`ProbeGamePingAsync`) | the active tunnel's primary destination; a direct match is measured by plain ICMP over the physical line (direct not built) |
+| Spike recorder, match summary | the active tunnel; records say `"carried": "home"/"other"` while region routing is in force; a match played direct would record "direct" and no relay |
+| Entry switching (door probes, policy, `MoveToDoor`) | home's relay only, as in D1: another relay is recorded without ways in and never moved |
 | `MatchGap` / rescans | game UDP summed over all tunnels |
 | Discovery gating (`GameDestinationRecorder`) | summed over all tunnels - a direct match turns ETW on, which is right: its destinations are inside profile ranges and are not reported |
-| Status to the UI | `RelayName` is the active tunnel's (home when idle); a new `Paths` list names each region's path |
+| Status to the UI | `RelayName`, pings and loss are the active tunnel's (home when idle); `homeRelayName` and `regionPaths` name home and each region's own relay; packet counters sum every tunnel |
 | Throughput log | one line per tunnel |
 
 ### 5.9 Faults inside the dispatcher

@@ -541,7 +541,35 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             if (!Set(ref _relayName, value)) return;
             Raise(nameof(RelayText));
+            Raise(nameof(RelayTip));
             Raise(nameof(GamePingTip));
+        }
+    }
+
+    private string? _homeRelayName;
+
+    /// <summary>
+    /// The relay the connection started on, while region routing sends some regions elsewhere - then
+    /// <see cref="RelayName"/> is the relay carrying the match, which may be another. Null with one tunnel.
+    /// </summary>
+    public string? HomeRelayName
+    {
+        get => _homeRelayName;
+        private set
+        {
+            if (Set(ref _homeRelayName, value)) Raise(nameof(RelayTip));
+        }
+    }
+
+    private string _regionPaths = "";
+
+    /// <summary>Each region leaving by another relay, as "region → relay" joined for the tooltip. Empty with one tunnel.</summary>
+    public string RegionPaths
+    {
+        get => _regionPaths;
+        private set
+        {
+            if (Set(ref _regionPaths, value)) Raise(nameof(RelayTip));
         }
     }
 
@@ -711,6 +739,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string PingText => PingMs is { } p ? Loc.F("value.ms", $"{p:F0}") : Loc.T("value.none");
     public string LossText => LossRatio is { } l ? $"{l * 100:F1}%" : Loc.T("value.none");
     public string RelayText => RelayName ?? Loc.T("value.none");
+
+    /// <summary>
+    /// The relay line in full, and - while some regions leave by their own relay - which ones, and whether the
+    /// match on now is on one of them. The line itself stays one name: the relay carrying the match.
+    /// </summary>
+    public string RelayTip => HomeRelayName is not { } home || RegionPaths.Length == 0 || RelayName is null
+        ? RelayText
+        : RelayName == home
+            ? Loc.F("relay.tip.regionsHome", home, RegionPaths)
+            : Loc.F("relay.tip.regionsMatch", RelayName, home, RegionPaths);
     public string RouteText => ActiveRoutes > 0 ? Loc.F("value.ranges", ActiveRoutes) : Loc.T("value.none");
 
     /// <summary>
@@ -1076,6 +1114,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         GameName = status.GameName;
         GameCount = status.GameCount;
         RelayName = status.RelayName;
+        HomeRelayName = status.HomeRelayName;
+        RegionPaths = status.RegionPaths is { Count: > 0 } paths
+            ? string.Join("; ", paths.Select(p => $"{p.Region} → {p.RelayName}"))
+            : "";
         RelayEndpoints = status.RelayEndpoints;
         Configured = status.Configured;
         LicenceUrl = status.LicenceUrl;
@@ -1111,6 +1153,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         GameRegionName = null;
         LossRatio = null;
         ActiveRoutes = 0;
+        HomeRelayName = null;
+        RegionPaths = "";
 
         // Cleared here and NOT on an ordinary disconnect. This method runs when the pipe itself
         // dropped, which means the service is gone - and the service going takes the name policy

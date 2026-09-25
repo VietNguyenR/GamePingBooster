@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Net;
+using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Paths;
 using GamePingBooster.Core.Profiles;
 
@@ -240,6 +241,7 @@ internal sealed partial class TunnelEngine
 
         _pump?.SetDispatcher(null);
         _paths = null;
+        _otherPath = null;
         foreach (var other in others)
         {
             paths?.Remove(other.Client);
@@ -271,6 +273,7 @@ internal sealed partial class TunnelEngine
         {
             if (_otherTunnels.TryGetValue(other.RelayId, out var current) && ReferenceEquals(current, other)) _otherTunnels.Remove(other.RelayId);
         }
+        if (_otherPath is { } path && ReferenceEquals(path.Tunnel, other.Client)) _otherPath = null;
         if (announce) other.Client.Dispose();
         else Abandon(other.Client);
     }
@@ -299,6 +302,102 @@ internal sealed partial class TunnelEngine
     }
 
     // ------------------------------------------------------------ which tunnel carries the match
+
+    /// <summary>
+    /// Which tunnel is carrying the match (5.8). A new one per connection, updated once a second by the in-game ping
+    /// loop - the only reader of it that needs to act on a change - and read by the recorder and the status.
+    /// </summary>
+    private volatile MatchCarrier<TunnelClient> _carrier = new();
+
+    /// <summary>
+    /// The second-leg measurement of the match region through a tunnel other than home, for the estimate while the
+    /// match is on it. Home's is <see cref="_path"/>, which it never overwrites: that one is home's, measured at
+    /// connect, and a match on another relay says nothing about it.
+    /// </summary>
+    private volatile OtherPath? _otherPath;
+
+    private sealed record OtherPath(TunnelClient Tunnel, PathMeasurement Path);
+
+    /// <summary>The tunnel carrying the match, the way into the relay it is on, and whether it is home.</summary>
+    private readonly record struct Carrying(TunnelClient? Tunnel, RelayEntry? Relay, bool IsHome);
+
+    /// <summary>
+    /// What the in-game ping, the recorder and the status follow: the carrier when it is another tunnel still open,
+    /// otherwise home - which is also the answer whenever region routing is not in force.
+    /// </summary>
+    private Carrying CarryingNow()
+    {
+        var home = _tunnel;
+        if (_carrier.Current is { } carrier && !ReferenceEquals(carrier, home) && OtherTunnelOf(carrier) is { } other)
+        {
+            return new Carrying(other.Client, other.Way, IsHome: false);
+        }
+        return new Carrying(home, _relay, IsHome: true);
+    }
+
+    /// <summary>
+    /// One reading for <see cref="_carrier"/>: every open tunnel's game UDP. Returns the carrier. In-game ping loop only.
+    /// </summary>
+    private TunnelClient UpdateCarrier(TunnelClient home)
+    {
+        List<(TunnelClient, long)> others;
+        lock (_otherTunnels) others = [.. _otherTunnels.Values.Select(o => (o.Client, o.Client.Destinations.UdpPackets))];
+        return _carrier.Update(Environment.TickCount64, home, home.Destinations.UdpPackets, others);
+    }
+
+    private List<TunnelClient> OtherTunnelsNow()
+    {
+        lock (_otherTunnels) return [.. _otherTunnels.Values.Select(o => o.Client)];
+    }
+
+    private OtherTunnel? OtherTunnelOf(TunnelClient client)
+    {
+        lock (_otherTunnels) return _otherTunnels.Values.FirstOrDefault(o => ReferenceEquals(o.Client, client));
+    }
+
+    /// <summary>The second-leg measurement through <paramref name="tunnel"/>: home's own, or the other tunnel's.</summary>
+    private PathMeasurement? PathFor(TunnelClient? tunnel) =>
+        tunnel is null ? null
+        : ReferenceEquals(tunnel, _tunnel) ? _path
+        : _otherPath is { } other && ReferenceEquals(other.Tunnel, tunnel) ? other.Path
+        : null;
+
+    private void SetPathFor(TunnelClient tunnel, PathMeasurement path)
+    {
+        if (ReferenceEquals(tunnel, _tunnel)) _path = path;
+        else _otherPath = new OtherPath(tunnel, path);
+    }
+
+    /// <summary>How the log names a tunnel: the relay and the way into it, and "home" for home.</summary>
+    private string TunnelLabel(TunnelClient tunnel) =>
+        ReferenceEquals(tunnel, _tunnel)
+            ? _relay is { } r ? $"{r.Name} [{r.Id}] (home)" : "home"
+            : NameOf(tunnel);
+
+    /// <summary>
+    /// Each region that leaves by another relay, and that relay, for the app - nothing while region routing is not
+    /// in force or every region is on home.
+    /// </summary>
+    private List<RegionPathStatus>? RegionPathsForStatus()
+    {
+        var paths = _paths;
+        var game = _game;
+        if (paths is null || game is null) return null;
+
+        var plan = paths.Plan;
+        var list = new List<RegionPathStatus>();
+        for (var i = 0; i < plan.Length; i++)
+        {
+            if (plan[i] is not { } tunnel || OtherTunnelOf(tunnel) is not { } other) continue;
+            var regionId = paths.Table.RegionIdAt(i);
+            list.Add(new RegionPathStatus
+            {
+                Region = game.Regions.FirstOrDefault(r => r.Id == regionId)?.Name ?? regionId,
+                RelayName = other.Way.Name,
+            });
+        }
+        return list.Count == 0 ? null : list;
+    }
 
     /// <summary>Game UDP each tunnel had carried at the last pass. Supervisor only.</summary>
     private readonly Dictionary<TunnelClient, long> _udpAtLastPass = new(ReferenceEqualityComparer.Instance);

@@ -339,7 +339,7 @@ internal sealed partial class TunnelEngine
                     d.Path.ToString(),
                     d.ChosenMs,
                     d.Reason)).ToList());
-            recorder.WriteRegionPlan(record, recorder.CurrentMeta());
+            recorder.WriteRegionPlan(record, recorder.CurrentMeta(SpikeContext(home: true)));
         }
         return true;
     }

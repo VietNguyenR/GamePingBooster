@@ -98,15 +98,18 @@ internal sealed class TunnelClient : IDisposable
     private long _lastDownUdpAt, _maxDownGap, _downUdpPackets;
 
     /// <summary>
-    /// The echo currently in flight through the live tunnel, or null when none is.
+    /// The echoes in flight through the live tunnel, a few slots, each null when free.
     ///
-    /// One slot, not a dictionary: probes are sent one at a time and time out well inside their
-    /// own interval, so there is never a second one outstanding. The downlink thread reads this
-    /// field for every packet it carries, and a hashtable lookup on the packet path to hold at
-    /// most one entry would be cost for nothing.
+    /// It was one slot, when the in-game ping loop was the only caller. Now the region planner measures
+    /// through a live tunnel too, and the in-game ping follows whichever tunnel carries the match - a
+    /// second caller on one slot got null, which read as "no answer through this tunnel" (MULTI-TUNNEL.md
+    /// 5.6). Four, because there are at most two callers and each has one echo out at a time. Still no
+    /// dictionary: the downlink thread looks at these only while <see cref="_probesInFlight"/> says one
+    /// is out, and then at four references.
     /// </summary>
-    private volatile PendingProbe? _pendingProbe;
-    private ushort _probeSequence;
+    private readonly PendingProbe?[] _pendingProbes = new PendingProbe?[4];
+    private int _probesInFlight;
+    private int _probeSequence;
 
     private sealed class PendingProbe
     {
@@ -521,10 +524,9 @@ internal sealed class TunnelClient : IDisposable
     {
         var socket = _socket;
         if (socket is null || _sessionId == 0) return null;
-        if (_pendingProbe is not null) return null;   // one at a time; the caller is a timer
 
         var id = (ushort)Random.Shared.Next(1, ushort.MaxValue);
-        var sequence = unchecked(++_probeSequence);
+        var sequence = unchecked((ushort)Interlocked.Increment(ref _probeSequence));
 
         var inner = new byte[GpbProtocol.MaxPacketLen];
         var wire = new byte[GpbProtocol.MaxPacketLen];
@@ -538,7 +540,13 @@ internal sealed class TunnelClient : IDisposable
             Sequence = sequence,
             SentTicks = _clock.ElapsedTicks,
         };
-        _pendingProbe = probe;
+        int slot;
+        for (slot = 0; slot < _pendingProbes.Length; slot++)
+        {
+            if (Interlocked.CompareExchange(ref _pendingProbes[slot], probe, null) is null) break;
+        }
+        if (slot == _pendingProbes.Length) return null;   // every slot taken: a caller out of step, not an answer
+        Interlocked.Increment(ref _probesInFlight);
 
         try
         {
@@ -563,8 +571,23 @@ internal sealed class TunnelClient : IDisposable
             // Always clear the slot, including on the timeout path. Leaving a dead probe in place
             // would make the downlink thread keep testing every packet against it and would block
             // every later probe, which fails closed to "the game server never answers".
-            _pendingProbe = null;
+            Volatile.Write(ref _pendingProbes[slot], null);
+            Interlocked.Decrement(ref _probesInFlight);
         }
+    }
+
+    /// <summary>Downlink thread: completes the probe <paramref name="ip"/> answers, if it answers one.</summary>
+    private bool TryCompleteProbe(ReadOnlySpan<byte> ip)
+    {
+        for (var slot = 0; slot < _pendingProbes.Length; slot++)
+        {
+            var pending = Volatile.Read(ref _pendingProbes[slot]);
+            if (pending is null || !IcmpEcho.IsReplyTo(ip, pending.Target, pending.Id, pending.Sequence)) continue;
+            var rtt = (_clock.ElapsedTicks - pending.SentTicks) * 1000.0 / Stopwatch.Frequency;
+            pending.Completion.TrySetResult(rtt);
+            return true;
+        }
+        return false;
     }
 
     /// <summary>
@@ -696,14 +719,7 @@ internal sealed class TunnelClient : IDisposable
                             // The check costs a few length tests and a protocol byte compare, and
                             // only while a probe is in flight, which is a fraction of a second
                             // once a second. Everything else falls through untouched.
-                            var pending = _pendingProbe;
-                            if (pending is not null &&
-                                IcmpEcho.IsReplyTo(ip, pending.Target, pending.Id, pending.Sequence))
-                            {
-                                var rtt = (_clock.ElapsedTicks - pending.SentTicks) * 1000.0 / Stopwatch.Frequency;
-                                pending.Completion.TrySetResult(rtt);
-                                break;
-                            }
+                            if (Volatile.Read(ref _probesInFlight) > 0 && TryCompleteProbe(ip)) break;
 
                             // The spike recorder's echoes, consumed for the same reason as the probe
                             // above. Tested on the protocol byte first, so the game's UDP never pays

@@ -64,6 +64,17 @@ internal static partial class Program
         var golden = File.Exists(path) ? File.ReadAllText(path).Replace("\r\n", "\n") : null;
         Check($"the record is exactly {RegionPlanGolden}", golden == json,
             golden is null ? "the file is missing - run with GPB_WRITE_GOLDEN=1" : "it differs - rerun with GPB_WRITE_GOLDEN=1 if the change is meant, and update the licence server's parser");
+
+        // Which tunnel carried a match (5.8) is said only while region routing is in force; a record from one tunnel
+        // is unchanged - the golden above has no such field.
+        var carried = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(carried))
+        {
+            QualityFile.WriteRegionPlanJson(writer, "00000000000000000000000000000000", record, meta with { Carried = "other" });
+        }
+        var carriedJson = Encoding.UTF8.GetString(carried.ToArray());
+        Check("\"carried\" is written when set, and absent when not",
+            carriedJson.Contains("\"carried\":\"other\"") && !json.Contains("carried"), carriedJson);
         return Task.CompletedTask;
     }
 

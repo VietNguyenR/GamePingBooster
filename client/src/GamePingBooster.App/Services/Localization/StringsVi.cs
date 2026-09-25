@@ -87,6 +87,8 @@ internal static class StringsVi
         ["relay.withPing"] = "{0} - {1} ms",
         ["relay.noAnswer"] = "{0} - không phản hồi",
         ["relay.notForGame"] = "{0} - không dùng cho {1}",
+        ["relay.tip.regionsHome"] = "{0} - relay bạn đang kết nối. Trận ở một số khu vực đi qua relay riêng, nhanh hơn: {1}.",
+        ["relay.tip.regionsMatch"] = "Trận này đi qua {0}, relay nhanh hơn cho khu vực của nó. Mọi thứ khác đi qua {1}. Theo khu vực: {2}.",
 
         ["licence.renewing"] =
             "Đang gia hạn giấy phép... Nếu gói của bạn đã hết, gia hạn trên website là app tự nhận.",

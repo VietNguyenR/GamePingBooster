@@ -79,6 +79,17 @@ internal static partial class Program
         Check("An echo through the live tunnel is answered, and its reply is consumed - never handed to Windows",
             rtt is not null && rig.Device.ToWindows.Count == before,
             $"rtt {rtt?.ToString("F1") ?? "none"}, {rig.Device.ToWindows.Count - before} extra packets reached Windows");
+
+        // The in-game ping and the region planner can each have an echo out through one tunnel at the same moment
+        // (MULTI-TUNNEL.md 5.6). With one slot the second came back null - "no answer through this tunnel".
+        var together = await Task.WhenAll(
+            tunnel.ProbeGameServerAsync(new IPAddress([43, 132, 208, 47]), 800, rig.Cts.Token),
+            tunnel.ProbeGameServerAsync(new IPAddress([34, 146, 241, 71]), 800, rig.Cts.Token),
+            tunnel.ProbeGameServerAsync(new IPAddress([43, 132, 208, 47]), 800, rig.Cts.Token));
+        await Task.Delay(100);
+        Check("Three echoes out at once through one tunnel are each answered, and none reaches Windows",
+            together.All(r => r is not null) && rig.Device.ToWindows.Count == before,
+            $"answered {together.Count(r => r is not null)} of 3, {rig.Device.ToWindows.Count - before} reached Windows");
     }
 
     private static async Task KeepaliveFindsTheRelay()

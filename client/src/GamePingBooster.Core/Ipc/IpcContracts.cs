@@ -199,6 +199,13 @@ public sealed class RelayOption
     [JsonPropertyName("notForGame")] public string? NotForGame { get; set; }
 }
 
+/// <summary>One region leaving by a relay other than home: the region's display name and the relay's.</summary>
+public sealed class RegionPathStatus
+{
+    [JsonPropertyName("region")] public string Region { get; set; } = "";
+    [JsonPropertyName("relayName")] public string RelayName { get; set; } = "";
+}
+
 /// <summary>State the service pushes up to the UI (on request, and on every change).</summary>
 public sealed class StatusMessage
 {
@@ -251,6 +258,18 @@ public sealed class StatusMessage
     /// and those stay where they are.
     /// </summary>
     [JsonPropertyName("relayAddress")] public string? RelayAddress { get; set; }
+
+    /// <summary>
+    /// With region routing in force (docs/MULTI-TUNNEL.md), <see cref="RelayId"/>, <see cref="RelayName"/>,
+    /// <see cref="RelayAddress"/>, the pings and the loss are those of the tunnel carrying the match - home, the
+    /// relay the connection started on, when no match is on another one. This is home's name, and
+    /// <see cref="RegionPaths"/> the regions that leave by another relay. Both null with one tunnel, which is
+    /// every connection until region routing is turned on. Additive: an older UI ignores them.
+    /// </summary>
+    [JsonPropertyName("homeRelayName")] public string? HomeRelayName { get; set; }
+
+    /// <summary>Each region that leaves by a relay other than home, and that relay. See <see cref="HomeRelayName"/>.</summary>
+    [JsonPropertyName("regionPaths")] public List<RegionPathStatus>? RegionPaths { get; set; }
 
     /// <summary>False until a relay and a key have been configured. Drives the first-run prompt.</summary>
     [JsonPropertyName("configured")] public bool Configured { get; set; }

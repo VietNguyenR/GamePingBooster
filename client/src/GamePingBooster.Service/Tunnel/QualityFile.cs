@@ -4,14 +4,19 @@ using GamePingBooster.Core.Quality;
 
 namespace GamePingBooster.Service.Tunnel;
 
-/// <summary>What a record says about the session it came from. No addresses, by construction.</summary>
+/// <summary>
+/// What a record says about the session it came from. No addresses, by construction. <paramref name="Carried"/> is
+/// set only while region routing is in force: "home" when the tunnel the connection started on carried it, "other"
+/// when a region's own relay did (docs/MULTI-TUNNEL.md 5.8) - <paramref name="RelayId"/> is that relay either way.
+/// </summary>
 internal readonly record struct QualityMeta(
     string? AppVersion,
     string? GameId,
     string? RelayId,
     string? EntryId,
     string? RegionName,
-    string? LinkType);
+    string? LinkType,
+    string? Carried = null);
 
 /// <summary>
 /// A move to another relay between matches and how the next match went, for <see cref="QualityFile.WriteRelayMove"/>.
@@ -412,6 +417,8 @@ internal sealed class QualityFile(Action<string> log)
         String(w, "entry", meta.EntryId);
         String(w, "region", meta.RegionName);
         String(w, "link", meta.LinkType);
+        // Absent, not null, with one tunnel: every record from a connection without region routing stays as it was.
+        if (meta.Carried is { } carried) w.WriteString("carried", carried);
     }
 
     /// <summary>

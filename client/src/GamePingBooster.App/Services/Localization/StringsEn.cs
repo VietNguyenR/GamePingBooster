@@ -87,6 +87,8 @@ internal static class StringsEn
         ["relay.withPing"] = "{0} - {1} ms",
         ["relay.noAnswer"] = "{0} - no answer",
         ["relay.notForGame"] = "{0} - not used for {1}",
+        ["relay.tip.regionsHome"] = "{0} - the relay you are connected to. Matches in some regions go through their own, faster relay: {1}.",
+        ["relay.tip.regionsMatch"] = "This match goes through {0}, the faster relay for its region. Everything else goes through {1}. By region: {2}.",
 
         ["licence.renewing"] =
             "Renewing the licence... If your plan has ended, renew it on the website and it is picked up here.",
