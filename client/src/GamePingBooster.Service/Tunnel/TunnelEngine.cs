@@ -1670,6 +1670,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                 var tunnel = _tunnel;
                 if (tunnel is null) continue;
 
+                if (Interlocked.Exchange(ref _multiTunnelResetReason, null) is { } resetFor) TearDownMultiTunnel(resetFor, readdress: true);
+
                 LogThroughput(tunnel);
 
                 if (IdleForTooLong())
@@ -1706,6 +1708,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     // After the rescan, never beside it: both handshake other relays, and two handshakes to one
                     // relay fight over its session. Picks up whichever tunnel the rescan left.
                     if (_tunnel is { } current) await PlanRegionsIfDueAsync(current, ct).ConfigureAwait(false);
+                    SuperviseOtherTunnels();
+                    if (_tunnel is { } carrying) AnnounceMatchServer(carrying);
                     continue;
                 }
                 _pendingDoorMove = null;
@@ -2347,6 +2351,25 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         _tunnel = null;
         ResetThroughputBaseline();
 
+        // Several tunnels: only home is being replaced. What was on it goes to the player's own line with the routes
+        // below; servers in use on the other tunnels keep their exit through /32s into the adapter (G1, 5.7), and
+        // the pump keeps reading for them.
+        var paths = _paths;
+        paths?.LoseHome();
+        if (paths is not null && routes.ActiveGameRouteCount > 0)
+        {
+            try
+            {
+                var stuck = paths.StuckOffHome().Select(ToAddress).ToList();
+                routes.PinStuckDestinations(adapter.InterfaceIndex, stuck);
+                if (stuck.Count > 0) _log($"Home is down - {stuck.Count} server(s) in use on other tunnels keep them while it reconnects.");
+            }
+            catch (Exception ex)
+            {
+                _log($"Could not keep the servers in use on other tunnels on them ({ex.Message}).");
+            }
+        }
+
         // Fall back to the direct path before the first handshake, not after a few failures.
         // There is no such thing as a fast recovery here - the supervisor already waited 15
         // seconds of silence before calling us - so there is no quick success worth protecting
@@ -2369,6 +2392,14 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         }
 
         var candidates = FailoverOrder(previous);
+
+        // Never a relay another tunnel is on: a handshake to it would move that tunnel's session here and silence it
+        // (G5), taking its matches with it. Only when no other relay is left does home try one of those.
+        if (paths is not null)
+        {
+            var free = candidates.Where(r => OtherTunnelTo(RelayPaths.RelayIdOf(r)) is null).ToList();
+            if (free.Count > 0) candidates = free;
+        }
         var delay = TimeSpan.FromSeconds(2);
 
         // Which relay the pinned /32 currently points at. This is NOT the same question as
@@ -2440,6 +2471,13 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                               "the previous relay had. Convenient - the adapter needs no change - but it is " +
                               "the two address pools coinciding, not a resumed session.");
                     }
+                    else if (_paths is not null)
+                    {
+                        // Re-addressing would break every flow on the other tunnels whose socket is bound to the
+                        // adapter's address (5.2). The dispatcher rewrites for the new home instead.
+                        _log($"Got a different inner IP ({session.ClientIp}) - the adapter keeps its address and the " +
+                             "new tunnel rewrites, because other tunnels are carrying traffic.");
+                    }
                     else
                     {
                         _log($"Got a different inner IP ({session.ClientIp}) - reconfiguring the adapter.");
@@ -2454,6 +2492,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     }
 
                     StartTunnel(client, ct);
+                    routes.UnpinStuckDestinations(adapter.InterfaceIndex);
                     _error = null;
                     SetState(TunnelState.Connected,
                         new StatusText("svc.reconnected", $"Reconnected to {relay.Name}", relay.Name));
@@ -2777,6 +2816,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         // below, and gone before the tunnel it sends on is disposed.
         _pump?.Dispose();
         _pump = null;
+        TearDownMultiTunnel("disconnected", readdress: false);
         _tunnel?.Dispose();
         _tunnel = null;
         phases?.Mark("tunnel");
@@ -2816,6 +2856,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         // is inside the ring on every packet - and neither may be left running for the next connect.
         _pump?.Dispose();
         _pump = null;
+        TearDownMultiTunnel("disconnected", readdress: false);
         _tunnel?.Dispose();
         _tunnel = null;
 
@@ -2848,7 +2889,13 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     private void StartTunnel(TunnelClient tunnel, CancellationToken ct)
     {
         var adapter = _adapter ?? throw new InvalidOperationException("There is no virtual adapter to pump.");
+
+        // Several tunnels: the new home rewrites to the adapter's fixed address from its first packet, and what
+        // was on the old home is on this one now. Before the pump points at it, so nothing slips past either.
+        var paths = _paths;
+        if (paths is not null) tunnel.Dispatcher = paths;
         tunnel.StartPumping(adapter, ct);
+        paths?.ReplaceHome(tunnel);
 
         if (_pump is null)
         {
@@ -3262,6 +3309,10 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             _routes!.RemoveGameRoutes(_adapter.InterfaceIndex);
         }
         _game = game;
+
+        // The other tunnels were planned for the previous game's regions. The supervisor closes them before anything
+        // else it does, and before a move to a relay that carries this game.
+        if (_paths is not null) Volatile.Write(ref _multiTunnelResetReason, $"{game.Name} started");
 
         // Both belonged to the previous game's server. The probe loop measures the new one within a
         // second of its first packet.

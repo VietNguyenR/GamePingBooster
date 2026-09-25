@@ -66,6 +66,45 @@ public sealed class StickyDestinations<TTunnel> where TTunnel : class
     }
 
     /// <summary>
+    /// <see cref="Resolve(uint, long, Func{TTunnel})"/> without a closure: the uplink calls this for every packet,
+    /// and a lambda capturing the destination would allocate each time.
+    /// </summary>
+    public TTunnel? Resolve<TState>(uint destination, long nowMs, TState state, Func<TState, uint, TTunnel?> planned)
+    {
+        lock (_gate)
+        {
+            if (_entries.TryGetValue(destination, out var entry))
+            {
+                if (nowMs - entry.LastMs <= _stickyForMs)
+                {
+                    entry.LastMs = nowMs;
+                    return entry.Tunnel;
+                }
+                _entries.Remove(destination);
+            }
+
+            var tunnel = planned(state, destination);
+            if (tunnel is not null) _entries[destination] = new Entry(tunnel, nowMs);
+            return tunnel;
+        }
+    }
+
+    /// <summary>
+    /// Moves every destination stuck to <paramref name="from"/> onto <paramref name="to"/>, keeping when each was
+    /// last used. For the home tunnel being replaced by a reconnect: what was on home stays on home, whichever
+    /// tunnel home now is - exactly what a reconnect has always done with every destination. Returns how many.
+    /// </summary>
+    public int Retarget(TTunnel from, TTunnel to)
+    {
+        lock (_gate)
+        {
+            var moved = _entries.Where(e => ReferenceEquals(e.Value.Tunnel, from)).ToList();
+            foreach (var (key, entry) in moved) _entries[key] = new Entry(to, entry.LastMs);
+            return moved.Count;
+        }
+    }
+
+    /// <summary>
     /// A packet FROM <paramref name="source"/> came back through <paramref name="tunnel"/>. Keeps a flow
     /// that is quiet one way stuck, and never sticks anything new: only the uplink decides where a
     /// destination goes.
@@ -108,6 +147,15 @@ public sealed class StickyDestinations<TTunnel> where TTunnel : class
         lock (_gate)
         {
             return [.. _entries.Where(e => nowMs - e.Value.LastMs <= _stickyForMs && match(e.Key)).Select(e => e.Key)];
+        }
+    }
+
+    /// <summary>Every destination stuck right now, with its tunnel.</summary>
+    public List<(uint Destination, TTunnel Tunnel)> Snapshot(long nowMs)
+    {
+        lock (_gate)
+        {
+            return [.. _entries.Where(e => nowMs - e.Value.LastMs <= _stickyForMs).Select(e => (e.Key, e.Value.Tunnel))];
         }
     }
 

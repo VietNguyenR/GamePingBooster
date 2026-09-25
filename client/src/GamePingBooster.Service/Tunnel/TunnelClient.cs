@@ -49,6 +49,12 @@ internal sealed class TunnelClient : IDisposable
     /// <summary>Cached from the session so the uplink filter does not recompute it per packet.</summary>
     private uint _subnetBroadcast;
 
+    /// <summary>The session's inner address, host order; 0 before the handshake. Read per packet by the dispatcher.</summary>
+    private uint _innerIp;
+
+    /// <summary>Set while several tunnels share the adapter. See <see cref="Dispatcher"/>.</summary>
+    private volatile PathDispatcher? _dispatcher;
+
     private readonly Stopwatch _clock = Stopwatch.StartNew();
 
     // Counters read from other threads, hence Interlocked.
@@ -210,6 +216,20 @@ internal sealed class TunnelClient : IDisposable
 
     public GpbProtocol.HandshakeResult Session { get; private set; }
 
+    /// <summary><see cref="Session"/>'s inner address, host order; 0 before the handshake.</summary>
+    internal uint InnerIp => _innerIp;
+
+    /// <summary>
+    /// The multi-tunnel dispatcher, or null for one tunnel. Set, every packet from the relay is handed to it
+    /// before Windows sees it - it keeps the flow stuck to this tunnel and gives the packet the adapter's address
+    /// (<see cref="PathDispatcher.OnDownlink"/>). Null is the single-tunnel path exactly as it was.
+    /// </summary>
+    internal PathDispatcher? Dispatcher
+    {
+        get => _dispatcher;
+        set => _dispatcher = value;
+    }
+
     public TunnelClient(IPEndPoint relayEndpoint, TunnelAuth auth, ulong clientId, Action<string> log)
     {
         _relayEndpoint = relayEndpoint;
@@ -279,6 +299,7 @@ internal sealed class TunnelClient : IDisposable
 
                 _sessionId = result.SessionId;
                 Session = result;
+                _innerIp = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(result.ClientIp.GetAddressBytes());
                 _subnetBroadcast = UplinkFilter.SubnetBroadcastFor(result.ClientIp);
                 Volatile.Write(ref _lastHeardTicks, _clock.ElapsedTicks);
                 _log($"Handshake succeeded in {HandshakeRttMs:F0} ms. Tunnel IP: {result.ClientIp}, MTU {result.Mtu}");
@@ -698,6 +719,18 @@ internal sealed class TunnelClient : IDisposable
                             if (ip.Length >= IcmpEcho.Ipv4HeaderLen && ip[9] == 17)
                             {
                                 NoteCadence(ref _lastDownUdpAt, ref _maxDownGap, ref _downUdpPackets);
+                            }
+
+                            // Several tunnels: the adapter's address, and the flow kept on this tunnel.
+                            if (_dispatcher is { } dispatcher)
+                            {
+                                var writable = buffer.AsSpan(GpbProtocol.DataHeaderLen, ip.Length);
+                                if (!dispatcher.OnDownlink(this, writable))
+                                {
+                                    Interlocked.Increment(ref _dropDownlinkForeign);
+                                    break;
+                                }
+                                ip = writable;
                             }
 
                             if (_adapter!.SendPacket(ip))

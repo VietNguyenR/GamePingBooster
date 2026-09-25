@@ -9,6 +9,7 @@
   "entry": null,
   "region": "Ho Chi Minh City",
   "link": "wired",
+  "trigger": "after-match",
   "mode": "record",
   "modeSource": "the game\u0027s setting",
   "acted": false,

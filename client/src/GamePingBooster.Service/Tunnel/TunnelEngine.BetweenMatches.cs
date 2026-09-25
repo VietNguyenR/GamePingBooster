@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using GamePingBooster.Core.Ipc;
+using GamePingBooster.Core.Paths;
 using GamePingBooster.Core.Profiles;
 using GamePingBooster.Core.Quality;
 using GamePingBooster.Service.Network;
@@ -83,14 +84,26 @@ internal sealed partial class TunnelEngine
     {
         FollowRelayMove();
 
-        var due = _matchGap.Feed(NowMs(), tunnel.Destinations.UdpPackets, LastSentMs(tunnel));
+        // Every tunnel's game UDP, not only home's: a match on another relay is a match, and its end is a gap.
+        // With one tunnel this is home's count exactly, as it always was.
+        var due = _matchGap.Feed(NowMs(), AllGameUdpPackets(tunnel), LastSentAnyMs(tunnel));
         if (!due && _matchGap.DueInMs(NowMs()) is { } wait && wait < 5000)
         {
             await Task.Delay(TimeSpan.FromMilliseconds(wait), ct).ConfigureAwait(false);
             if (!ReferenceEquals(tunnel, _tunnel) || _state != TunnelState.Connected) return;
-            due = _matchGap.Feed(NowMs(), tunnel.Destinations.UdpPackets, LastSentMs(tunnel));
+            due = _matchGap.Feed(NowMs(), AllGameUdpPackets(tunnel), LastSentAnyMs(tunnel));
         }
-        if (due) await RescanBetweenMatchesAsync(tunnel, ct).ConfigureAwait(false);
+        if (!due) return;
+
+        // Region routing on: the regions are planned again, every relay for every region, instead of moving home for
+        // the one region connect guessed. See ReplanBetweenMatchesAsync.
+        if (_game is { } game && RegionRouting.Resolve(_config.RegionRouting, game.RegionRouting, game.LandmarksRouted).Mode ==
+            RegionRoutingMode.On)
+        {
+            await ReplanBetweenMatchesAsync(tunnel, game, ct).ConfigureAwait(false);
+            return;
+        }
+        await RescanBetweenMatchesAsync(tunnel, ct).ConfigureAwait(false);
     }
 
     /// <summary>Set when the game now running is one the relay in use does not carry. Read by the supervisor.</summary>
@@ -113,6 +126,11 @@ internal sealed partial class TunnelEngine
         var path = _path;
         if (current is null || profile is null || _routes is null) return;
         forGame |= !RelayPaths.Serves(current, _game?.Id);
+
+        // With region routing in force the planner has already compared every relay for every region, and moving
+        // home would replace the tunnel the other tunnels' servers were planned against. A move off a relay not
+        // used for the game only comes with a game change, which closes the other tunnels first.
+        if (!forGame && _paths is not null) return;
         if (!forGame && _config.RescanBetweenMatches == false) return;
 
         // A relay picked by hand is never left for another. Both moments count: the choice this tunnel was

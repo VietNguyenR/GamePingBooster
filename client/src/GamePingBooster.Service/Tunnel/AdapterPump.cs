@@ -30,6 +30,7 @@ internal sealed class AdapterPump : IDisposable
     private readonly ManualResetEventSlim _hasTarget = new(false);
     private Thread? _thread;
     private volatile TunnelClient? _home;
+    private volatile PathDispatcher? _dispatcher;
 
     /// <summary>Packets read while no tunnel was there to take them - a swap racing the read. Diagnostic.</summary>
     private long _droppedNoTarget;
@@ -58,9 +59,23 @@ internal sealed class AdapterPump : IDisposable
     public void SetHome(TunnelClient? tunnel)
     {
         _home = tunnel;
-        if (tunnel is null) _hasTarget.Reset();
+        if (tunnel is null && _dispatcher is null) _hasTarget.Reset();
         else _hasTarget.Set();
     }
+
+    /// <summary>
+    /// Several tunnels: every packet goes where <paramref name="dispatcher"/> says, instead of to <see cref="Home"/>.
+    /// Null is the one-tunnel path exactly as it was. While a dispatcher is set the ring is read even with no home -
+    /// a home reconnect must not stall a match on another tunnel - and packets for home are dropped meanwhile.
+    /// </summary>
+    public void SetDispatcher(PathDispatcher? dispatcher)
+    {
+        _dispatcher = dispatcher;
+        if (dispatcher is not null) _hasTarget.Set();
+        else if (_home is null) _hasTarget.Reset();
+    }
+
+    public PathDispatcher? Dispatcher => _dispatcher;
 
     public void Start()
     {
@@ -86,7 +101,7 @@ internal sealed class AdapterPump : IDisposable
             try
             {
                 // No target: leave the ring alone, so what Windows sends waits for the next tunnel.
-                if (_home is null)
+                if (_home is null && _dispatcher is null)
                 {
                     _hasTarget.Wait(250, ct);
                     continue;
@@ -102,6 +117,8 @@ internal sealed class AdapterPump : IDisposable
 
                 // Read again: a swap may have cleared it while the packet was being read.
                 var target = _home;
+                var dispatcher = _dispatcher;
+                if (len > 0 && dispatcher is not null) target = Dispatch(dispatcher, packet.AsSpan(0, len));
                 if (target is null)
                 {
                     Interlocked.Increment(ref _droppedNoTarget);
@@ -130,6 +147,25 @@ internal sealed class AdapterPump : IDisposable
                 _log($"Uplink thread error: {ex.Message}");
                 return;
             }
+        }
+    }
+
+    /// <summary>
+    /// The dispatcher's answer for one packet. A fault in it collapses it (docs/MULTI-TUNNEL.md 5.9) and costs this
+    /// one packet, which may be half rewritten; the next goes through the collapsed dispatcher.
+    /// </summary>
+    private TunnelClient? Dispatch(PathDispatcher dispatcher, Span<byte> packet)
+    {
+        try
+        {
+            return dispatcher.Route(packet);
+        }
+        catch (Exception ex)
+        {
+            dispatcher.Fault(ex);
+            _log($"Uplink: the multi-tunnel dispatcher failed ({ex.GetType().Name}: {ex.Message}) - every region goes " +
+                 "back to the home tunnel for the rest of this connection; destinations in use keep theirs.");
+            return null;
         }
     }
 
@@ -163,6 +199,7 @@ internal sealed class AdapterPump : IDisposable
     public void Dispose()
     {
         _home = null;
+        _dispatcher = null;
         _cts.Cancel();
         _hasTarget.Set();
 

@@ -36,9 +36,11 @@ internal sealed record RelayMoveRecord(
 /// One pass of the region planner, for <see cref="QualityFile.WriteRegionPlan"/>. <paramref name="Mode"/> is the
 /// resolved mode ("record" or "on") and <paramref name="Acted"/> whether the plan was applied - false for every
 /// record until multi-tunnel is wired. <paramref name="Stopped"/> says why a pass is incomplete, null when complete.
+/// <paramref name="Trigger"/> is "connect" for the pass in the lobby after a connect, "after-match" for one between matches.
 /// </summary>
 internal sealed record RegionPlanRecord(
     DateTimeOffset AtUtc,
+    string Trigger,
     string Mode,
     string ModeSource,
     bool Acted,
@@ -343,6 +345,7 @@ internal sealed class QualityFile(Action<string> log)
         w.WriteString("utc", plan.AtUtc);
         WriteMeta(w, meta);
 
+        w.WriteString("trigger", plan.Trigger);
         w.WriteString("mode", plan.Mode);
         w.WriteString("modeSource", plan.ModeSource);
         w.WriteBoolean("acted", plan.Acted);

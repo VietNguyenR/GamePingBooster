@@ -15,9 +15,9 @@ namespace GamePingBooster.Service.Tunnel;
 /// game (each way into it, the fastest kept). <see cref="RegionPlanner"/> turns the numbers into a path per
 /// region, and the plan goes into the log and the connection-quality record.
 ///
-/// In this version NOTHING IS MOVED, in either mode: the data plane has one tunnel. "on" is recorded as what it
-/// would have done, and says so. The pass exists to find out, from real players on real lines, how often a
-/// region would leave home and by how much - before a second tunnel carries a single packet.
+/// In "record" NOTHING IS MOVED: the pass exists to find out, from real players on real lines, how often a region
+/// would leave home and by how much. In "on" the plan is put in force by ApplyPlanAsync (TunnelEngine.MultiTunnel.cs),
+/// and a relay that already has a tunnel open is measured through it rather than handshaken.
 ///
 /// The measuring follows the rules every relay measurement here follows, each one learned the hard way:
 ///
@@ -59,8 +59,16 @@ internal sealed partial class TunnelEngine
     /// <summary>Consecutive supervisor passes under <see cref="LobbyPacketsPerSecond"/>. Supervisor only.</summary>
     private int _lobbyQuietPasses;
 
+    /// <summary>
+    /// The plan in force, for the next pass's hysteresis (planner rule 7): a region keeps its path unless another beats
+    /// it by the margin. Only for the same game and home - a plan made from another home compared other numbers.
+    /// Supervisor only.
+    /// </summary>
+    private (string GameId, string HomeRelayId, Dictionary<string, RegionPath> Paths)? _planInForce;
+
     private void ResetRegionPlanning()
     {
+        _planInForce = null;
         _regionPlanTries.Clear();
         _lobbyLast = null;
         _lobbyQuietPasses = 0;
@@ -89,7 +97,7 @@ internal sealed partial class TunnelEngine
 
         // The lobby: the game's UDP into the tunnel under the rate, over two passes in a row.
         var now = NowMs();
-        var packets = tunnel.Destinations.UdpPackets;
+        var packets = AllGameUdpPackets(tunnel);
         var last = _lobbyLast;
         _lobbyLast = (tunnel, now, packets);
         if (last is not { } previous || !ReferenceEquals(previous.Tunnel, tunnel) || now <= previous.AtMs)
@@ -105,7 +113,7 @@ internal sealed partial class TunnelEngine
         if (game.Regions.Count < 2 || !game.Regions.Any(r => FirstLandmark(r) is not null))
         {
             _regionPlanTries[key] = -1;
-            _log($"Region plan ({mode}, from {source}): {game.Name} has " +
+            _log($"Region plan ({mode.ToString().ToLowerInvariant()}, from {source}): {game.Name} has " +
                  (game.Regions.Count < 2 ? "one region" : "no region with a landmark") + " - nothing to plan.");
             return;
         }
@@ -125,11 +133,11 @@ internal sealed partial class TunnelEngine
     /// cut short, which is recorded as incomplete: a second try would only be cut short again.
     /// </summary>
     private async Task<bool> PlanRegionsAsync(TunnelClient tunnel, GameEntry game, RelayEntry home, ProfileBundle profile,
-        RegionRoutingMode mode, string source, CancellationToken ct)
+        RegionRoutingMode mode, string source, CancellationToken ct, string trigger = "connect")
     {
         var homeRelayId = RelayPaths.RelayIdOf(home);
         var started = Stopwatch.GetTimestamp();
-        var packetsAtStart = tunnel.Destinations.UdpPackets;
+        var packetsAtStart = AllGameUdpPackets(tunnel);
         var regions = game.Regions.Select(r => (Region: r, Landmark: FirstLandmark(r))).ToList();
         var measurable = regions.Where(r => r.Landmark is not null).Select(r => (r.Region, Landmark: r.Landmark!)).ToList();
 
@@ -139,12 +147,11 @@ internal sealed partial class TunnelEngine
         var viaWay = measurable.ToDictionary(r => r.Region.Id, _ => new Dictionary<string, string>(StringComparer.Ordinal), StringComparer.Ordinal);
         var relaysMeasured = new List<string>();
         string? stopped = null;
-        var retry = false;
+        var retry = false;   // only ever set to true, from any of the measuring tasks
 
-        _log($"Region plan ({mode}, from {source}): measuring {measurable.Count} of {regions.Count} regions of {game.Name} " +
+        _log($"Region plan ({mode.ToString().ToLowerInvariant()}, from {source}): measuring {measurable.Count} of {regions.Count} regions of {game.Name} " +
              $"through {home.Name} [{home.Id}], over your own line and through the other relays - the median of " +
-             $"{RescanScore.Samples} echoes each." +
-             (mode == RegionRoutingMode.On ? " This version records the plan and moves nothing." : ""));
+             $"{RescanScore.Samples} echoes each.");
 
         // Why the pass has to stop now, or null. A match loading and a quiet home tunnel are worth another try.
         string? Interrupted()
@@ -156,7 +163,7 @@ internal sealed partial class TunnelEngine
                 return $"{home.Name} has been quiet {tunnel.SinceLastHeard.TotalSeconds:F0} s";
             }
             var elapsed = Stopwatch.GetElapsedTime(started).TotalSeconds;
-            if (tunnel.Destinations.UdpPackets - packetsAtStart > 10 + LobbyPacketsPerSecond * elapsed)
+            if (AllGameUdpPackets(tunnel) - packetsAtStart > 10 + LobbyPacketsPerSecond * elapsed)
             {
                 retry = true;
                 return "the game started sending to a server - a match is loading";
@@ -169,85 +176,88 @@ internal sealed partial class TunnelEngine
         var token = budget.Token;
         try
         {
-            // Through home: the live tunnel, never a handshake (G5).
-            foreach (var (region, landmark) in measurable)
-            {
-                if ((stopped = Interrupted()) is not null) break;
-                homeMs[region.Id] = RescanScore.Median(await SampleLiveAsync(tunnel, landmark, token).ConfigureAwait(false));
-            }
 
-            // Over the player's own line. A landmark inside a routed range would be measured through the tunnel
-            // and called direct; the profile rules keep that from happening, and this keeps it from counting.
-            foreach (var (region, landmark) in measurable)
+            // Every other relay that carries the game, one way in at a time - and any this machine's config.json adds
+            // for region routing alone (ServiceConfig.RegionRoutingRelays), which can never become home.
+            var others = RelaysForGame(game)
+                .Where(r => r.ViaRelayId is null && !r.Id.Equals(homeRelayId, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            foreach (var id in _config.RegionRoutingRelays ?? [])
             {
-                if (stopped is not null || (stopped = Interrupted()) is not null) break;
-                if (IsRoutedIntoTunnel(landmark))
+                var extra = profile.Relays.FirstOrDefault(r => r.ViaRelayId is null && r.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
+                if (extra is null)
                 {
-                    directMs[region.Id] = null;
+                    _log($"  regionRoutingRelays names '{id}', which is not a relay in the profile - ignored.");
                     continue;
                 }
-                directMs[region.Id] = RescanScore.Median(await LandmarkProbe.SampleAsync(
-                    landmark, RescanScore.Samples, LiveSampleSpacing, ProbeTimeoutMs, token).ConfigureAwait(false));
+                if (extra.Id.Equals(homeRelayId, StringComparison.OrdinalIgnoreCase) || others.Contains(extra)) continue;
+                others.Add(extra);
+                _log($"  {extra.Name} [{extra.Id}] is measured too - regionRoutingRelays in config.json; it can carry a region, never home.");
             }
+            // In parallel across relays, in order within one: every way into ONE relay resumes the same session, so two
+            // at once would take it from each other (G5); two different relays share nothing. Each echo is a few dozen
+            // bytes, so six relays at once is a few dozen packets a second - nothing a line notices, in the lobby.
+            // Home and the player's own line alongside the relays: three paths that share nothing but the PC's uplink.
+            var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
+            var relayTasks = others.Select(relay => MeasureRelayForPlanAsync(relay, profile, measurable, psk, Interrupted, token)).ToList();
+            var homeTask = MeasureHomeAndDirectAsync();
+            var results = await Task.WhenAll(relayTasks).ConfigureAwait(false);
+            var homeStopped = await homeTask.ConfigureAwait(false);
 
             _log("  " + string.Join(", ", measurable.Select(r =>
                 $"{r.Region.Id}: home {Ms(homeMs.GetValueOrDefault(r.Region.Id))}, direct {Ms(directMs.GetValueOrDefault(r.Region.Id))}")));
 
-            // Every other relay that carries the game, one way in at a time.
-            var others = RelaysForGame(game)
-                .Where(r => r.ViaRelayId is null && !r.Id.Equals(homeRelayId, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-            var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
-            foreach (var relay in others)
+            // Through home: the live tunnel, never a handshake (G5). Over the player's own line: a landmark inside a
+            // routed range would be measured through the tunnel and called direct; the profile rules keep that from
+            // happening, and this keeps it from counting. Home and direct run side by side, each in order.
+            async Task<string?> MeasureHomeAndDirectAsync()
             {
-                if (stopped is not null) break;
-                TunnelClient? open = null;
+                async Task<string?> Home()
+                {
+                    foreach (var (region, landmark) in measurable)
+                    {
+                        if (Interrupted() is { } why) return why;
+                        var median = RescanScore.Median(await SampleLiveAsync(tunnel, landmark, token).ConfigureAwait(false));
+                        lock (homeMs) homeMs[region.Id] = median;
+                    }
+                    return null;
+                }
+                async Task<string?> Direct()
+                {
+                    foreach (var (region, landmark) in measurable)
+                    {
+                        if (Interrupted() is { } why) return why;
+                        double? median = IsRoutedIntoTunnel(landmark)
+                            ? null
+                            : RescanScore.Median(await LandmarkProbe.SampleAsync(
+                                landmark, RescanScore.Samples, LiveSampleSpacing, ProbeTimeoutMs, token).ConfigureAwait(false));
+                        lock (directMs) directMs[region.Id] = median;
+                    }
+                    return null;
+                }
                 try
                 {
-                    foreach (var way in RelayPaths.DoorsOf(profile.Relays, relay.Id))
-                    {
-                        if ((stopped = Interrupted()) is not null) break;
-                        if (IsRoutedIntoTunnel(way))
-                        {
-                            _log($"  {way.Name} [{way.Id}]: skipped - its address is inside a routed game range.");
-                            continue;
-                        }
-
-                        // The next way into this relay resumes the same session, so the last one goes quietly.
-                        Abandon(open);
-                        open = null;
-                        open = await HandshakeForPlanAsync(way, psk, token).ConfigureAwait(false);
-                        if (open is null) continue;
-
-                        var line = new List<string>();
-                        foreach (var (region, landmark) in measurable)
-                        {
-                            if ((stopped = Interrupted()) is not null) break;
-                            var samples = new List<double?>(RescanScore.Samples);
-                            for (var i = 0; i < RescanScore.Samples; i++)
-                            {
-                                samples.Add(await open.MeasureThroughTunnelAsync(landmark, attempts: 1, token).ConfigureAwait(false));
-                            }
-                            var median = RescanScore.Median(samples);
-                            line.Add($"{region.Id} {Ms(median)}");
-                            if (median is not { } ms) continue;
-                            if (!viaMs[region.Id].TryGetValue(relay.Id, out var kept) || ms < kept)
-                            {
-                                viaMs[region.Id][relay.Id] = ms;
-                                viaWay[region.Id][relay.Id] = way.Id;
-                            }
-                        }
-                        _log($"  {way.Name} [{way.Id}]: {string.Join(", ", line)}");
-                        if (!relaysMeasured.Contains(relay.Id, StringComparer.OrdinalIgnoreCase)) relaysMeasured.Add(relay.Id);
-                        if (stopped is not null) break;
-                    }
+                    var both = await Task.WhenAll(Home(), Direct()).ConfigureAwait(false);
+                    return both.FirstOrDefault(r => r is not null);
                 }
-                finally
+                catch (OperationCanceledException) when (token.IsCancellationRequested && !ct.IsCancellationRequested)
                 {
-                    // With a Disconnect: the relay's session goes back to its pool now rather than in 90 s.
-                    open?.Dispose();
+                    return null;   // the budget: counted below, with what was measured kept
                 }
             }
+
+            foreach (var result in results)
+            {
+                foreach (var line in result.Lines) _log(line);
+                if (result.Measured) relaysMeasured.Add(result.RelayId);
+                foreach (var (regionId, (ms, way)) in result.Best)
+                {
+                    viaMs[regionId][result.RelayId] = ms;
+                    viaWay[regionId][result.RelayId] = way;
+                }
+            }
+            stopped = homeStopped ?? results.Select(r => r.Stopped).FirstOrDefault(r => r is not null);
+            if (stopped is null && token.IsCancellationRequested) stopped = $"the {RegionPlanBudget.TotalSeconds:F0} s budget ran out";
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -272,24 +282,47 @@ internal sealed partial class TunnelEngine
             viaMs.TryGetValue(r.Region.Id, out var via) ? via : new Dictionary<string, double>(),
             directMs.GetValueOrDefault(r.Region.Id))).ToList();
         var order = profile.Relays.Where(r => r.ViaRelayId is null).Select(r => r.Id).ToList();
-        var plan = RegionPlanner.Plan(homeRelayId, measurements, new PlannerOptions(game.RegionDirect, RegionRouting.MaxTunnels, order));
+        var previous = _planInForce is { } inForce && inForce.GameId == game.Id &&
+                       inForce.HomeRelayId.Equals(homeRelayId, StringComparison.OrdinalIgnoreCase)
+            ? inForce.Paths
+            : null;
+        var plan = RegionPlanner.Plan(homeRelayId, measurements, new PlannerOptions(game.RegionDirect, RegionRouting.MaxTunnels, order), previous);
+        if (mode == RegionRoutingMode.On) plan = ForcedByConfig(plan, homeRelayId, profile, viaMs);
 
         var seconds = Stopwatch.GetElapsedTime(started).TotalSeconds;
         var leaving = plan.Where(d => d.Path.Kind != PathKind.Home).ToList();
         _log($"Region plan for {game.Name} from {home.Name} [{home.Id}], {seconds:F0} s" +
              (stopped is null ? "" : $", incomplete - {stopped}") + ":");
         foreach (var decision in plan) _log($"  {decision.RegionId} -> {decision.Path}: {decision.Reason}");
-        _log(leaving.Count == 0
-            ? "  Every region stays on home. Nothing was moved."
-            : $"  {leaving.Count} of {plan.Count} region(s) would leave home. Nothing was moved - this version records plans only.");
+
+        var acted = false;
+        if (mode == RegionRoutingMode.On)
+        {
+            try
+            {
+                acted = await ApplyPlanAsync(tunnel, game, plan, viaWay, profile, ct).ConfigureAwait(false);
+                if (acted) _planInForce = (game.Id, homeRelayId, plan.ToDictionary(d => d.RegionId, d => d.Path, StringComparer.Ordinal));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _log($"Region routing: the plan could not be put in force ({ex.Message}) - every region stays where it was.");
+            }
+        }
+        else
+        {
+            _log(leaving.Count == 0
+                ? "  Every region stays on home. Nothing was moved."
+                : $"  {leaving.Count} of {plan.Count} region(s) would leave home. Nothing was moved - region routing is on record.");
+        }
 
         if (_recorder is { } recorder)
         {
             var record = new RegionPlanRecord(
                 DateTimeOffset.UtcNow,
+                trigger,
                 mode.ToString().ToLowerInvariant(),
                 source,
-                Acted: false,
+                acted,
                 homeRelayId,
                 game.RegionDirect,
                 RegionRouting.MaxTunnels,
@@ -309,6 +342,166 @@ internal sealed partial class TunnelEngine
             recorder.WriteRegionPlan(record, recorder.CurrentMeta());
         }
         return true;
+    }
+
+    /// <summary>
+    /// A match just ended and region routing is on: the regions are planned again before the next one - the answer
+    /// to "the plan was measured once, at connect". Every relay for every region, relays with a tunnel open measured
+    /// through it, the previous plan kept unless something beats it by the margin (hysteresis). Nothing in use moves:
+    /// a server still talking keeps its tunnel whatever the new plan says, so applying it needs no timing guess.
+    ///
+    /// It replaces the between-matches rescan, which moved HOME for the one region connect guessed; with region
+    /// routing on, home stays and each region gets its own relay instead. If the next match starts while this
+    /// measures, the pass stops and the plan in force stays.
+    /// </summary>
+    private async Task ReplanBetweenMatchesAsync(TunnelClient tunnel, GameEntry game, CancellationToken ct)
+    {
+        var home = _relay;
+        var profile = _profile;
+        if (home is null || profile is null || !(_watcher?.IsGameRunning ?? false)) return;
+        if (game.Regions.Count < 2 || !game.Regions.Any(r => FirstLandmark(r) is not null)) return;
+
+        var (mode, source) = RegionRouting.Resolve(_config.RegionRouting, game.RegionRouting, game.LandmarksRouted);
+        _log($"Between matches: the game has been silent {SilenceOfAll(tunnel).TotalSeconds:F0} s - planning {game.Name}'s regions again.");
+        if (!await PlanRegionsAsync(tunnel, game, home, profile, mode, source, ct, trigger: "after-match").ConfigureAwait(false))
+        {
+            _log("Between matches: no new plan this time - the plan in force stays.");
+        }
+    }
+
+    /// <summary>When the game last sent on any tunnel, on NowMs's clock; null if it never has.</summary>
+    private long? LastSentAnyMs(TunnelClient home)
+    {
+        long? latest = LastSentMs(home);
+        lock (_otherTunnels)
+        {
+            foreach (var other in _otherTunnels.Values)
+            {
+                if (LastSentMs(other.Client) is { } at && (latest is null || at > latest)) latest = at;
+            }
+        }
+        return latest;
+    }
+
+    private TimeSpan SilenceOfAll(TunnelClient home) =>
+        LastSentAnyMs(home) is { } at ? TimeSpan.FromMilliseconds(Math.Max(0, NowMs() - at)) : TimeSpan.MaxValue;
+
+    /// <summary>What one relay measured for a plan: its best number and way per region, and its log lines in order.</summary>
+    private sealed record RelayPlanResult(
+        string RelayId,
+        bool Measured,
+        Dictionary<string, (double Ms, string Way)> Best,
+        List<string> Lines,
+        string? Stopped);
+
+    /// <summary>
+    /// One relay, every way into it one after another - see PlanRegionsAsync for why never two at once. A relay with a
+    /// tunnel open is measured through it, never by a handshake: a second handshake would move that tunnel's session
+    /// to the probe (G5). Returns what it measured before the budget or an interruption stopped it; never throws for
+    /// either, so the other relays' numbers are kept.
+    /// </summary>
+    private async Task<RelayPlanResult> MeasureRelayForPlanAsync(RelayEntry relay, ProfileBundle profile,
+        List<(RegionEntry Region, IPAddress Landmark)> measurable, byte[] psk, Func<string?> interrupted, CancellationToken token)
+    {
+        var best = new Dictionary<string, (double Ms, string Way)>(StringComparer.Ordinal);
+        var lines = new List<string>();
+        string? stopped = null;
+        var measured = false;
+        TunnelClient? open = null;
+        try
+        {
+            if (OtherTunnelTo(relay.Id) is { } live)
+            {
+                var liveLine = new List<string>();
+                foreach (var (region, landmark) in measurable)
+                {
+                    if ((stopped = interrupted()) is not null) break;
+                    var median = RescanScore.Median(await SampleLiveAsync(live, landmark, token).ConfigureAwait(false));
+                    liveLine.Add($"{region.Id} {Ms(median)}");
+                    if (median is { } ms) best[region.Id] = (ms, relay.Id);
+                }
+                lines.Add($"  {relay.Name} [{relay.Id}], open: {string.Join(", ", liveLine)}");
+                return new RelayPlanResult(relay.Id, true, best, lines, stopped);
+            }
+
+            foreach (var way in RelayPaths.DoorsOf(profile.Relays, relay.Id))
+            {
+                if ((stopped = interrupted()) is not null) break;
+                if (IsRoutedIntoTunnel(way))
+                {
+                    lines.Add($"  {way.Name} [{way.Id}]: skipped - its address is inside a routed game range.");
+                    continue;
+                }
+
+                // The next way into this relay resumes the same session, so the last one goes quietly.
+                Abandon(open);
+                open = null;
+                open = await HandshakeForPlanAsync(way, psk, token).ConfigureAwait(false);
+                if (open is null) continue;
+
+                var line = new List<string>();
+                foreach (var (region, landmark) in measurable)
+                {
+                    if ((stopped = interrupted()) is not null) break;
+                    var samples = new List<double?>(RescanScore.Samples);
+                    for (var i = 0; i < RescanScore.Samples; i++)
+                    {
+                        samples.Add(await open.MeasureThroughTunnelAsync(landmark, attempts: 1, token).ConfigureAwait(false));
+                    }
+                    var median = RescanScore.Median(samples);
+                    line.Add($"{region.Id} {Ms(median)}");
+                    if (median is { } ms && (!best.TryGetValue(region.Id, out var kept) || ms < kept.Ms)) best[region.Id] = (ms, way.Id);
+                }
+                lines.Add($"  {way.Name} [{way.Id}]: {string.Join(", ", line)}");
+                measured = true;
+                if (stopped is not null) break;
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            // The budget, or the connection ending: what was measured so far still counts.
+            lines.Add($"  {relay.Name} [{relay.Id}]: cut short by the budget.");
+        }
+        catch (Exception ex)
+        {
+            lines.Add($"  {relay.Name} [{relay.Id}]: could not be measured ({ex.Message}).");
+        }
+        finally
+        {
+            // With a Disconnect: the relay's session goes back to its pool now rather than in 90 s.
+            open?.Dispose();
+        }
+        return new RelayPlanResult(relay.Id, measured, best, lines, stopped);
+    }
+
+    /// <summary>
+    /// The plan with this machine's regionRoutingForce applied - see ServiceConfig.RegionRoutingForce. For testing
+    /// only: it can give a region a slower path than home, so every forced region says so in its reason, which the
+    /// log and the quality record both carry.
+    /// </summary>
+    private List<RegionDecision> ForcedByConfig(List<RegionDecision> plan, string homeRelayId, ProfileBundle profile,
+        IReadOnlyDictionary<string, Dictionary<string, double>> viaMs)
+    {
+        var forced = _config.RegionRoutingForce;
+        if (forced is null || forced.Count == 0) return plan;
+
+        return [.. plan.Select(d =>
+        {
+            if (!forced.TryGetValue(d.RegionId, out var relayId) || string.IsNullOrWhiteSpace(relayId)) return d;
+            var relay = profile.Relays.FirstOrDefault(r => r.ViaRelayId is null && r.Id.Equals(relayId, StringComparison.OrdinalIgnoreCase));
+            if (relay is null || relay.Id.Equals(homeRelayId, StringComparison.OrdinalIgnoreCase))
+            {
+                _log($"  regionRoutingForce: {d.RegionId} -> '{relayId}' ignored - " +
+                     (relay is null ? "no such relay in the profile." : "that is home."));
+                return d;
+            }
+            double? ms = viaMs.TryGetValue(d.RegionId, out var via) && via.TryGetValue(relay.Id, out var v) ? v : null;
+            var reason = $"FORCED by regionRoutingForce in config.json - {relay.Id} {(ms is { } x ? $"{x:F0} ms" : "not measured")}" +
+                         (d.HomeMs is { } h ? $" against home {h:F0} ms" : "") +
+                         (d.Path.Kind == PathKind.Relay ? $" (the planner chose relay {d.Path})" : $" (the planner chose {d.Path})");
+            _log($"  {d.RegionId} -> {relay.Id}: {reason}");
+            return d with { Path = RegionPath.Via(relay.Id), ChosenMs = ms, Reason = reason };
+        })];
     }
 
     /// <summary>

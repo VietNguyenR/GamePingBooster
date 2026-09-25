@@ -73,6 +73,14 @@ internal sealed class RouteManager
     // which stays PinRelayRoute's to install and delete.
     private readonly Dictionary<string, uint> _pinnedDoorPrefixes = [];
 
+    // Multi-tunnel: the relays of the other tunnels, and the way into each, pinned to the physical adapter like
+    // the home relay. Never holds a prefix that is _pinnedRelayPrefix or a door - those stay theirs.
+    private readonly Dictionary<string, uint> _pinnedPathPrefixes = [];
+
+    // Multi-tunnel: destinations in use on another tunnel, pinned INTO the virtual adapter while the home tunnel
+    // is reconnecting and the game's ranges are out - so a match on another tunnel keeps its exit (G1).
+    private readonly List<string> _pinnedStuckPrefixes = [];
+
     /// <summary>Number of routes currently installed.</summary>
     public int ActiveRouteCount =>
         _installedPrefixes.Count + _lobbyPrefixes.Count + (_pinnedRelayPrefix is null ? 0 : 1) +
@@ -260,6 +268,64 @@ internal sealed class RouteManager
     }
 
     /// <summary>
+    /// Pins the relays of the other tunnels - and the way into each they use - to the physical adapter, the way the
+    /// home relay is pinned: a backstop, since no profile routes a relay's address. The set replaces the last one.
+    /// </summary>
+    public void PinPathRoutes(IReadOnlyCollection<IPAddress> addresses) =>
+        Timed($"pinned {addresses.Count} other tunnel relay(s)", () =>
+        {
+            var wanted = new Dictionary<string, IPAddress>();
+            foreach (var address in addresses) wanted[$"{address}/32"] = address;
+
+            foreach (var (prefix, iface) in _pinnedPathPrefixes.ToList())
+            {
+                if (wanted.ContainsKey(prefix)) continue;
+                _pinnedPathPrefixes.Remove(prefix);
+                DeleteRoute(prefix, iface);
+            }
+            foreach (var (prefix, address) in wanted)
+            {
+                if (_pinnedPathPrefixes.ContainsKey(prefix) || prefix == _pinnedRelayPrefix || _pinnedDoorPrefixes.ContainsKey(prefix)) continue;
+                var (physIndex, gateway) = LookUpRoute(address)
+                    ?? throw new InvalidOperationException(
+                        "No network adapter with a default gateway was found - is the machine offline?");
+                DeleteRoute(prefix, physIndex);
+                _pinnedPathPrefixes[prefix] = physIndex;
+                AddRoute(prefix, physIndex, gateway);
+            }
+        });
+
+    /// <summary>
+    /// Pins each of <paramref name="destinations"/> into the virtual adapter as a /32, for while the game's ranges
+    /// are out during a home reconnect. Same mechanics as a game route; removed by <see cref="UnpinStuckDestinations"/>.
+    /// </summary>
+    public void PinStuckDestinations(uint tunInterfaceIndex, IReadOnlyCollection<IPAddress> destinations)
+    {
+        var fresh = destinations.Select(d => $"{d}/32")
+            .Where(p => !_pinnedStuckPrefixes.Contains(p) && !_installedPrefixes.Contains(p) && !_lobbyPrefixes.Contains(p))
+            .Distinct().ToList();
+        if (fresh.Count == 0) return;
+        Timed($"pinned {fresh.Count} destination(s) in use on other tunnels", () =>
+        {
+            DeleteRoutes(fresh, tunInterfaceIndex);
+            _pinnedStuckPrefixes.AddRange(fresh);
+            foreach (var prefix in fresh) AddRoute(prefix, tunInterfaceIndex, nextHop: null);
+        });
+    }
+
+    /// <summary>
+    /// Takes the /32s of <see cref="PinStuckDestinations"/> out again - except one that became a game or lobby route
+    /// meanwhile, which is theirs now: deleting it would take that route out.
+    /// </summary>
+    public void UnpinStuckDestinations(uint tunInterfaceIndex)
+    {
+        if (_pinnedStuckPrefixes.Count == 0) return;
+        var ours = _pinnedStuckPrefixes.Where(p => !_installedPrefixes.Contains(p) && !_lobbyPrefixes.Contains(p)).ToList();
+        _pinnedStuckPrefixes.Clear();
+        if (ours.Count > 0) Timed($"unpinned {ours.Count} destination(s) in use on other tunnels", () => DeleteRoutes(ours, tunInterfaceIndex));
+    }
+
+    /// <summary>
     /// Installs routes for the game's CIDR list, pointing at the virtual adapter.
     /// A low metric so they win against the physical adapter's default route.
     ///
@@ -410,6 +476,8 @@ internal sealed class RouteManager
     {
         RemoveGameRoutes(tunInterfaceIndex);
         RemoveLobbyRoutes(tunInterfaceIndex);
+        UnpinStuckDestinations(tunInterfaceIndex);
+        if (_pinnedPathPrefixes.Count > 0) PinPathRoutes([]);
 
         Timed("removed the relay pins", () =>
         {

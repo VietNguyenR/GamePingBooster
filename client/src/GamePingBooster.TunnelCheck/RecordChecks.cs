@@ -33,7 +33,7 @@ internal static partial class Program
             ["sg"] = new(),
         };
         var record = new RegionPlanRecord(
-            new DateTimeOffset(2026, 9, 25, 14, 0, 0, TimeSpan.Zero), "record", "the game's setting", Acted: false,
+            new DateTimeOffset(2026, 9, 25, 14, 0, 0, TimeSpan.Zero), "after-match", "record", "the game's setting", Acted: false,
             "vn-2", AllowDirect: false, RegionRouting.MaxTunnels, 14.2, Stopped: null, ["vn-1", "hk-2"],
             plan.Select(d =>
             {

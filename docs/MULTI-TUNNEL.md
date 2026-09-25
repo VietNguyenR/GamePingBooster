@@ -25,6 +25,36 @@ Status, 2026-09-25:
   fields) and TunnelCheck, which holds the record to `testdata/region-plan-record.json` byte for byte.
   Not done yet: `ProbeGameServerAsync`'s single slot (5.6) - a lobby echo that meets the in-game ping loop
   counts as unanswered, so a region can read "no answer through home" and follow home in the record.
+  First live pass 2026-09-26 (PUBG, home sg-2): complete in 22 s, match after it unaffected; asia-kr would
+  leave for hk-2 (67 ms against 108 through home), asia-sg stays.
+- **Phase D1 built, not soaked** (2026-09-26). In `on`, the plan is put in force (`TunnelEngine.MultiTunnel.cs`):
+  `PathDispatcher` routes every packet the pump reads - sticky table first (G1), then region table, then
+  plan, else home - and rewrites the source for a tunnel whose inner address differs; each tunnel's downlink
+  hands it replies to refresh the sticky entry and rewrite back. Created on the first plan that leaves home,
+  with the adapter address fixed from then on. Secondaries (at most 2, one per relay, G5) open through the
+  way that measured fastest, are pinned (`RouteManager.PinPathRoutes`), measured through their live tunnel by
+  later passes, closed once no region needs them and nothing is stuck to them, and dropped without a
+  Disconnect after 15 s of silence (their regions go home, G6). A home reconnect keeps the adapter address,
+  pins every destination stuck to a secondary as a /32 into the adapter while the ranges are out
+  (`PinStuckDestinations`), keeps the pump reading for them, and never fails over to a relay a secondary is
+  on. A dispatcher fault collapses to home for the connection (5.9). A game change and disconnect tear it all
+  down and re-address the adapter if a reconnect moved home. Rescans between matches are off while it is in
+  force; the lobby and match detection count every tunnel's game UDP. TunnelCheck: `TwoRegionsLeaveByTwoRelays`,
+  `RemappingNeverMovesAFlowInUse` (1 000 remaps, 3 flows), `ARelayThatDiesSendsOnlyItsOwnHome`,
+  `ADispatcherFaultCollapsesToHome`, `AnIcmpErrorReachesWindowsAboutItsOwnPacket`,
+  `AReplacedHomeRewritesInsteadOfReaddressing` - 6 deliberate bugs, 6 caught. Native AOT publish clean.
+  **Not in D1** (5.8): the in-game ping, spike recorder, match summary, entry switching and the app's status
+  follow the home tunnel only - a match on another tunnel shows in the log (`Tunnel via ...` lines) and not
+  in the app's ping; `direct` stays home; one plan per connection and home relay, no re-plan after a match;
+  a secondary's death is noticed only while home is healthy (the supervisor is inside a home reconnect
+  otherwise); `DownlinkCoupling` is not measured yet.
+- **Phase D2, first half built** (2026-09-26). In `on`, the end of every match (MatchGap, now fed every
+  tunnel's game UDP) runs the planner again instead of the between-matches rescan: every relay for every
+  region, relays with a tunnel open measured through it, the plan in force passed in for hysteresis, and the
+  new plan applied at once - safe at any moment because servers in use keep their tunnel. Home no longer
+  moves between matches in `on`; each region gets its own relay instead. `record` keeps the rescan. The
+  quality record says which pass it was (`trigger`: `connect` or `after-match`). Still to do in D2: the
+  in-game ping, spike recorder, match summary and app status following the tunnel that carries the match.
 
 Two deliberate differences in Phase A, both in the failure direction: an unexpected exception while sending
 one packet now costs that packet and a log line instead of ending the uplink for good (the old loop left a
@@ -271,8 +301,12 @@ When it runs:
 - **Applied at any time**, because of 5.3.
 
 Cost, Delta Force on vn-1, vn-2, hk-2, sg-1 with five landmarks: 4 handshakes, 4 × 5 × 8 = 160 echoes
-at 40-100 ms, run sequentially (parallel echoes compete for the uplink and flatter nobody) - about 15 s
-of background work in the lobby, once per connect.
+at 40-100 ms - about 15 s of background work in the lobby, once per connect, if run one after another.
+Measured 2026-09-26 with five extra relays and their entries it ran past the 40 s budget, so it now runs
+in parallel ACROSS relays and in order WITHIN one: every way into one relay resumes the same session (G5),
+while different relays share nothing but the PC's uplink, and a few dozen echo packets a second are
+nothing to it. Home and the player's own line are measured alongside. The pass takes about as long as the
+relay with the most ways into it.
 
 ### 5.6 Measurement rules (each one has broken something before)
 
@@ -370,7 +404,8 @@ Vietnamese one (measured 2026-09-25). This is the case multi-tunnel exists for.
 - `record` runs the planner and uploads what `on` would have done, and opens **no** secondary tunnel. The
   only cost is the lobby measurement pass.
 - To try it on one PC: `"regionRouting": "record"` in `%ProgramData%\GamePingBooster\config.json`, then
-  connect with the game open and wait in the lobby; the log shows `Region plan ...`.
+  connect with the game open and wait in the lobby; the log shows `Region plan ...`. `"on"` puts the plan
+  in force (phase D); removing the line goes back to the game's setting on the next connect.
 
 ## 9. Rollout
 

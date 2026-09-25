@@ -38,6 +38,12 @@ internal static partial class Program
             ("Faults", Faults),
             ("Latency", LatencyAddedByThePump),
             ("Region plan record", ARegionPlanRecordKeepsItsShape),
+            ("Two regions, two relays", TwoRegionsLeaveByTwoRelays),
+            ("Remapping under load", RemappingNeverMovesAFlowInUse),
+            ("One relay dies", ARelayThatDiesSendsOnlyItsOwnHome),
+            ("Dispatcher fault", ADispatcherFaultCollapsesToHome),
+            ("ICMP error through another relay", AnIcmpErrorReachesWindowsAboutItsOwnPacket),
+            ("Home replaced", AReplacedHomeRewritesInsteadOfReaddressing),
         };
 
         foreach (var (title, run) in scenarios)

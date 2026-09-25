@@ -144,6 +144,25 @@ internal static partial class Program
 
         {
             var sticky = new StickyDestinations<FakeTunnel>();
+            var first = sticky.Resolve(server, 0, b, static (t, _) => t);
+            var later = sticky.Resolve(server, 1_000, a, static (t, _) => t);
+            Check("The closure-free resolve sticks the same way", first == b && later == b, $"went to {later}");
+            var planned = sticky.Resolve(Addr(1, 2, 3, 4), 1_000, a, static (t, d) => d == Addr(1, 2, 3, 4) ? t : null);
+            Check("and passes the destination to the plan", planned == a);
+        }
+        {
+            var sticky = new StickyDestinations<FakeTunnel>();
+            var c = new FakeTunnel("c");
+            sticky.Resolve(server, 0, () => a);
+            sticky.Resolve(Addr(1, 2, 3, 4), 0, () => b);
+            var moved = sticky.Retarget(a, c);
+            Check("Retarget moves what was stuck to the old home onto the new one, and nothing else",
+                moved == 1 && sticky.StuckTo(server, 10) == c && sticky.StuckTo(Addr(1, 2, 3, 4), 10) == b);
+            Check("and keeps when it was last used", sticky.StuckTo(server, window) == c && sticky.StuckTo(server, window + 1) is null);
+        }
+
+        {
+            var sticky = new StickyDestinations<FakeTunnel>();
             var first = sticky.Resolve(server, 0, () => a);
             var later = sticky.Resolve(server, 1_000, () => b);
             Check("A destination in use keeps its tunnel when the plan changes", first == a && later == a,

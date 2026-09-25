@@ -175,6 +175,29 @@ public sealed class ServiceConfig
     public string? RegionRouting { get; set; }
 
     /// <summary>
+    /// Relays, by id, that region routing may measure and open a tunnel to for THIS machine even though the
+    /// profile does not set them to carry the game - never as the home tunnel. For testing a game whose relay list
+    /// cannot be widened for everybody yet: Delta Force carries only the VN relays, because a Hong Kong relay in
+    /// its list would become home for every player and send Ho Chi Minh City matches through Hong Kong.
+    ///
+    /// Home is still chosen, and failed over, among the game's own relays only. Unset and never written while unset.
+    /// </summary>
+    [JsonPropertyName("regionRoutingRelays")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string>? RegionRoutingRelays { get; set; }
+
+    /// <summary>
+    /// FOR TESTING ONE MACHINE: region id -> relay id, a path the planner must use for that region whatever it
+    /// measured - e.g. {"hk": "hk-2"} to watch a Hong Kong match ride a second tunnel on a line where no relay beats
+    /// home by the margin. It overrides G2 on purpose, so every forced region is logged as forced and recorded so in
+    /// the quality record, never mistaken for a plan. A relay that is home, or not in the profile, is ignored. Only in
+    /// "on". Unset and never written while unset.
+    /// </summary>
+    [JsonPropertyName("regionRoutingForce")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<string, string>? RegionRoutingForce { get; set; }
+
+    /// <summary>
     /// Re-measuring every relay and entry in the gap after a match, and moving to a clearly faster one before
     /// the next - see TunnelEngine.RescanBetweenMatchesAsync. Only on automatic relay choice: a relay picked
     /// from the list is never left. Unset means on; false is the way to stop it on one machine. Never written
