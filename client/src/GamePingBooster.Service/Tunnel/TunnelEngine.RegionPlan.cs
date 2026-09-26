@@ -405,15 +405,18 @@ internal sealed partial class TunnelEngine
         {
             if (OtherTunnelTo(relay.Id) is { } live)
             {
+                // The way the open tunnel is on, which may be an entry: the record says which way gave the number,
+                // and naming the relay here said "direct to the relay" for a tunnel that came in through an entry.
+                var wayId = OtherTunnelOf(live)?.Way.Id ?? relay.Id;
                 var liveLine = new List<string>();
                 foreach (var (region, landmark) in measurable)
                 {
                     if ((stopped = interrupted()) is not null) break;
                     var median = RescanScore.Median(await SampleLiveAsync(live, landmark, token).ConfigureAwait(false));
                     liveLine.Add($"{region.Id} {Ms(median)}");
-                    if (median is { } ms) best[region.Id] = (ms, relay.Id);
+                    if (median is { } ms) best[region.Id] = (ms, wayId);
                 }
-                lines.Add($"  {relay.Name} [{relay.Id}], open: {string.Join(", ", liveLine)}");
+                lines.Add($"  {relay.Name} [{wayId}], open: {string.Join(", ", liveLine)}");
                 return new RelayPlanResult(relay.Id, true, best, lines, stopped);
             }
 
