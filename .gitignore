@@ -95,3 +95,7 @@ profiles/deltaforce-vn.json
 docs/MULTI-TUNNEL-SERVER.md
 # Working state of multi-tunnel: what is verified, what is next, the traps. Read before touching region routing.
 docs/MULTI-TUNNEL-HANDOFF.md
+profiles/naraka-vn.json
+profiles/pubg-vn.json.bak-20260925
+profiles/naraka-regions-import.json
+profiles/deltaforce-regions-import.json
