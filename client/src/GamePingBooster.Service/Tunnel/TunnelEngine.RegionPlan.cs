@@ -38,11 +38,8 @@ internal sealed partial class TunnelEngine
     /// <summary>The whole pass. Past it the plan is made from what was measured and marked incomplete.</summary>
     private static readonly TimeSpan RegionPlanBudget = TimeSpan.FromSeconds(40);
 
-    /// <summary>
-    /// Game UDP into the tunnel below this rate, over two supervisor passes (ten seconds), is the lobby. Not
-    /// zero: Naraka trickles one packet a second to a server from the lobby, and a match runs 9-150.
-    /// </summary>
-    private const double LobbyPacketsPerSecond = 3;
+    /// <summary>Game UDP into the tunnels below this rate is the lobby - see <see cref="LobbyGate"/>.</summary>
+    private const double LobbyPacketsPerSecond = LobbyGate.PacketsPerSecond;
 
     /// <summary>A pass interrupted by a match or a quiet tunnel is tried again, this many times per connection and game.</summary>
     private const int RegionPlanTries = 3;
@@ -53,11 +50,14 @@ internal sealed partial class TunnelEngine
     /// <summary>Tries per (game, home relay); -1 once a pass completed. Supervisor only, reset per connect.</summary>
     private readonly Dictionary<string, int> _regionPlanTries = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>The game's UDP count at the last supervisor pass, for the lobby rate. Supervisor only.</summary>
-    private (TunnelClient Tunnel, long AtMs, long Packets)? _lobbyLast;
+    /// <summary>Whether the game is in its lobby. Armed when its routes go in (InstallRoutes), asked by the supervisor.</summary>
+    private readonly LobbyGate _lobby = new();
 
-    /// <summary>Consecutive supervisor passes under <see cref="LobbyPacketsPerSecond"/>. Supervisor only.</summary>
-    private int _lobbyQuietPasses;
+    /// <summary>The game's routes just went in: the lobby count starts now. See <see cref="LobbyGate.Arm"/>.</summary>
+    private void ArmLobbyGate()
+    {
+        if (_tunnel is { } home) _lobby.Arm(home, NowMs(), AllGameUdpPackets(home));
+    }
 
     /// <summary>
     /// The plan in force, for the next pass's hysteresis (planner rule 7): a region keeps its path unless another beats
@@ -70,8 +70,6 @@ internal sealed partial class TunnelEngine
     {
         _planInForce = null;
         _regionPlanTries.Clear();
-        _lobbyLast = null;
-        _lobbyQuietPasses = 0;
     }
 
     /// <summary>One supervisor pass: runs the planner's measuring pass when it is due - see the class summary.</summary>
@@ -83,8 +81,7 @@ internal sealed partial class TunnelEngine
         if (game is null || home is null || profile is null || !ReferenceEquals(tunnel, _tunnel)) return;
         if (!(_watcher?.IsGameRunning ?? false))
         {
-            _lobbyLast = null;
-            _lobbyQuietPasses = 0;
+            _lobby.Reset();
             return;
         }
 
@@ -95,19 +92,8 @@ internal sealed partial class TunnelEngine
         var tries = _regionPlanTries.GetValueOrDefault(key);
         if (tries < 0 || tries >= RegionPlanTries) return;
 
-        // The lobby: the game's UDP into the tunnel under the rate, over two passes in a row.
-        var now = NowMs();
-        var packets = AllGameUdpPackets(tunnel);
-        var last = _lobbyLast;
-        _lobbyLast = (tunnel, now, packets);
-        if (last is not { } previous || !ReferenceEquals(previous.Tunnel, tunnel) || now <= previous.AtMs)
-        {
-            _lobbyQuietPasses = 0;
-            return;
-        }
-        var rate = (packets - previous.Packets) * 1000.0 / (now - previous.AtMs);
-        _lobbyQuietPasses = rate < LobbyPacketsPerSecond ? _lobbyQuietPasses + 1 : 0;
-        if (_lobbyQuietPasses < 2) return;
+        // The lobby: no game UDP since the routes went in, or under the rate over two passes in a row.
+        if (!_lobby.Observe(tunnel, NowMs(), AllGameUdpPackets(tunnel))) return;
 
         // One region is what connect already measured; a plan needs something to choose between.
         if (game.Regions.Count < 2 || !game.Regions.Any(r => FirstLandmark(r) is not null))
@@ -123,8 +109,7 @@ internal sealed partial class TunnelEngine
         {
             _regionPlanTries[key] = -1;
         }
-        _lobbyLast = null;
-        _lobbyQuietPasses = 0;
+        _lobby.Reset();
     }
 
     /// <summary>

@@ -48,6 +48,10 @@ internal static partial class Program
         CarrierChecks();
 
         Console.WriteLine();
+        Console.WriteLine("When the lobby is sure enough to plan:");
+        LobbyChecks();
+
+        Console.WriteLine();
         if (_failures == 0)
         {
             Console.WriteLine("All path checks passed.");

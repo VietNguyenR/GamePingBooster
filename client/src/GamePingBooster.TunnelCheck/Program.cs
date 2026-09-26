@@ -45,6 +45,7 @@ internal static partial class Program
             ("ICMP error through another relay", AnIcmpErrorReachesWindowsAboutItsOwnPacket),
             ("Home replaced", AReplacedHomeRewritesInsteadOfReaddressing),
             ("The recorder follows the match", TheRecorderFollowsTheTunnelCarryingTheMatch),
+            ("Downlink coupling", DownlinkCouplingAtThreeTunnels),
         };
 
         foreach (var (title, run) in scenarios)

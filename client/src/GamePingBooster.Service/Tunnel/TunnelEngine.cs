@@ -130,8 +130,11 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             // the report is authenticated with this device's licence token and key.
             _discoveryUploader = new DiscoveryUploader(
                 () => _config.LicenceUrl, () => _token, _device.Key, () => _config.ShareQuality, log);
+            // Every tunnel's game UDP, not home's: a match region routing sent to another relay is on the tunnel
+            // too. Counting home alone turned ETW on mid-match and called that server "not on the tunnel"
+            // (2026-09-26). A tunnel closing lowers the sum, which the recorder takes as a restart.
             _discovery = new GameDestinationRecorder(
-                () => _tunnel?.Destinations.UdpPackets, _discoveryUploader.WhyNotSend, _discoveryUploader.Report, log);
+                () => _tunnel is { } home ? AllGameUdpPackets(home) : null, _discoveryUploader.WhyNotSend, _discoveryUploader.Report, log);
         }
         _presence = new PresenceReporter(() => _config.LicenceUrl, () => _token, _device.Key, () => _config.ShareQuality, log);
         if (_token is not null)
@@ -2679,6 +2682,10 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         WarnAboutRoutedLandmarks(cidrs);
         _routes.InstallGameRoutes(_adapter.InterfaceIndex, cidrs);
         _log($"Installed {cidrs.Count} routes into the virtual adapter.");
+
+        // From here the game's UDP reaches the tunnels; none by the supervisor's next pass means the lobby, and
+        // the region plan need not wait out two more passes to know it.
+        ArmLobbyGate();
     }
 
     /// <summary>
