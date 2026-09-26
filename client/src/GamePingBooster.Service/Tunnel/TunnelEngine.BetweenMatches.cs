@@ -496,8 +496,12 @@ internal sealed partial class TunnelEngine
         var all = _profile?.Relays ?? [];
         var serving = RelayPaths.ServingGame(all, game?.Id);
         if (serving.Count > 0 || all.Count == 0) return serving;
+        // Not the ones set to carry a region of it and nothing else: those were ruled out as home on purpose, and a
+        // mistake elsewhere in the profile is no reason to send the whole game through one.
+        var fallback = all.Where(r => !RelayPaths.SecondaryOnlyFor(r, game?.Id)).ToList();
+        if (fallback.Count == 0) fallback = all;
         _log($"WARNING: no relay in the profile is set to carry {game?.Name} - using all of them. Tick it on a relay in /admin/relays.");
-        return all;
+        return fallback;
     }
 
     /// <summary>

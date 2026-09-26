@@ -296,6 +296,17 @@ public sealed class RelayEntry
     [JsonPropertyName("games")] public List<string> Games { get; set; } = [];
 
     /// <summary>
+    /// Games this relay may carry ONE REGION of through a second tunnel, and nothing else: region routing
+    /// (docs/MULTI-TUNNEL.md) may measure it and open a tunnel to it for a region, but it is never home, never
+    /// failed over to and never offered in the relay list for these games - <see cref="Games"/> decides all of
+    /// that. For a relay that is fast to some of a game's regions and wrong for the rest: Hong Kong for Delta
+    /// Force, whose Ho Chi Minh City matches must not leave through Hong Kong. A game listed in both is simply
+    /// carried. Absent from older profiles; a client older than the field ignores it. See
+    /// <see cref="RelayPaths.SecondaryOnlyFor"/>.
+    /// </summary>
+    [JsonPropertyName("secondaryGames")] public List<string> SecondaryGames { get; set; } = [];
+
+    /// <summary>
     /// Set only on a path <see cref="RelayPaths.Expand"/> made from an entry: the id of the relay
     /// behind it. Never read from a profile and never written to one.
     /// </summary>

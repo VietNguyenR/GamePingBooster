@@ -162,11 +162,19 @@ internal sealed partial class TunnelEngine
         try
         {
 
-            // Every other relay that carries the game, one way in at a time - and any this machine's config.json adds
-            // for region routing alone (ServiceConfig.RegionRoutingRelays), which can never become home.
+            // Every other relay that carries the game, one way in at a time - and those that may carry a region of it
+            // and nothing else: the profile's secondaryGames (/admin/relays) and this machine's config.json
+            // (ServiceConfig.RegionRoutingRelays). Neither kind can become home - connect, failover and the relay list
+            // only ever look at RelaysForGame.
             var others = RelaysForGame(game)
                 .Where(r => r.ViaRelayId is null && !r.Id.Equals(homeRelayId, StringComparison.OrdinalIgnoreCase))
                 .ToList();
+            foreach (var extra in profile.Relays.Where(r => r.ViaRelayId is null && RelayPaths.SecondaryOnlyFor(r, game.Id)))
+            {
+                if (extra.Id.Equals(homeRelayId, StringComparison.OrdinalIgnoreCase) || others.Contains(extra)) continue;
+                others.Add(extra);
+                _log($"  {extra.Name} [{extra.Id}] is measured too - the profile lets it carry a region of {game.Name}, never home.");
+            }
             foreach (var id in _config.RegionRoutingRelays ?? [])
             {
                 var extra = profile.Relays.FirstOrDefault(r => r.ViaRelayId is null && r.Id.Equals(id, StringComparison.OrdinalIgnoreCase));

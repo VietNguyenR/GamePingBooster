@@ -42,6 +42,7 @@ public static class RelayPaths
                     // A setting of the relay, not of the road to it.
                     EntrySwitching = relay.EntrySwitching,
                     Games = relay.Games,
+                    SecondaryGames = relay.SecondaryGames,
                     ViaRelayId = relay.Id,
                 });
             }
@@ -57,6 +58,15 @@ public static class RelayPaths
     public static bool Serves(RelayEntry relay, string? gameId) =>
         string.IsNullOrWhiteSpace(gameId) || relay.Games.Count == 0 ||
         relay.Games.Any(g => g.Equals(gameId, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Whether a relay may carry a region of <paramref name="gameId"/> through a second tunnel while never
+    /// serving it otherwise - <see cref="RelayEntry.SecondaryGames"/>. False for a relay that already serves the
+    /// game, and with no game known: the question is only ever asked about the game being played.
+    /// </summary>
+    public static bool SecondaryOnlyFor(RelayEntry relay, string? gameId) =>
+        !string.IsNullOrWhiteSpace(gameId) && !Serves(relay, gameId) &&
+        relay.SecondaryGames.Any(g => g.Equals(gameId, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>The relays that may carry <paramref name="gameId"/>, in profile order. See <see cref="Serves"/>.</summary>
     public static List<RelayEntry> ServingGame(IEnumerable<RelayEntry> relays, string? gameId) =>

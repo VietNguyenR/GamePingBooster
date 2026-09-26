@@ -267,6 +267,34 @@ internal static class Program
         Check("games: with no game known, nothing is ruled out",
             GamePingBooster.Core.Profiles.RelayPaths.ServingGame(perGame.Relays, null).Count == 3, "no game, no reason");
 
+        // Relays that may carry a region of a game through a second tunnel and nothing else (region routing): Hong Kong
+        // for Delta Force, whose Ho Chi Minh City matches must never leave through Hong Kong.
+        var secondary = System.Text.Json.JsonSerializer.Deserialize("""
+            {"relays":[
+              {"id":"hk-2","name":"Hong Kong #2","endpoint":"198.51.100.2:51820","games":["cs2"],"secondaryGames":["deltaforce"],
+               "entries":[{"id":"hk-2-hn","endpoint":"198.51.100.3:51821"}]},
+              {"id":"vn-1","name":"Ha Noi","endpoint":"198.51.100.4:51824","games":["deltaforce"],"secondaryGames":["deltaforce"]},
+              {"id":"sg-1","name":"SG 1","endpoint":"198.51.100.5:51820","games":[],"secondaryGames":["deltaforce"]},
+              {"id":"sg-2","name":"SG 2","endpoint":"198.51.100.6:51820","games":["pubg"]}]}
+            """, GamePingBooster.Core.Profiles.ProfileJsonContext.Default.ProfileBundle)!;
+        static bool SecondaryOnly(GamePingBooster.Core.Profiles.RelayEntry r, string? game) =>
+            GamePingBooster.Core.Profiles.RelayPaths.SecondaryOnlyFor(r, game);
+        Check("secondaryGames: read under that exact name",
+            secondary.Relays[0].SecondaryGames.SequenceEqual(["deltaforce"]), string.Join(", ", secondary.Relays[0].SecondaryGames));
+        Check("secondaryGames: a relay set so is never among the relays that carry the game - never home, never failed over to",
+            SecondaryOnly(secondary.Relays[0], "DeltaForce") &&
+            GamePingBooster.Core.Profiles.RelayPaths.ServingGame(secondary.Relays, "deltaforce").Select(r => r.Id).SequenceEqual(["vn-1", "sg-1"]),
+            string.Join(", ", GamePingBooster.Core.Profiles.RelayPaths.ServingGame(secondary.Relays, "deltaforce").Select(r => r.Id)));
+        Check("secondaryGames: a relay that carries the game is carrying it, not secondary-only - neither by name nor by an empty list",
+            !SecondaryOnly(secondary.Relays[1], "deltaforce") && !SecondaryOnly(secondary.Relays[2], "deltaforce"),
+            "a carried relay would be treated as secondary-only");
+        Check("secondaryGames: other games, no game known, and a relay without the field are not secondary-only",
+            !SecondaryOnly(secondary.Relays[0], "pubg") && !SecondaryOnly(secondary.Relays[0], null) && !SecondaryOnly(secondary.Relays[3], "deltaforce") &&
+            secondary.Relays[3].SecondaryGames.Count == 0, "secondary-only leaked beyond its game");
+        Check("secondaryGames: a path through an entry carries its relay's",
+            SecondaryOnly(GamePingBooster.Core.Profiles.RelayPaths.Expand(secondary.Relays)[0], "deltaforce"),
+            "the entry would make Hong Kong a home for Delta Force");
+
         static string Resolved(string? local, string? relay)
         {
             var (mode, source) = GamePingBooster.Core.Profiles.EntrySwitching.Resolve(local, relay);

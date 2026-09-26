@@ -132,8 +132,8 @@ pair. The server refuses such profiles (7.1); this is the backstop.
 ### 5.5 Deciding: the planner
 
 The planner is a pure function of what one measuring pass found: per region, the median of 8 echoes to its
-landmark (6 answered) through home, through each other relay that carries the game, and over the player's own
-line - the same instrument on every path.
+landmark (6 answered) through home, through each other relay that carries the game or is set to carry a region of
+it only (7.1), and over the player's own line - the same instrument on every path.
 
 1. **Unmeasurable stays home** - no landmark, or no number through home. (G3)
 2. Candidates are relays with a number for the region.
@@ -217,6 +217,11 @@ until the next connect - a bug in this code costs its benefit, not the player's 
 
 - Each game carries `regionRouting` (`off` | `record` | `on`) and `regionDirect`. Read at connect, never
   mid-match; absent reads as `off` and no direct. A Steam Datagram Relay game is always `off`.
+- Each relay carries `games` (the games it may carry - home, failover, the app's relay list) and
+  `secondaryGames`: games it may carry **one region** of through a second tunnel and nothing else. Such a relay is
+  measured by the planner and may be opened as a secondary, but never becomes home for that game - a Hong Kong
+  relay for a game whose Ho Chi Minh City matches must not leave through Hong Kong. Served only beside a non-empty
+  `games` that does not list the game.
 - A game's regions never overlap, and a profile never routes a relay or a landmark.
 - Quality: a `regionPlan` record per pass and `carried` on match summaries and spikes - the field evidence
   for G2 (10.4).
