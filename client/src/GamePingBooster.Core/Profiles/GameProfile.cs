@@ -160,6 +160,19 @@ public sealed class GameEntry
     [JsonPropertyName("discoveryPacketsPerSecond")] public double? DiscoveryPacketsPerSecond { get; set; }
 
     /// <summary>
+    /// Multi-tunnel for this game: "off", "record" or "on" - see <see cref="Paths.RegionRouting"/>, which
+    /// is what decides; this is only the game's say. Absent means off, which is what every profile written
+    /// before the field says. Read at connect, never mid-match. docs/MULTI-TUNNEL.md, section 7.1.
+    /// </summary>
+    [JsonPropertyName("regionRouting")] public string? RegionRouting { get; set; }
+
+    /// <summary>
+    /// Whether a region of this game may leave over the player's own line when that measures faster than
+    /// every relay (the planner's rule 5, G8). Absent means no.
+    /// </summary>
+    [JsonPropertyName("regionDirect")] public bool RegionDirect { get; set; }
+
+    /// <summary>
     /// The narrowest and widest rate a profile may declare, in packets a second.
     ///
     /// The floor is what makes a delivered number safe to act on. A profile arrives over the network,

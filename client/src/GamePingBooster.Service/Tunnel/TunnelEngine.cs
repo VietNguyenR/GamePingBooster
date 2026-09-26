@@ -45,6 +45,13 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     public UnblockPolicy UnblockPolicy => UnblockPolicy.FromProfile(_profile, _log);
     private WintunAdapter? _adapter;
     private TunnelClient? _tunnel;
+
+    /// <summary>
+    /// The adapter's one reader, pointed at <see cref="_tunnel"/>. Lives as long as the adapter session - see
+    /// AdapterPump for why, and <see cref="StartTunnel"/> / <see cref="StopUplink"/> for the only two ways its
+    /// target changes.
+    /// </summary>
+    private AdapterPump? _pump;
     private RouteManager? _routes;
     private GameProcessWatcher? _watcher;
 
@@ -123,8 +130,11 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             // the report is authenticated with this device's licence token and key.
             _discoveryUploader = new DiscoveryUploader(
                 () => _config.LicenceUrl, () => _token, _device.Key, () => _config.ShareQuality, log);
+            // Every tunnel's game UDP, not home's: a match region routing sent to another relay is on the tunnel
+            // too. Counting home alone turned ETW on mid-match and called that server "not on the tunnel"
+            // (2026-09-26). A tunnel closing lowers the sum, which the recorder takes as a restart.
             _discovery = new GameDestinationRecorder(
-                () => _tunnel?.Destinations.UdpPackets, _discoveryUploader.WhyNotSend, _discoveryUploader.Report, log);
+                () => _tunnel is { } home ? AllGameUdpPackets(home) : null, _discoveryUploader.WhyNotSend, _discoveryUploader.Report, log);
         }
         _presence = new PresenceReporter(() => _config.LicenceUrl, () => _token, _device.Key, () => _config.ShareQuality, log);
         if (_token is not null)
@@ -584,7 +594,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             PinDoors();
 
             _routes.ConfigureAdapter(_adapter.InterfaceIndex, session.ClientIp, prefixLength: 24, session.Mtu);
-            _tunnel.StartPumping(_adapter, token);
+            StartTunnel(_tunnel, token);
 
             // The lobby goes on the tunnel NOW, before the game exists, rather than with the game
             // routes below. See GameEntry.LobbyAddresses: the lobby is a TCP connection the game
@@ -1651,6 +1661,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         _matchGap = new GamePingBooster.Core.Quality.MatchGap();
         _moveFollow = null;
         _moveOffForGame = false;
+        ResetRegionPlanning();
 
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
         try
@@ -1661,6 +1672,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
 
                 var tunnel = _tunnel;
                 if (tunnel is null) continue;
+
+                if (Interlocked.Exchange(ref _multiTunnelResetReason, null) is { } resetFor) TearDownMultiTunnel(resetFor, readdress: true);
 
                 LogThroughput(tunnel);
 
@@ -1694,6 +1707,12 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                         continue;
                     }
                     await WatchForMatchGapAsync(tunnel, ct).ConfigureAwait(false);
+
+                    // After the rescan, never beside it: both handshake other relays, and two handshakes to one
+                    // relay fight over its session. Picks up whichever tunnel the rescan left.
+                    if (_tunnel is { } current) await PlanRegionsIfDueAsync(current, ct).ConfigureAwait(false);
+                    SuperviseOtherTunnels();
+                    if (_tunnel is { } carrying) AnnounceMatchServer(carrying);
                     continue;
                 }
                 _pendingDoorMove = null;
@@ -1755,10 +1774,14 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             if (region is not null) break;
         }
         if (region is null || region.Landmarks.Count == 0) return;
-        if (_path is { } known && known.RegionName == region.Name) return;
+        if (PathFor(tunnel) is { } known && known.RegionName == region.Name) return;
 
+        // Per tunnel as well as per region: a landmark silent through home may answer through another relay.
+        var home = ReferenceEquals(tunnel, _tunnel);
+        var retryKey = home ? region.Name : $"{region.Name}|{TunnelLabel(tunnel)}";
+        var through = home ? "the tunnel" : TunnelLabel(tunnel);
         var now = Environment.TickCount64;
-        if (_regionRetryAfterTick.TryGetValue(region.Name, out var after) && now < after) return;
+        if (_regionRetryAfterTick.TryGetValue(retryKey, out var after) && now < after) return;
 
         foreach (var text in region.Landmarks)
         {
@@ -1777,23 +1800,28 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
 
             // Same arithmetic as RecordPath, and the same clamp: the echo travels the relay leg too.
             var offset = Math.Max(0, endToEnd - legOne);
-            var previous = _path?.RegionName;
-            _path = new PathMeasurement(region.Name, offset, landmark);
-            _regionRetryAfterTick.Remove(region.Name);
-            _log(previous is null
-                ? $"The match is in {region.Name}: {endToEnd:F0} ms there through the tunnel. The in-game estimate follows it."
+            var previous = PathFor(tunnel)?.RegionName;
+            SetPathFor(tunnel, new PathMeasurement(region.Name, offset, landmark));
+            _regionRetryAfterTick.Remove(retryKey);
+            _log(previous is null || !home
+                ? $"The match is in {region.Name}: {endToEnd:F0} ms there through {through}. The in-game estimate follows it."
                 : $"The match is in {region.Name}, not {previous} as predicted at connect: {endToEnd:F0} ms there through " +
                   "the tunnel. The in-game estimate follows it.");
             return;
         }
 
-        _regionRetryAfterTick[region.Name] = now + (long)RegionRetryAfter.TotalMilliseconds;
-        _log($"The match is in {region.Name}, but its landmark did not answer through the tunnel - the in-game " +
+        _regionRetryAfterTick[retryKey] = now + (long)RegionRetryAfter.TotalMilliseconds;
+        _log($"The match is in {region.Name}, but its landmark did not answer through {through} - the in-game " +
              "estimate stays where it was for now.");
     }
 
-    private void StartGamePingProbe(CancellationToken ct) =>
+    private void StartGamePingProbe(CancellationToken ct)
+    {
+        // A fresh carrier per connection: tunnels of the last one are gone, and so is what they measured.
+        _carrier = new GamePingBooster.Core.Paths.MatchCarrier<TunnelClient>();
+        _otherPath = null;
         _gamePingProbe = Task.Run(() => ProbeGamePingAsync(ct), ct);
+    }
 
     /// <summary>
     /// Starts the recorder that finds spikes while they happen and says where on the path each one
@@ -1802,7 +1830,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     /// </summary>
     private void StartSpikeRecorder(CancellationToken ct)
     {
-        var recorder = new SpikeRecorder(SpikeContext, _log, RequestDoorMove);
+        var recorder = new SpikeRecorder(() => SpikeContext(), _log, RequestDoorMove);
         _recorder = recorder;
         _spikeRecorder = Task.Run(() => recorder.RunAsync(ct), ct);
     }
@@ -1840,24 +1868,40 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         return null;
     }
 
-    private SpikeRecorder.Context SpikeContext()
+    /// <param name="home">
+    /// Home's context whatever carries the match - for a record about the connection rather than a match, such as a
+    /// region plan, which names home in its own field and must not name a relay a finished match was on.
+    /// </param>
+    private SpikeRecorder.Context SpikeContext(bool home = false)
     {
-        var relay = _relay;
+        // The tunnel carrying the match (5.8). Another relay's has no ways in to compare and never moves: entry
+        // switching stays home's, and the others keep the way they were opened on.
+        var carrying = home ? new Carrying(_tunnel, _relay, IsHome: true) : CarryingNow();
+        var relay = carrying.Relay;
         var relayAddress = relay is not null && IPEndPoint.TryParse(relay.Endpoint, out var endpoint)
             ? endpoint.Address
             : null;
-        var path = _path;
+        var path = PathFor(carrying.Tunnel);
         var gameRunning = _config.RouteWithoutGame || (_watcher?.IsGameRunning ?? false);
+        // Said on every record only while region routing is in force, so records from one tunnel are unchanged.
+        var carried = _paths is null || home ? null : carrying.IsHome ? "home" : "other";
+        if (!carrying.IsHome)
+        {
+            return new SpikeRecorder.Context(carrying.Tunnel, RelayPaths.RelayIdOf(relay!), relay!.ViaRelayId is null ? null : relay.Id,
+                relay.Name, relayAddress, path?.Landmark, path?.RegionName, _game?.Id, gameRunning, [], MovesEnabled: false,
+                ConnectLeftDoor: null, Carried: carried);
+        }
         // A path through an entry is a RelayEntry whose Id is the entry's and ViaRelayId the relay's.
         // Recorded as the relay plus the entry, never as the entry alone: that split one relay's
         // spikes across as many rows as it has entries, and hid an incident on it.
         var relayId = relay is null ? null : RelayPaths.RelayIdOf(relay);
         var entryId = relay?.ViaRelayId is null ? null : relay.Id;
         var switching = _switching;
-        var doors = relay is not null && _tunnel is not null && switching != EntrySwitchingMode.Off ? DoorsBeside(relay) : [];
-        return new SpikeRecorder.Context(_tunnel, relayId, entryId, relay?.Name, relayAddress,
+        // Not for a record's context: DoorsBeside's cache belongs to the recorder's thread, and a record needs no doors.
+        var doors = !home && relay is not null && _tunnel is not null && switching != EntrySwitchingMode.Off ? DoorsBeside(relay) : [];
+        return new SpikeRecorder.Context(carrying.Tunnel, relayId, entryId, relay?.Name, relayAddress,
             path?.Landmark, path?.RegionName, _game?.Id, gameRunning, doors, switching == EntrySwitchingMode.On,
-            _connectLeftDoor);
+            _connectLeftDoor, carried);
     }
 
     // ------------------------------------------------------------ moving between ways into the relay
@@ -2086,6 +2130,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
         IPAddress? current = null;
+        TunnelClient? measuring = null;
         var misses = 0;
         var quietUntilTick = 0L;
         var selfChecked = false;
@@ -2094,14 +2139,35 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         {
             while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
             {
-                var tunnel = _tunnel;
-                if (_state != TunnelState.Connected || tunnel is null)
+                var home = _tunnel;
+                if (_state != TunnelState.Connected || home is null)
                 {
                     current = null;
                     misses = 0;
                     selfChecked = false;
                     ForgetDirectPing();
                     continue;
+                }
+
+                // The tunnel carrying the match (5.8): home, unless region routing sent this match to another
+                // relay. The echo has to go the way the game's packets go, and the server is in THAT tunnel's
+                // tally - home's knows nothing of it.
+                var tunnel = UpdateCarrier(home);
+                if (!ReferenceEquals(tunnel, measuring))
+                {
+                    if (measuring is not null)
+                    {
+                        _log(ReferenceEquals(tunnel, home)
+                            ? $"The match is no longer on {(OtherTunnelOf(measuring) is { } left ? $"{left.Way.Name} [{left.Way.Id}]" : "the other tunnel")} " +
+                              "- the in-game ping follows home again."
+                            : $"The match is on {TunnelLabel(tunnel)}, not home - the in-game ping, the spike recorder and the " +
+                              "app follow it there.");
+                    }
+                    measuring = tunnel;
+                    current = null;
+                    misses = 0;
+                    quietUntilTick = 0;
+                    ForgetDirectPing();
                 }
 
                 // Prove the mechanism works before there is anything to measure with it.
@@ -2112,7 +2178,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                 // session would end with an in-game ping that never became a measurement and two
                 // candidate explanations: the game server filters ICMP, or this does not work.
                 // One packet at connect time tells them apart, in the log, before the match.
-                if (!selfChecked && _path is { } path)
+                if (!selfChecked && ReferenceEquals(tunnel, home) && _path is { } path)
                 {
                     selfChecked = true;
                     var check = await tunnel.ProbeGameServerAsync(path.Landmark, ProbeTimeoutMs, ct)
@@ -2146,9 +2212,10 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     ForgetDirectPing();
                     await FollowMatchRegionAsync(tunnel, target, ct).ConfigureAwait(false);
                 }
-                else if (_path is null)
+                else if (PathFor(tunnel) is null)
                 {
                     // A failover to another relay blanks the estimate; the match in progress says where to take it again.
+                    // So does a match on another tunnel, which has no estimate of its own until its region is measured.
                     await FollowMatchRegionAsync(tunnel, target, ct).ConfigureAwait(false);
                 }
 
@@ -2330,9 +2397,29 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         // relay is worse than no line, because the whole point is comparing one against another.
         if (_tunnel is not null) LogGameDestinations(_tunnel);
 
+        StopUplink();
         Abandon(_tunnel);
         _tunnel = null;
         ResetThroughputBaseline();
+
+        // Several tunnels: only home is being replaced. What was on it goes to the player's own line with the routes
+        // below; servers in use on the other tunnels keep their exit through /32s into the adapter (G1, 5.7), and
+        // the pump keeps reading for them.
+        var paths = _paths;
+        paths?.LoseHome();
+        if (paths is not null && routes.ActiveGameRouteCount > 0)
+        {
+            try
+            {
+                var stuck = paths.StuckOffHome().Select(ToAddress).ToList();
+                routes.PinStuckDestinations(adapter.InterfaceIndex, stuck);
+                if (stuck.Count > 0) _log($"Home is down - {stuck.Count} server(s) in use on other tunnels keep them while it reconnects.");
+            }
+            catch (Exception ex)
+            {
+                _log($"Could not keep the servers in use on other tunnels on them ({ex.Message}).");
+            }
+        }
 
         // Fall back to the direct path before the first handshake, not after a few failures.
         // There is no such thing as a fast recovery here - the supervisor already waited 15
@@ -2356,6 +2443,14 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         }
 
         var candidates = FailoverOrder(previous);
+
+        // Never a relay another tunnel is on: a handshake to it would move that tunnel's session here and silence it
+        // (G5), taking its matches with it. Only when no other relay is left does home try one of those.
+        if (paths is not null)
+        {
+            var free = candidates.Where(r => OtherTunnelTo(RelayPaths.RelayIdOf(r)) is null).ToList();
+            if (free.Count > 0) candidates = free;
+        }
         var delay = TimeSpan.FromSeconds(2);
 
         // Which relay the pinned /32 currently points at. This is NOT the same question as
@@ -2427,6 +2522,13 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                               "the previous relay had. Convenient - the adapter needs no change - but it is " +
                               "the two address pools coinciding, not a resumed session.");
                     }
+                    else if (_paths is not null)
+                    {
+                        // Re-addressing would break every flow on the other tunnels whose socket is bound to the
+                        // adapter's address (5.2). The dispatcher rewrites for the new home instead.
+                        _log($"Got a different inner IP ({session.ClientIp}) - the adapter keeps its address and the " +
+                             "new tunnel rewrites, because other tunnels are carrying traffic.");
+                    }
                     else
                     {
                         _log($"Got a different inner IP ({session.ClientIp}) - reconfiguring the adapter.");
@@ -2440,7 +2542,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                         InstallRoutes();
                     }
 
-                    client.StartPumping(adapter, ct);
+                    StartTunnel(client, ct);
+                    routes.UnpinStuckDestinations(adapter.InterfaceIndex);
                     _error = null;
                     SetState(TunnelState.Connected,
                         new StatusText("svc.reconnected", $"Reconnected to {relay.Name}", relay.Name));
@@ -2579,6 +2682,10 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         WarnAboutRoutedLandmarks(cidrs);
         _routes.InstallGameRoutes(_adapter.InterfaceIndex, cidrs);
         _log($"Installed {cidrs.Count} routes into the virtual adapter.");
+
+        // From here the game's UDP reaches the tunnels; none by the supervisor's next pass means the lobby, and
+        // the region plan need not wait out two more passes to know it.
+        ArmLobbyGate();
     }
 
     /// <summary>
@@ -2759,6 +2866,12 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         phases?.Mark("routes");
 
         if (_tunnel is not null) LogGameDestinations(_tunnel);
+
+        // The uplink first: it reads the adapter on every packet and must be gone before the session ends
+        // below, and gone before the tunnel it sends on is disposed.
+        _pump?.Dispose();
+        _pump = null;
+        TearDownMultiTunnel("disconnected", readdress: false);
         _tunnel?.Dispose();
         _tunnel = null;
         phases?.Mark("tunnel");
@@ -2792,6 +2905,16 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         }
         phases?.Mark("spike recorder");
 
+        // Anything a reconnect racing this teardown put in place after the tunnel was disposed above: the
+        // supervisor is only cancelled after that, and a handshake that succeeded in between starts a tunnel
+        // and the adapter's reader again (StartTunnel). Both must be gone before the session ends - the reader
+        // is inside the ring on every packet - and neither may be left running for the next connect.
+        _pump?.Dispose();
+        _pump = null;
+        TearDownMultiTunnel("disconnected", readdress: false);
+        _tunnel?.Dispose();
+        _tunnel = null;
+
         // Deleting the adapter comes last, and it is also the safety brake: any route still
         // pointing at it disappears along with it. The session and the adapter are timed apart:
         // keeping the adapter between connects would save the second and not the first.
@@ -2812,6 +2935,36 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         }
         phases?.Mark("rest");
     }
+
+    /// <summary>
+    /// Puts a handshaken tunnel to work: its downlink and keepalive start, and the adapter's reader is pointed
+    /// at it. The ONE way a tunnel starts carrying traffic - connect, reconnect and a move between matches all
+    /// come through here. The reader is created on the first call after the adapter session opens.
+    /// </summary>
+    private void StartTunnel(TunnelClient tunnel, CancellationToken ct)
+    {
+        var adapter = _adapter ?? throw new InvalidOperationException("There is no virtual adapter to pump.");
+
+        // Several tunnels: the new home rewrites to the adapter's fixed address from its first packet, and what
+        // was on the old home is on this one now. Before the pump points at it, so nothing slips past either.
+        var paths = _paths;
+        if (paths is not null) tunnel.Dispatcher = paths;
+        tunnel.StartPumping(adapter, ct);
+        paths?.ReplaceHome(tunnel);
+
+        if (_pump is null)
+        {
+            _pump = new AdapterPump(adapter, _log);
+            _pump.Start();
+        }
+        _pump.SetHome(tunnel);
+    }
+
+    /// <summary>
+    /// Stops the adapter's reader from sending on the tunnel in use, BEFORE that tunnel is put away. What Windows
+    /// sends meanwhile waits in the adapter for the next tunnel - see AdapterPump.
+    /// </summary>
+    private void StopUplink() => _pump?.SetHome(null);
 
     /// <summary>
     /// The virtual adapter for a connect, with a session open: the one kept from the last connect when there
@@ -2884,6 +3037,13 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         // between the two - a status that says "measured" over an estimated number.
         var direct = DirectGamePingMs;
 
+        // The tunnel carrying the match, read once like the ping: the relay named, its pings and its loss must be
+        // one tunnel's. Home whenever region routing is not in force - exactly the fields as they always were.
+        var carrying = CarryingNow();
+        var carrier = carrying.Tunnel;
+        var carrierPath = PathFor(carrier);
+        var others = OtherTunnelsNow();
+
         // Both are worked out once and read three times below - the English sentence, its language
         // key and its arguments have to describe the same moment.
         var choiceNote = RelayChoiceNote();
@@ -2896,9 +3056,11 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             DetailCode = _detailText.Key.Length > 0 ? _detailText.Key : null,
             DetailArgs = _detailText.Args.Count > 0 ? _detailText.Args : null,
             Error = _error,
-            RelayId = _relay?.Id,
-            RelayName = _relay?.Name,
-            RelayAddress = _relay?.Endpoint,
+            RelayId = carrying.Relay?.Id,
+            RelayName = carrying.Relay?.Name,
+            RelayAddress = carrying.Relay?.Endpoint,
+            HomeRelayName = _paths is null ? null : _relay?.Name,
+            RegionPaths = RegionPathsForStatus(),
             // What is CONFIGURED, not what is connected, so the settings screen can show the current
             // value before anything has been tried. The key is deliberately absent - see the
             // set-relay comment in PipeServer.
@@ -2924,7 +3086,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             // say; Connect reports it, and names the file.
             Configured = (_config.HasKey || _token is not null) &&
                          (Relays.Count > 0 || _config.RelayEndpoints.Count > 0),
-            TunnelPingMs = _tunnel?.LastRttMs,
+            TunnelPingMs = carrier?.LastRttMs,
             // The real thing when the game's own server answers an echo through the tunnel, and the
             // estimate when it does not.
             //
@@ -2933,10 +3095,10 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             // re-probing the datacentre. It is still an estimate against a stand-in host, which is
             // why the measurement wins whenever there is one. Null until something has answered,
             // which is right: a number built on no measurement is not better than showing nothing.
-            GamePingMs = direct ?? (_path is { } p && _tunnel?.LastRttMs is { } live ? live + p.Offset : null),
+            GamePingMs = direct ?? (carrierPath is { } p && carrier?.LastRttMs is { } live ? live + p.Offset : null),
             GamePingDirect = direct is not null,
-            GameRegionName = _path?.RegionName,
-            LossRatio = _tunnel?.LossRatio,
+            GameRegionName = carrierPath?.RegionName,
+            LossRatio = carrier?.LossRatio,
             GameRunning = _watcher?.IsGameRunning ?? false,
             // The game being played, or - when none is - the only one there is. With several there is
             // no selector, so naming the one relays happened to be measured for would read as a choice
@@ -2948,10 +3110,11 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             RelayChoiceNoteCode = choiceNote?.Key,
             RelayChoiceNoteArgs = choiceNote is { Args.Count: > 0 } ? choiceNote.Args : null,
             ActiveRoutes = _routes?.ActiveRouteCount ?? 0,
-            PacketsSent = _tunnel?.PacketsSent ?? 0,
-            PacketsReceived = _tunnel?.PacketsReceived ?? 0,
-            PacketsDropped = _tunnel?.PacketsDropped ?? 0,
-            PacketsDroppedFaults = _tunnel?.PacketsDroppedFaults ?? 0,
+            // Every tunnel's: what the booster carried, whichever relay it went through.
+            PacketsSent = (_tunnel?.PacketsSent ?? 0) + others.Sum(t => t.PacketsSent),
+            PacketsReceived = (_tunnel?.PacketsReceived ?? 0) + others.Sum(t => t.PacketsReceived),
+            PacketsDropped = (_tunnel?.PacketsDropped ?? 0) + others.Sum(t => t.PacketsDropped),
+            PacketsDroppedFaults = (_tunnel?.PacketsDroppedFaults ?? 0) + others.Sum(t => t.PacketsDroppedFaults),
             // The PUBLIC half only. It is not a secret - it is the device's name, and the UI has to
             // send it to the licence server to register this machine, so it has to be readable here.
             // The private half never crosses the pipe in any form; see the set-relay note about the
@@ -3211,6 +3374,10 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             _routes!.RemoveGameRoutes(_adapter.InterfaceIndex);
         }
         _game = game;
+
+        // The other tunnels were planned for the previous game's regions. The supervisor closes them before anything
+        // else it does, and before a move to a relay that carries this game.
+        if (_paths is not null) Volatile.Write(ref _multiTunnelResetReason, $"{game.Name} started");
 
         // Both belonged to the previous game's server. The probe loop measures the new one within a
         // second of its first packet.

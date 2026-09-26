@@ -91,3 +91,7 @@ profiles/apex-vn.json
 profiles/wot-vn.json
 profiles/lol-vn.json
 profiles/deltaforce-vn.json
+# Server side of docs/MULTI-TUNNEL.md: web-service, admin pages, anti-abuse, production data.
+docs/MULTI-TUNNEL-SERVER.md
+# Working state of multi-tunnel: what is verified, what is next, the traps. Read before touching region routing.
+docs/MULTI-TUNNEL-HANDOFF.md

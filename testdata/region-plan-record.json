@@ -1,0 +1,73 @@
+{
+  "id": "00000000000000000000000000000000",
+  "type": "regionPlan",
+  "schema": 2,
+  "utc": "2026-09-25T14:00:00+00:00",
+  "app": "0.4.0",
+  "game": "deltaforce",
+  "relay": "vn-2",
+  "entry": null,
+  "region": "Ho Chi Minh City",
+  "link": "wired",
+  "trigger": "after-match",
+  "mode": "record",
+  "modeSource": "the game\u0027s setting",
+  "acted": false,
+  "home": "vn-2",
+  "allowDirect": false,
+  "maxTunnels": 3,
+  "measureSeconds": 14.2,
+  "complete": true,
+  "stopped": null,
+  "relaysMeasured": [
+    "vn-1",
+    "hk-2"
+  ],
+  "regions": [
+    {
+      "id": "hcm",
+      "hasLandmark": true,
+      "homeMs": 22,
+      "directMs": 31,
+      "viaMs": {
+        "hk-2": 61,
+        "vn-1": 24
+      },
+      "viaWay": {
+        "hk-2": "hk-2",
+        "vn-1": "vn-1"
+      },
+      "path": "home",
+      "chosenMs": 22,
+      "reason": "home 22 ms - best other vn-1 24 ms is not faster by 5 ms"
+    },
+    {
+      "id": "hk",
+      "hasLandmark": true,
+      "homeMs": 58,
+      "directMs": 66,
+      "viaMs": {
+        "hk-2": 37,
+        "vn-1": 57
+      },
+      "viaWay": {
+        "hk-2": "hk-2-hn",
+        "vn-1": "vn-1"
+      },
+      "path": "hk-2",
+      "chosenMs": 37,
+      "reason": "hk-2 37 ms against home 58 ms"
+    },
+    {
+      "id": "sg",
+      "hasLandmark": false,
+      "homeMs": null,
+      "directMs": null,
+      "viaMs": {},
+      "viaWay": {},
+      "path": "home",
+      "chosenMs": null,
+      "reason": "no landmark - follows home"
+    }
+  ]
+}

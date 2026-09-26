@@ -7,12 +7,15 @@ using GamePingBooster.Service.Native;
 namespace GamePingBooster.Service.Tunnel;
 
 /// <summary>
-/// The client end of the tunnel: one UDP socket talking to the relay, and two threads pumping
-/// packets between that socket and the Wintun virtual adapter.
+/// The client end of the tunnel: one UDP socket talking to the relay. Packets from the relay are
+/// unwrapped and handed to the virtual adapter by this tunnel's own downlink thread; packets going to
+/// the relay are read off the adapter by <see cref="AdapterPump"/> - the adapter's one reader - and
+/// given to <see cref="SendInner"/>. Until 2026-09-25 each tunnel read the adapter itself; the read
+/// moved out so that several tunnels can share one adapter (docs/MULTI-TUNNEL.md).
 ///
-/// The two pump loops run on <b>dedicated threads, not the thread pool</b>. Game packets are
-/// latency sensitive, and the thread pool can add milliseconds of delay when the machine is
-/// under load - which is exactly when someone is playing a game.
+/// The downlink and keepalive loops run on <b>dedicated threads, not the thread pool</b>. Game
+/// packets are latency sensitive, and the thread pool can add milliseconds of delay when the machine
+/// is under load - which is exactly when someone is playing a game.
 /// </summary>
 internal sealed class TunnelClient : IDisposable
 {
@@ -30,9 +33,14 @@ internal sealed class TunnelClient : IDisposable
 
     /// <summary>Set first thing in <see cref="Dispose"/>: the one socket failure the pump threads must end on.</summary>
     private volatile bool _disposing;
-    private WintunAdapter? _adapter;
-    private Thread? _uplinkThread;
+    private IPacketDevice? _adapter;
     private Thread? _downlinkThread;
+
+    /// <summary>
+    /// The wrapped form of an outgoing packet. Written only by <see cref="SendInner"/>, which only
+    /// the pump's single thread calls.
+    /// </summary>
+    private readonly byte[] _uplinkWire = new byte[GpbProtocol.MaxPacketLen];
     private Thread? _keepaliveThread;
     private CancellationTokenSource? _cts;
 
@@ -40,6 +48,12 @@ internal sealed class TunnelClient : IDisposable
 
     /// <summary>Cached from the session so the uplink filter does not recompute it per packet.</summary>
     private uint _subnetBroadcast;
+
+    /// <summary>The session's inner address, host order; 0 before the handshake. Read per packet by the dispatcher.</summary>
+    private uint _innerIp;
+
+    /// <summary>Set while several tunnels share the adapter. See <see cref="Dispatcher"/>.</summary>
+    private volatile PathDispatcher? _dispatcher;
 
     private readonly Stopwatch _clock = Stopwatch.StartNew();
 
@@ -84,15 +98,18 @@ internal sealed class TunnelClient : IDisposable
     private long _lastDownUdpAt, _maxDownGap, _downUdpPackets;
 
     /// <summary>
-    /// The echo currently in flight through the live tunnel, or null when none is.
+    /// The echoes in flight through the live tunnel, a few slots, each null when free.
     ///
-    /// One slot, not a dictionary: probes are sent one at a time and time out well inside their
-    /// own interval, so there is never a second one outstanding. The downlink thread reads this
-    /// field for every packet it carries, and a hashtable lookup on the packet path to hold at
-    /// most one entry would be cost for nothing.
+    /// It was one slot, when the in-game ping loop was the only caller. Now the region planner measures
+    /// through a live tunnel too, and the in-game ping follows whichever tunnel carries the match - a
+    /// second caller on one slot got null, which read as "no answer through this tunnel" (MULTI-TUNNEL.md
+    /// 5.6). Four, because there are at most two callers and each has one echo out at a time. Still no
+    /// dictionary: the downlink thread looks at these only while <see cref="_probesInFlight"/> says one
+    /// is out, and then at four references.
     /// </summary>
-    private volatile PendingProbe? _pendingProbe;
-    private ushort _probeSequence;
+    private readonly PendingProbe?[] _pendingProbes = new PendingProbe?[4];
+    private int _probesInFlight;
+    private int _probeSequence;
 
     private sealed class PendingProbe
     {
@@ -202,6 +219,20 @@ internal sealed class TunnelClient : IDisposable
 
     public GpbProtocol.HandshakeResult Session { get; private set; }
 
+    /// <summary><see cref="Session"/>'s inner address, host order; 0 before the handshake.</summary>
+    internal uint InnerIp => _innerIp;
+
+    /// <summary>
+    /// The multi-tunnel dispatcher, or null for one tunnel. Set, every packet from the relay is handed to it
+    /// before Windows sees it - it keeps the flow stuck to this tunnel and gives the packet the adapter's address
+    /// (<see cref="PathDispatcher.OnDownlink"/>). Null is the single-tunnel path exactly as it was.
+    /// </summary>
+    internal PathDispatcher? Dispatcher
+    {
+        get => _dispatcher;
+        set => _dispatcher = value;
+    }
+
     public TunnelClient(IPEndPoint relayEndpoint, TunnelAuth auth, ulong clientId, Action<string> log)
     {
         _relayEndpoint = relayEndpoint;
@@ -271,6 +302,7 @@ internal sealed class TunnelClient : IDisposable
 
                 _sessionId = result.SessionId;
                 Session = result;
+                _innerIp = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(result.ClientIp.GetAddressBytes());
                 _subnetBroadcast = UplinkFilter.SubnetBroadcastFor(result.ClientIp);
                 Volatile.Write(ref _lastHeardTicks, _clock.ElapsedTicks);
                 _log($"Handshake succeeded in {HandshakeRttMs:F0} ms. Tunnel IP: {result.ClientIp}, MTU {result.Mtu}");
@@ -492,10 +524,9 @@ internal sealed class TunnelClient : IDisposable
     {
         var socket = _socket;
         if (socket is null || _sessionId == 0) return null;
-        if (_pendingProbe is not null) return null;   // one at a time; the caller is a timer
 
         var id = (ushort)Random.Shared.Next(1, ushort.MaxValue);
-        var sequence = unchecked(++_probeSequence);
+        var sequence = unchecked((ushort)Interlocked.Increment(ref _probeSequence));
 
         var inner = new byte[GpbProtocol.MaxPacketLen];
         var wire = new byte[GpbProtocol.MaxPacketLen];
@@ -509,7 +540,13 @@ internal sealed class TunnelClient : IDisposable
             Sequence = sequence,
             SentTicks = _clock.ElapsedTicks,
         };
-        _pendingProbe = probe;
+        int slot;
+        for (slot = 0; slot < _pendingProbes.Length; slot++)
+        {
+            if (Interlocked.CompareExchange(ref _pendingProbes[slot], probe, null) is null) break;
+        }
+        if (slot == _pendingProbes.Length) return null;   // every slot taken: a caller out of step, not an answer
+        Interlocked.Increment(ref _probesInFlight);
 
         try
         {
@@ -534,23 +571,35 @@ internal sealed class TunnelClient : IDisposable
             // Always clear the slot, including on the timeout path. Leaving a dead probe in place
             // would make the downlink thread keep testing every packet against it and would block
             // every later probe, which fails closed to "the game server never answers".
-            _pendingProbe = null;
+            Volatile.Write(ref _pendingProbes[slot], null);
+            Interlocked.Decrement(ref _probesInFlight);
         }
     }
 
-    /// <summary>Starts both pump threads plus the keepalive loop.</summary>
-    public void StartPumping(WintunAdapter adapter, CancellationToken ct)
+    /// <summary>Downlink thread: completes the probe <paramref name="ip"/> answers, if it answers one.</summary>
+    private bool TryCompleteProbe(ReadOnlySpan<byte> ip)
+    {
+        for (var slot = 0; slot < _pendingProbes.Length; slot++)
+        {
+            var pending = Volatile.Read(ref _pendingProbes[slot]);
+            if (pending is null || !IcmpEcho.IsReplyTo(ip, pending.Target, pending.Id, pending.Sequence)) continue;
+            var rtt = (_clock.ElapsedTicks - pending.SentTicks) * 1000.0 / Stopwatch.Frequency;
+            pending.Completion.TrySetResult(rtt);
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Starts the downlink and keepalive threads. The uplink is the <see cref="AdapterPump"/>'s: this
+    /// tunnel carries packets up from the moment the pump is pointed at it.
+    /// </summary>
+    public void StartPumping(IPacketDevice adapter, CancellationToken ct)
     {
         _adapter = adapter;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var token = _cts.Token;
 
-        _uplinkThread = new Thread(() => UplinkLoop(token))
-        {
-            Name = "gpb-uplink",
-            IsBackground = true,
-            Priority = ThreadPriority.AboveNormal,
-        };
         _downlinkThread = new Thread(() => DownlinkLoop(token))
         {
             Name = "gpb-downlink",
@@ -564,93 +613,73 @@ internal sealed class TunnelClient : IDisposable
             IsBackground = true,
             Priority = ThreadPriority.AboveNormal,
         };
-        _uplinkThread.Start();
         _downlinkThread.Start();
         _keepaliveThread.Start();
     }
 
-    /// <summary>Wintun to relay: read what Windows pushed into the adapter, wrap it, send it.</summary>
-    private void UplinkLoop(CancellationToken ct)
+    /// <summary>
+    /// Adapter to relay, for one packet the <see cref="AdapterPump"/> read: filter it, note it, wrap it, send it.
+    /// What the old per-tunnel uplink loop did with each packet, unchanged - only the read moved out.
+    ///
+    /// Called by the pump's single thread only. Every socket failure it knows is handled here and costs the one
+    /// packet; the loop the old code could end on is the pump's now, which never ends over a send.
+    /// </summary>
+    internal void SendInner(ReadOnlySpan<byte> packet)
     {
-        var packet = new byte[GpbProtocol.MaxPacketLen];
-        var wire = new byte[GpbProtocol.MaxPacketLen];
-
-        while (!ct.IsCancellationRequested)
+        if (UplinkFilter.IsLocalNoise(packet, _subnetBroadcast))
         {
-            Socket? current = null;
-            try
-            {
-                var len = _adapter!.ReceivePacket(packet);
-                if (len < 0)
-                {
-                    // Ring is empty - sleep until the driver signals a packet, do not spin.
-                    _adapter.WaitForPacket(250);
-                    continue;
-                }
-                if (len == 0)
-                {
-                    // ReceivePacket returns 0 when the packet did not fit the buffer, which can
-                    // only happen if the adapter MTU has been raised past MaxPacketLen.
-                    Interlocked.Increment(ref _dropUplinkOversize);
-                    continue;
-                }
+            Interlocked.Increment(ref _dropUplinkLocalNoise);
+            return;
+        }
 
-                if (UplinkFilter.IsLocalNoise(packet.AsSpan(0, len), _subnetBroadcast))
-                {
-                    Interlocked.Increment(ref _dropUplinkLocalNoise);
-                    continue;
-                }
+        // Before wrapping, while the inner IP header is still in front of us. Reading it
+        // here costs one header parse and saves ever having to reproduce this from a
+        // packet capture on a tester's machine. Sits after the filter so the summary is
+        // game traffic rather than the discovery chatter that was burying it.
+        Destinations.Note(packet);
 
-                // Before wrapping, while the inner IP header is still in front of us. Reading it
-                // here costs one header parse and saves ever having to reproduce this from a
-                // packet capture on a tester's machine. Sits after the filter so the summary is
-                // game traffic rather than the discovery chatter that was burying it.
-                Destinations.Note(packet.AsSpan(0, len));
+        // UDP only: the game's own stream. The lobby's TCP connection shares the tunnel and
+        // goes quiet for seconds at a time, which would read as a frozen game.
+        if (packet.Length >= IcmpEcho.Ipv4HeaderLen && packet[9] == 17)
+        {
+            NoteCadence(ref _lastUpUdpAt, ref _maxUpGap, ref _upUdpPackets);
+        }
 
-                // UDP only: the game's own stream. The lobby's TCP connection shares the tunnel and
-                // goes quiet for seconds at a time, which would read as a frozen game.
-                if (len >= IcmpEcho.Ipv4HeaderLen && packet[9] == 17)
-                {
-                    NoteCadence(ref _lastUpUdpAt, ref _maxUpGap, ref _upUdpPackets);
-                }
-
-                var wireLen = GpbProtocol.WriteData(wire, _sessionId, packet.AsSpan(0, len));
-                current = _socket;
-                current!.Send(wire.AsSpan(0, wireLen), SocketFlags.None);
-                Interlocked.Increment(ref _packetsSent);
-            }
-            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.MessageSize)
-            {
-                // Too big for the path with DF set. Counted on its own because it is the signature
-                // of an MTU that is wrong for this player's connection: a steady trickle here,
-                // affecting only large packets, is the classic path-MTU black hole.
-                Interlocked.Increment(ref _dropUplinkPathMtu);
-            }
-            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionReset)
-            {
-                // ICMP port-unreachable from the relay: drop it, keep the tunnel alive.
-                Interlocked.Increment(ref _dropUplinkSendFailed);
-            }
-            catch (SocketException ex) when (ex.SocketErrorCode is SocketError.Interrupted or SocketError.OperationAborted)
-            {
-                // Normal shutdown - see the matching case in DownlinkLoop - or a MoveTo swapping the
-                // socket under this send, in which case the next packet goes out on the new one. A socket
-                // closed with nothing to replace it is neither, and ends the loop - and so does a failure
-                // before any socket was touched (current still null): that is the adapter, not a move, and
-                // carrying on would spin on it.
-                if (_disposing || ct.IsCancellationRequested || current is null || ReferenceEquals(current, _socket)) return;
-            }
-            catch (ObjectDisposedException)
-            {
-                if (_disposing || ct.IsCancellationRequested || current is null || ReferenceEquals(current, _socket)) return;
-            }
-            catch (Exception ex)
-            {
-                _log($"Uplink thread error: {ex.Message}");
-                return;
-            }
+        var wireLen = GpbProtocol.WriteData(_uplinkWire, _sessionId, packet);
+        try
+        {
+            _socket!.Send(_uplinkWire.AsSpan(0, wireLen), SocketFlags.None);
+            Interlocked.Increment(ref _packetsSent);
+        }
+        catch (SocketException ex) when (ex.SocketErrorCode == SocketError.MessageSize)
+        {
+            // Too big for the path with DF set. Counted on its own because it is the signature
+            // of an MTU that is wrong for this player's connection: a steady trickle here,
+            // affecting only large packets, is the classic path-MTU black hole.
+            Interlocked.Increment(ref _dropUplinkPathMtu);
+        }
+        catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionReset)
+        {
+            // ICMP port-unreachable from the relay: drop it, keep the tunnel alive.
+            Interlocked.Increment(ref _dropUplinkSendFailed);
+        }
+        catch (SocketException ex) when (ex.SocketErrorCode is SocketError.Interrupted or SocketError.OperationAborted)
+        {
+            // A MoveTo swapping the socket under this send - the next packet goes out on the new one - or
+            // Dispose closing it, after which the engine points the pump elsewhere. Not counted, as before:
+            // it is the tunnel being moved or put away, not a fault.
+        }
+        catch (ObjectDisposedException)
+        {
+            // The same two, caught a moment later.
         }
     }
+
+    /// <summary>A packet the pump could not read whole: the adapter MTU raised past MaxPacketLen.</summary>
+    internal void CountUplinkOversize() => Interlocked.Increment(ref _dropUplinkOversize);
+
+    /// <summary>A packet the pump could not send for a reason <see cref="SendInner"/> does not know.</summary>
+    internal void CountUplinkSendFailed() => Interlocked.Increment(ref _dropUplinkSendFailed);
 
     /// <summary>Relay to Wintun: receive from the relay, unwrap, inject into the Windows stack.</summary>
     private void DownlinkLoop(CancellationToken ct)
@@ -690,14 +719,7 @@ internal sealed class TunnelClient : IDisposable
                             // The check costs a few length tests and a protocol byte compare, and
                             // only while a probe is in flight, which is a fraction of a second
                             // once a second. Everything else falls through untouched.
-                            var pending = _pendingProbe;
-                            if (pending is not null &&
-                                IcmpEcho.IsReplyTo(ip, pending.Target, pending.Id, pending.Sequence))
-                            {
-                                var rtt = (_clock.ElapsedTicks - pending.SentTicks) * 1000.0 / Stopwatch.Frequency;
-                                pending.Completion.TrySetResult(rtt);
-                                break;
-                            }
+                            if (Volatile.Read(ref _probesInFlight) > 0 && TryCompleteProbe(ip)) break;
 
                             // The spike recorder's echoes, consumed for the same reason as the probe
                             // above. Tested on the protocol byte first, so the game's UDP never pays
@@ -713,6 +735,18 @@ internal sealed class TunnelClient : IDisposable
                             if (ip.Length >= IcmpEcho.Ipv4HeaderLen && ip[9] == 17)
                             {
                                 NoteCadence(ref _lastDownUdpAt, ref _maxDownGap, ref _downUdpPackets);
+                            }
+
+                            // Several tunnels: the adapter's address, and the flow kept on this tunnel.
+                            if (_dispatcher is { } dispatcher)
+                            {
+                                var writable = buffer.AsSpan(GpbProtocol.DataHeaderLen, ip.Length);
+                                if (!dispatcher.OnDownlink(this, writable))
+                                {
+                                    Interlocked.Increment(ref _dropDownlinkForeign);
+                                    break;
+                                }
+                                ip = writable;
                             }
 
                             if (_adapter!.SendPacket(ip))
@@ -1021,18 +1055,15 @@ internal sealed class TunnelClient : IDisposable
         _cts?.Cancel();
         _socket?.Dispose();
 
-        // Both pumps must be gone before the caller disposes the Wintun adapter: they call into
-        // the adapter's session on every packet, and WintunEndSession while one is still running
-        // is a use-after-free that takes the whole LocalSystem service down. Neither loop can
-        // block for long - the uplink waits at most 250 ms on the ring, and disposing the socket
-        // above unblocks the downlink - so a timeout here means something is genuinely stuck, and
-        // it must not pass silently.
-        var uplinkStopped = _uplinkThread?.Join(TimeSpan.FromSeconds(2)) ?? true;
+        // The downlink must be gone before the caller ends the adapter's session: it calls into the
+        // session on every packet, and WintunEndSession while it is still running is a use-after-free
+        // that takes the whole LocalSystem service down. (The uplink is the AdapterPump's, and the
+        // engine stops that one itself.) Disposing the socket above unblocks the downlink's Receive,
+        // so a timeout here means something is genuinely stuck, and it must not pass silently.
         var downlinkStopped = _downlinkThread?.Join(TimeSpan.FromSeconds(2)) ?? true;
-        if (!uplinkStopped || !downlinkStopped)
+        if (!downlinkStopped)
         {
-            _log($"WARNING: a pump thread did not stop within 2s (uplink stopped: {uplinkStopped}, " +
-                 $"downlink stopped: {downlinkStopped}). The adapter is about to be released while " +
+            _log("WARNING: the downlink thread did not stop within 2s. The adapter is about to be released while " +
                  "it may still be in use - if the service dies right after this line, that is why.");
         }
 

@@ -859,6 +859,20 @@ switch ($Verb.ToLowerInvariant()) {
         & dotnet run --project (Join-Path $client 'src\GamePingBooster.QualityCheck\GamePingBooster.QualityCheck.csproj')
         if ($LASTEXITCODE -ne 0) { throw "the spike detector checks failed" }
 
+        # Multi-tunnel's pure core, before any of it carries a packet: the inner-address NAT checked by full
+        # checksum recomputation over random packets, the region table against a brute-force scan, and the
+        # planner's guarantees over random plans. See docs/MULTI-TUNNEL.md, section 10.1.
+        Say "C#: multi-tunnel paths - NAT, region table, sticky destinations, planner"
+        & dotnet run --project (Join-Path $client 'src\GamePingBooster.PathCheck\GamePingBooster.PathCheck.csproj')
+        if ($LASTEXITCODE -ne 0) { throw "the multi-tunnel path checks failed" }
+
+        # The packet path itself - AdapterPump and TunnelClient - driven in-process through a fake adapter
+        # against a fake relay on loopback that keeps relayd's rules. No driver, no VPS, no Administrator.
+        # See docs/MULTI-TUNNEL.md, section 10.2.
+        Say "C#: the packet path against a fake relay"
+        & dotnet run --project (Join-Path $client 'src\GamePingBooster.TunnelCheck\GamePingBooster.TunnelCheck.csproj')
+        if ($LASTEXITCODE -ne 0) { throw "the packet path checks failed" }
+
         Say "Everything passed" 'Green'
     }
 

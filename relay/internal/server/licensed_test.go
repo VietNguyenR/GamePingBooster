@@ -371,3 +371,55 @@ func TestATierAboveTheRelayMinimumIsAdmitted(t *testing.T) {
 		t.Fatal("a token above the minimum tier got no session")
 	}
 }
+
+// The report names the installation behind each session, so the sessions one client holds on several
+// relays (one per game region) can be read as one client. It must follow the handshake that is live,
+// not the one the session was minted with: a client
+// reinstalled mid-session resumes its session under a new id, and reporting the old one would make
+// one installation look like two for as long as the session lasts.
+func TestTheReportNamesTheInstallationOfTheLiveHandshake(t *testing.T) {
+	s, cli, licence, relayPub := licensedRelay(t)
+
+	device, err := protocol.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := mintFor(t, licence, device, time.Hour)
+
+	handshake := func(id protocol.ClientID) protocol.SessionID {
+		t.Helper()
+		req, nonce, err := protocol.BuildHandshakeReqToken(device, token, id, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cli.Write(req); err != nil {
+			t.Fatal(err)
+		}
+		res, err := protocol.ParseHandshakeRespToken(relayPub, recvPacket(t, cli), nonce)
+		if err != nil || res.Status != protocol.StatusOK {
+			t.Fatalf("handshake refused: %v, status %d", err, res.Status)
+		}
+		return res.Session
+	}
+	reported := func() string {
+		t.Helper()
+		rep := s.Snapshot(time.Now())
+		if len(rep.Devices) != 1 {
+			t.Fatalf("devices = %d, want 1", len(rep.Devices))
+		}
+		return rep.Devices[0].ClientID
+	}
+
+	first := handshake(clientID(7))
+	if got := reported(); got != "0707070707070707" {
+		t.Fatalf("client_id = %q, want 0707070707070707", got)
+	}
+
+	// Same device, new installation: the reservation is the device's, so the session is resumed.
+	if second := handshake(clientID(8)); second != first {
+		t.Fatalf("the same device got a second session: %x then %x", first, second)
+	}
+	if got := reported(); got != "0808080808080808" {
+		t.Fatalf("after the resume client_id = %q, want 0808080808080808", got)
+	}
+}

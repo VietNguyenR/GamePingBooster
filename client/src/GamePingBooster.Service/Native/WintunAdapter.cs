@@ -7,7 +7,7 @@ namespace GamePingBooster.Service.Native;
 /// Wraps a Wintun adapter and its session behind a disposable API.
 /// Lifecycle: Create -> StartSession -> (ReceivePacket / SendPacket) -> Dispose.
 /// </summary>
-internal sealed class WintunAdapter : IDisposable
+internal sealed class WintunAdapter : IPacketDevice, IDisposable
 {
     private nint _adapter;
     private nint _session;

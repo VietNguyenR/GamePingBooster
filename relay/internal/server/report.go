@@ -115,6 +115,11 @@ type ReportDevice struct {
 	// row. It is what a report is resolved by; user_id is a one-way hash and cannot be.
 	DeviceKey string `json:"device_key,omitempty"`
 
+	// ClientID is the installation id from the handshake, 16 hex characters, reported beside the
+	// device key and only with it. Optional to the licence server, which reads a report without it
+	// as one from a relay older than the field. See sessionIdent.clientID.
+	ClientID string `json:"client_id,omitempty"`
+
 	ConnectedAt int64 `json:"connected_at"` // unix seconds
 	LastSeen    int64 `json:"last_seen"`    // unix seconds
 	Resumed     bool  `json:"resumed,omitempty"`
@@ -181,6 +186,7 @@ func (s *Server) Snapshot(now time.Time) Report {
 		}
 		if len(sess.ident.deviceKey) == protocol.PublicKeyLen {
 			d.DeviceKey = hex.EncodeToString(sess.ident.deviceKey)
+			d.ClientID = hex.EncodeToString(sess.ident.clientID[:])
 		}
 		rep.Devices = append(rep.Devices, d)
 	}

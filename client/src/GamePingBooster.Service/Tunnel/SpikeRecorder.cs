@@ -57,7 +57,8 @@ internal sealed class SpikeRecorder : IQualitySink
         bool GameRunning,
         IReadOnlyList<DoorProbes.Door> Doors,
         bool MovesEnabled,
-        string? ConnectLeftDoor = null);
+        string? ConnectLeftDoor = null,
+        string? Carried = null);
 
     private static readonly long TickLength = Stopwatch.Frequency / SpikeDetector.TicksPerSecond;
 
@@ -457,7 +458,14 @@ internal sealed class SpikeRecorder : IQualitySink
 
         if (_tunnel is not null) _tunnel.QualitySink = null;
         _tunnel = tunnel;
-        if (tunnel is not null) tunnel.QualitySink = this;
+        if (tunnel is not null)
+        {
+            tunnel.QualitySink = this;
+            // What a tunnel counted before the recorder listened to it is not this quarter second's. A new tunnel
+            // has nothing; one that was already carrying - the tunnel to another relay a match has moved to - has
+            // every packet since it opened, and the lobby trickle's gaps with them.
+            tunnel.TakeCadence();
+        }
 
         // The server path belonged to the old tunnel's session and possibly a different relay.
         _serverPath = null;
@@ -822,10 +830,13 @@ internal sealed class SpikeRecorder : IQualitySink
     // ------------------------------------------------------------------ reporting
 
     /// <summary>What a record written now would say about the session - taken by the engine before a move changes it.</summary>
-    public QualityMeta CurrentMeta() => Meta(_context());
+    public QualityMeta CurrentMeta(Context? context = null) => Meta(context ?? _context());
 
     /// <summary>A move to another relay between matches, once its follow-up is over. See QualityFile.WriteRelayMove.</summary>
     public void WriteRelayMove(RelayMoveRecord move, QualityMeta meta) => _file.WriteRelayMove(move, meta);
+
+    /// <summary>One pass of the region planner. See QualityFile.WriteRegionPlan.</summary>
+    public void WriteRegionPlan(RegionPlanRecord plan, QualityMeta meta) => _file.WriteRegionPlan(plan, meta);
 
     private QualityMeta Meta(Context context) => new(
         AppVersion,
@@ -833,7 +844,8 @@ internal sealed class SpikeRecorder : IQualitySink
         context.RelayId,
         context.EntryId,
         context.RegionName,
-        _nic is null ? null : _nic.NetworkInterfaceType == NetworkInterfaceType.Wireless80211 ? "Wi-Fi" : "wired");
+        _nic is null ? null : _nic.NetworkInterfaceType == NetworkInterfaceType.Wireless80211 ? "Wi-Fi" : "wired",
+        context.Carried);
 
     private void Report(SpikeEvent spike, Context context)
     {
@@ -886,7 +898,9 @@ internal sealed class SpikeRecorder : IQualitySink
         if (_inMatch && summary is not null && summary.ActiveSeconds >= MinMatchSeconds)
         {
             _file.WriteMatch(summary, Meta(context));
-            _log(DescribeMatch(summary));
+            _log(DescribeMatch(summary) + (context.Carried == "other"
+                ? $" Carried by {context.RelayName ?? context.RelayId} - region routing sent this match there, not home."
+                : ""));
         }
         _inMatch = false;
     }
