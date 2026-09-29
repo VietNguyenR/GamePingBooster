@@ -4,10 +4,11 @@
 /// The Vietnamese text of the UI. Same keys as <see cref="StringsEn"/>; anything missing here
 /// falls back to the English of that table rather than showing a key.
 ///
-/// Two things kept deliberately in English, because translating them would make the screen harder
-/// to read rather than easier: "ping" and "relay". Both are what Vietnamese players already say -
-/// "độ trễ" is understood but nobody says it about a game, and a relay is the name of a thing this
-/// app owns. "Game" stays "game" for the same reason.
+/// "Ping" is kept in English: it is what Vietnamese players already say - "độ trễ" is understood but
+/// nobody says it about a game. "Game" stays "game" for the same reason.
+///
+/// A relay is "máy chủ" (2026-09-30, the owner's call: "relay" read as jargon), which makes the game's own
+/// server always "máy chủ game" - never a bare "máy chủ" - so the two cannot be taken for each other.
 /// </summary>
 internal static class StringsVi
 {
@@ -24,9 +25,10 @@ internal static class StringsVi
         ["main.account.account"] = "Tài khoản",
 
         ["main.label.gamePing"] = "Ping trong game",
-        ["main.label.relayPing"] = "Ping tới relay",
-        ["main.label.loss"] = "Mất gói tới relay",
-        ["main.label.relay"] = "Máy chủ relay",
+        ["main.label.relayPing"] = "Ping tới máy chủ",
+        ["main.label.loss"] = "Mất gói tới máy chủ",
+        ["main.label.relay"] = "Máy chủ chính",
+        ["main.label.adaptive"] = "Máy chủ khu vực",
         ["main.label.game"] = "Game",
         ["main.label.routing"] = "Định tuyến",
         ["main.label.packets"] = "Gói tin",
@@ -38,12 +40,11 @@ internal static class StringsVi
         ["unblock.tip.off"] = "Tính năng mở chặn chưa chạy. Service sẽ tiếp tục thử lại.",
         ["main.games.tip"] = "Xem các game được hỗ trợ",
 
-        ["main.setup.needed"] =
-            "Chưa cấu hình relay. Mở Cài đặt rồi nhập địa chỉ relay và khoá của bạn.",
+        ["main.setup.needed"] = "Chưa cấu hình máy chủ. Mở Cài đặt rồi nhập địa chỉ máy chủ và khoá của bạn.",
         ["main.setup.signIn"] = "Đăng nhập để bắt đầu: mở menu (góc trên bên phải) rồi chọn Đăng nhập.",
         ["main.server.label"] = "Máy chủ",
         ["main.server.tip"] =
-            "Ping ở đây là ping tới chính máy chủ đó. Chế độ Tự động đo cả đường đi tới game lúc bạn bấm Kết nối rồi chọn máy chủ nhanh nhất.",
+            "Ping ở đây là ping tới chính máy chủ đó. Chế độ Tự động đo cả đường đi tới game lúc bạn bấm Bắt đầu tăng tốc rồi chọn máy chủ nhanh nhất.",
 
         ["main.update.available"] = "Đã có bản mới v{0}",
         ["main.update.required"] = "Cần cập nhật lên v{0} để kết nối",
@@ -56,8 +57,9 @@ internal static class StringsVi
         ["status.reconnecting"] = "Đang kết nối lại...",
         ["status.faulted"] = "Lỗi",
         ["status.unknown"] = "Không rõ",
-        ["action.connect"] = "Kết nối",
-        ["action.disconnect"] = "Ngắt kết nối",
+        ["action.connect"] = "Bắt đầu tăng tốc",
+        ["action.connect.hint"] = "Tự nhận game bạn đang chơi, không cần chọn",
+        ["action.disconnect"] = "Dừng tăng tốc",
 
         ["detail.starting"] = "Đang khởi động...",
         ["detail.disconnecting"] = "Đang ngắt kết nối...",
@@ -76,28 +78,34 @@ internal static class StringsVi
         ["game.noneOpen"] = "Chưa mở game nào - hỗ trợ {0} game",
 
         ["gamePing.tip.pending"] = "Hiện ra sau khi đo xong kết nối.",
-        ["gamePing.tip.measured"] = "Số đo thật: gói thăm dò tới máy chủ của trận này, đi qua đường hầm.",
+        ["gamePing.tip.measured"] = "Số đo thật: gói thăm dò tới máy chủ game của trận này, đi qua đường hầm.",
         ["gamePing.tip.estimated"] =
-            "Số ước tính: ping tới {0} cộng với quãng đường từ đó tới máy chủ {1} của game. Game tự chọn máy chủ " +
-            "của nó - đổi relay là đổi đường đi tới máy chủ, không đổi được máy chủ. Khi đang trong trận, số này " +
+            "Số ước tính: ping tới {0} cộng với quãng đường từ đó tới máy chủ game {1}. Game tự chọn máy chủ game của nó - " +
+            "đổi máy chủ ở đây là đổi đường đi tới máy chủ game, không đổi được máy chủ game. Khi đang trong trận, số này " +
             "bám theo đúng khu vực game đang dùng, nếu nhận ra được từ traffic của game.",
         ["gamePing.tip.nextMatch"] =
-            "Số ước tính cho trận tới. Máy chủ {1} của game đi qua {0} nhanh hơn qua {2}, nên trận ở đó sẽ đi qua " +
-            "{0}; sảnh và mọi thứ khác vẫn đi qua {2}. Số này là ping tới {0} cộng quãng đường từ đó tới các máy chủ đó.",
-        ["gamePing.tip.theRelay"] = "relay",
+            "Số ước tính cho trận tới. Máy chủ game {1} đi qua {0} nhanh hơn qua {2}, nên trận ở đó sẽ đi qua {0}; sảnh và " +
+            "mọi thứ khác vẫn đi qua {2}. Số này là ping tới {0} cộng quãng đường từ đó tới máy chủ game.",
+        ["gamePing.tip.theRelay"] = "máy chủ",
         ["loss.tip.pending"] = "Hiện ra sau khi kết nối được vài giây.",
         ["loss.tip"] =
-            "Tỷ lệ gói kiểm tra từ máy bạn tới {0} không được trả lời, trong khoảng một phút gần nhất. Đây là chặng từ " +
-            "máy bạn tới relay, không phải tới máy chủ game. Relay đang mất gói bị xếp sau relay không mất gói khi app " +
-            "chọn relay, kể cả khi nó ping thấp hơn; nếu có relay tốt hơn, app chuyển sang giữa hai trận.",
+            "Tỷ lệ gói kiểm tra từ máy bạn tới {0} không được trả lời, trong khoảng một phút gần nhất. Đây là chặng từ máy " +
+            "bạn tới máy chủ, không phải tới máy chủ game. Máy chủ đang mất gói bị xếp sau máy chủ không mất gói khi app " +
+            "chọn, kể cả khi nó ping thấp hơn; nếu có máy chủ tốt hơn, app chuyển sang giữa hai trận.",
         ["gamePing.tip.itsServers"] = "riêng",
 
         ["relay.automatic"] = "Tự động - nhanh nhất",
         ["relay.withPing"] = "{0} - {1} ms",
         ["relay.noAnswer"] = "{0} - không phản hồi",
         ["relay.notForGame"] = "{0} - không dùng cho {1}",
-        ["relay.tip.regionsHome"] = "{0} - relay bạn đang kết nối. Trận ở một số khu vực đi qua relay riêng, nhanh hơn: {1}.",
-        ["relay.tip.regionsMatch"] = "Trận này đi qua {0}, relay nhanh hơn cho khu vực của nó. Mọi thứ khác đi qua {1}. Theo khu vực: {2}.",
+        ["adaptive.tip"] =
+            "Các máy chủ nhanh hơn cho những khu vực khác của game này, app tự đo và đo lại sau mỗi trận: {0}. Khi game xếp " +
+            "bạn vào máy chủ game ở một trong các khu vực đó, trận sẽ đi qua máy chủ tương ứng và tên nó chuyển màu xanh. " +
+            "Mọi thứ khác vẫn đi qua {1}.",
+        ["adaptive.tip.none"] =
+            "Các máy chủ nhanh hơn cho những khu vực khác của game sẽ hiện ở đây sau khi app đo xong ở sảnh. Hiện chưa có: " +
+            "game này chỉ có một khu vực, hoặc không máy chủ nào nhanh hơn máy chủ bạn đang dùng.",
+        ["relay.tip.regionsHome"] = "{0} - máy chủ chính bạn đang kết nối. Trận ở một số khu vực đi qua máy chủ khu vực, nhanh hơn: {1}.",
 
         ["licence.renewing"] =
             "Đang gia hạn giấy phép... Nếu gói của bạn đã hết, gia hạn trên website là app tự nhận.",
@@ -119,10 +127,10 @@ internal static class StringsVi
         ["tray.tooltipWithPing"] = "Game Ping Booster - {0}, {1}",
 
         // ------------------------------------------------------------------ settings window
-        ["settings.title"] = "Cài đặt relay",
+        ["settings.title"] = "Cài đặt máy chủ",
         ["settings.intro"] =
-            "Địa chỉ các relay của bạn và khoá dùng để cài chúng. Cả hai đều được in ra lúc bạn chạy bộ cài relay trên máy chủ.",
-        ["settings.relays"] = "Địa chỉ relay",
+            "Địa chỉ các máy chủ của bạn và khoá dùng để cài chúng. Cả hai đều được in ra lúc bạn chạy bộ cài trên VPS.",
+        ["settings.relays"] = "Địa chỉ máy chủ",
         ["settings.relays.hint"] =
             "Mỗi dòng một địa chỉ. Nếu có nhiều hơn một, app sẽ đo hết rồi dùng cái nhanh nhất, và tự chuyển sang " +
             "cái khác nếu nó ngừng phản hồi.",
@@ -130,19 +138,19 @@ internal static class StringsVi
         ["settings.psk.placeholderKeep"] = "Để trống nếu giữ nguyên khoá cũ",
         ["settings.psk.placeholderNew"] = "44 ký tự",
         ["settings.psk.hintKeep"] = "Đã có khoá được lưu. App không hiện lại khoá, để trống ô này là giữ nguyên.",
-        ["settings.psk.hintNew"] = "Bộ cài relay in ra khoá này, ngay cạnh địa chỉ.",
+        ["settings.psk.hintNew"] = "Bộ cài máy chủ in ra khoá này, ngay cạnh địa chỉ.",
         ["settings.licence"] = "Máy chủ giấy phép",
         ["settings.licence.hint"] =
-            "Nơi tài khoản Game Ping Booster của bạn đăng nhập và nơi lấy danh sách game. Đã được điền sẵn - cứ để " +
-            "nguyên. Chỉ xoá đi nếu bạn tự chạy relay riêng với khoá ở trên.",
+            "Nơi tài khoản Game Ping Booster của bạn đăng nhập và nơi lấy danh sách game. Đã được điền sẵn - cứ để nguyên. " +
+            "Chỉ xoá đi nếu bạn tự chạy máy chủ riêng với khoá ở trên.",
         ["settings.quality"] = "Gửi chất lượng kết nối sau mỗi trận",
         ["settings.quality.hint"] =
-            "Ping, các cú giật và chỗ sinh ra mỗi cú giật đó - mạng nhà bạn, đường tới relay, bản thân relay, hay " +
-            "máy chủ game - kèm relay và game đang dùng. Không gửi địa chỉ IP, không gửi gì về các phần mềm khác. " +
-            "Chỉ gửi giữa các trận, không bao giờ gửi lúc đang chơi.",
+            "Ping, các cú giật và chỗ sinh ra mỗi cú giật đó - mạng nhà bạn, đường tới máy chủ, bản thân máy chủ, hay máy " +
+            "chủ game - kèm máy chủ và game đang dùng. Không gửi địa chỉ IP, không gửi gì về các phần mềm khác. Chỉ gửi " +
+            "giữa các trận, không bao giờ gửi lúc đang chơi.",
         ["settings.language"] = "Ngôn ngữ",
         ["settings.language.hint"] = "Đổi là áp dụng ngay. Chỉ đổi ngôn ngữ của app, không đụng gì tới game.",
-        ["settings.saved"] = "Đã lưu. Bấm Kết nối ở cửa sổ chính.",
+        ["settings.saved"] = "Đã lưu. Bấm Bắt đầu tăng tốc ở cửa sổ chính.",
         ["settings.noService"] = "Dịch vụ nền chưa chạy nên chưa lưu được. Hãy khởi động dịch vụ rồi thử lại.",
         ["settings.serviceUnreachable"] = "Không liên lạc được với dịch vụ nền: {0}",
         ["settings.save"] = "Lưu",
@@ -160,7 +168,7 @@ internal static class StringsVi
             "{0} đang chạy. Nếu bạn đang trong trận thì chơi xong hãy cập nhật: cập nhật sẽ ngắt kết nối, và game " +
             "quay về đường mạng thường cho tới khi bạn kết nối lại.",
         ["update.warn.connected"] =
-            "Bạn đang kết nối. Cập nhật sẽ ngắt kết nối trong lúc cài; app mở lại thì bấm Kết nối lần nữa.",
+            "Bạn đang kết nối. Cập nhật sẽ ngắt kết nối trong lúc cài; app mở lại thì bấm Bắt đầu tăng tốc lần nữa.",
         ["update.later"] = "Để sau",
         ["update.now"] = "Cập nhật ngay",
         ["update.downloading"] = "Đang tải bản mới...",
@@ -191,7 +199,7 @@ internal static class StringsVi
 
         // ------------------------------------------------------------------ from the service
         ["svc.preparing"] = "Đang chuẩn bị...",
-        ["svc.measuring"] = "Đang đo các relay...",
+        ["svc.measuring"] = "Đang đo các máy chủ...",
         ["svc.creatingAdapter"] = "Đang tạo card mạng ảo...",
         ["svc.connectFailed"] = "Kết nối thất bại",
         ["svc.connectedAccelerating"] = "Đã kết nối tới {0} - đang tăng tốc {1}",
@@ -209,20 +217,20 @@ internal static class StringsVi
         ["svc.disconnecting"] = "Đang ngắt kết nối...",
         ["svc.notConnected"] = "Chưa kết nối",
         ["svc.idleDisconnect"] =
-            "Đã tự ngắt kết nối - {0} phút không mở game nào. Bấm Kết nối trước khi chơi.",
+            "Đã tự ngắt kết nối - {0} phút không mở game nào. Bấm Bắt đầu tăng tốc trước khi chơi.",
 
         ["choiceNote.nextConnect"] = "Sẽ áp dụng từ lần kết nối sau.",
         ["choiceNote.notForGame"] = "{0} không dùng cho {1} - đang dùng {2}.",
         ["choiceNote.notAnswering"] = "{0} không phản hồi - đang dùng {1} thay thế.",
 
-        ["refusal.notSignedIn"] =
-            "Máy này kết nối qua relay có giấy phép nhưng chưa đăng nhập. Vào menu đăng nhập để lấy giấy phép.",
-        ["refusal.expired"] =
-            "Giấy phép đã hết hạn {0}. Gia hạn gói rồi đăng nhập lại - relay không chấp nhận giấy phép hết hạn.",
+        ["refusal.notSignedIn"] = "Máy này kết nối qua máy chủ có giấy phép nhưng chưa đăng nhập. Vào menu đăng nhập để lấy giấy phép.",
+        ["refusal.expired"] = "Giấy phép đã hết hạn {0}. Gia hạn gói rồi đăng nhập lại - máy chủ không chấp nhận giấy phép hết hạn.",
 
         // ------------------------------------------------------------------ about window
         ["about.title"] = "Giới thiệu",
-        ["about.tagline"] = "Đưa traffic của game qua một relay ở nước ngoài, nơi có đường tới máy chủ game tốt hơn đường mà nhà mạng của bạn tự chọn.",
+        ["about.tagline"] =
+            "Đưa traffic của game qua máy chủ tăng tốc, nơi có đường tới máy chủ game tốt hơn đường mà nhà mạng của bạn tự " +
+            "chọn.",
         ["about.author"] = "Tác giả",
         ["about.source"] = "Mã nguồn",
         ["about.devBuild"] = "Bản phát triển",
@@ -308,15 +316,15 @@ internal static class StringsVi
         ["auth.mismatch"] = "Lượt đăng nhập trả về không phải lượt mà app này vừa bắt đầu. Chưa có gì bị thay đổi. Hãy thử lại, và nếu vẫn bị thì tắt các bản app khác đang mở trước.",
         ["auth.timeout"] = "Trình duyệt không phản hồi trong {0} phút. Nếu không thấy cửa sổ trình duyệt nào mở ra, hãy kiểm tra Windows đã chọn trình duyệt mặc định chưa.",
 
-        // ------------------------------------------------------------------ notices under the Connect button
+        // ------------------------------------------------------------------ notices under the Start boosting button
         ["notice.profileFailed"] = "Không cập nhật được danh sách game: {0}",
         ["notice.profileUnreachable"] = "Không kết nối được máy chủ giấy phép để cập nhật danh sách game ({0}).",
         ["notice.minutes.one"] = "1 phút",
         ["notice.minutes.many"] = "{0} phút",
         ["notice.clock.ahead"] =
-            "Đồng hồ máy này đang nhanh hơn máy chủ giấy phép khoảng {0} - relay từ chối nếu lệch quá {1} giây. Cứ bấm Kết nối: app sẽ tự chỉnh giờ trước.",
+            "Đồng hồ máy này đang nhanh hơn máy chủ giấy phép khoảng {0} - lệch quá {1} giây là không kết nối được. Cứ bấm Bắt đầu tăng tốc: app sẽ tự chỉnh giờ trước.",
         ["notice.clock.behind"] =
-            "Đồng hồ máy này đang chậm hơn máy chủ giấy phép khoảng {0} - relay từ chối nếu lệch quá {1} giây. Cứ bấm Kết nối: app sẽ tự chỉnh giờ trước.",
+            "Đồng hồ máy này đang chậm hơn máy chủ giấy phép khoảng {0} - lệch quá {1} giây là không kết nối được. Cứ bấm Bắt đầu tăng tốc: app sẽ tự chỉnh giờ trước.",
         ["notice.renewFailed"] = "Không gia hạn được giấy phép: {0}",
         ["notice.clearFailed"] = "Không xoá được giấy phép đã hết hạn ({0}).",
         ["notice.renewUnreachable"] = "Không kết nối được máy chủ giấy phép ({0}). App sẽ thử lại sau ít phút.",
@@ -327,9 +335,11 @@ internal static class StringsVi
         ["lag.subtitle"] = "Hãy chạy NGAY LÚC đang bị lag. Hết lag rồi thì không còn gì để đo.",
         ["lag.intro"] = "Công cụ này đo mọi đoạn của kết nối cùng một lúc, rồi gửi kết quả cho bộ phận hỗ trợ để tìm ra chỗ bị lỗi. Mất khoảng 20 giây.",
         ["lag.sent.header"] = "NHỮNG GÌ ĐƯỢC ĐO VÀ GỬI ĐI",
-        ["lag.sent.1"] = "• Thời gian phản hồi, độ dao động và tỉ lệ mất gói tới router nhà bạn, tới mạng của nhà mạng, và tới relay.",
-        ["lag.sent.2"] = "• Đường mạng tới relay, trong đó có địa chỉ nội bộ của router nhà bạn và địa chỉ các router của nhà mạng.",
-        ["lag.sent.3"] = "• Địa chỉ IP công khai của bạn, relay đang dùng, phiên bản app, và game có đang chạy hay không.",
+        ["lag.sent.1"] =
+            "• Thời gian phản hồi, độ dao động và tỉ lệ mất gói tới router nhà bạn, tới mạng của nhà mạng, và tới máy chủ.",
+        ["lag.sent.2"] =
+            "• Đường mạng tới máy chủ, trong đó có địa chỉ nội bộ của router nhà bạn và địa chỉ các router của nhà mạng.",
+        ["lag.sent.3"] = "• Địa chỉ IP công khai của bạn, máy chủ đang dùng, phiên bản app, và game có đang chạy hay không.",
         ["lag.sent.4"] = "• Các số ping và mất gói mà app đang hiển thị cho bạn.",
         ["lag.notSent.header"] = "NHỮNG GÌ KHÔNG GỬI ĐI",
         ["lag.notSent.1"] = "• Không gì về việc bạn làm trên mạng — không lịch sử duyệt web, không tên file, không nội dung tin nhắn hay game.",
@@ -341,8 +351,8 @@ internal static class StringsVi
         ["lag.start"] = "Đo và gửi",
         ["lag.running"] = "Đang đo. Cứ tiếp tục chơi — mục đích là bắt được lỗi đúng lúc nó xảy ra.",
         ["lag.starting"] = "Đang bắt đầu...",
-        ["lag.progress.relay"] = "Đang đo relay...",
-        ["lag.progress.trace"] = "Đang dò đường tới relay...",
+        ["lag.progress.relay"] = "Đang đo máy chủ...",
+        ["lag.progress.trace"] = "Đang dò đường tới máy chủ...",
         ["lag.progress.tick"] = "Đang đo... {0}/{1} giây",
         ["lag.result.failed"] = "Không đo được",
         ["lag.result.clean"] = "Không phát hiện vấn đề",
@@ -355,10 +365,20 @@ internal static class StringsVi
         ["lag.verdict.router"] = "Mạng trong nhà là chỗ đầu tiên có vấn đề{0} - Wi-Fi, dây mạng, hoặc chính router. Mọi đoạn phía sau đều bị ảnh hưởng theo.",
         ["lag.verdict.isp-access"] = "Mạng truy nhập của nhà mạng là đoạn đầu tiên bị lỗi{0}. Mạng trong nhà vẫn ổn, nên lỗi nằm ở đường dây vào tới nhà, không phải bên trong nhà bạn.",
         ["lag.verdict.isp-core"] = "Mạng trong nước của nhà mạng là đoạn đầu tiên bị lỗi{0} - ngay trong nước, trước khi ra đường quốc tế.",
-        ["lag.verdict.international"] = "Mọi đoạn trong nước đều ổn, nhưng đoạn đi ra quốc tế thì không{0}. Đó là đường trung chuyển giữa nhà mạng của bạn và khu vực đặt relay, hoặc đường truyền của chính relay - không nằm trên đường dây nhà bạn và không sửa được từ phía bạn. Nếu cứ lặp lại, hãy thử một relay đi theo đường khác.",
-        ["lag.verdict.relay"] = "Đường tới relay là đoạn đầu tiên bị lỗi{0}, trong khi mọi đoạn trong nước đều ổn. Lỗi nằm ở phía ngoài biên giới - trên đường ra quốc tế, hoặc ngay ở cửa vào của relay.",
-        ["lag.verdict.relay-udp"] = "Đường vật lý tới relay vẫn ổn nhưng phản hồi của chính relay thì không{0}. Cả hai số đều là một vòng đi-về tới cùng một máy qua cùng một đường, nên chênh lệch không phải do mạng - mà do tiến trình relay, hoặc do chính máy tính này xử lý chậm. Chạy lại một lần bằng dây mạng thay vì Wi-Fi sẽ phân biệt được hai trường hợp.",
-        ["lag.verdict.game"] = "Mọi đoạn tới relay đều ổn nhưng ping trong game thì không{0}, nên lỗi nằm sau relay - giữa relay và máy chủ game.",
+        ["lag.verdict.international"] =
+            "Mọi đoạn trong nước đều ổn, nhưng đoạn đi ra quốc tế thì không{0}. Đó là đường trung chuyển giữa nhà mạng của " +
+            "bạn và khu vực đặt máy chủ, hoặc đường truyền của chính máy chủ - không nằm trên đường dây nhà bạn và không " +
+            "sửa được từ phía bạn. Nếu cứ lặp lại, hãy thử một máy chủ đi theo đường khác.",
+        ["lag.verdict.relay"] =
+            "Đường tới máy chủ là đoạn đầu tiên bị lỗi{0}, trong khi mọi đoạn trong nước đều ổn. Lỗi nằm ở phía ngoài biên " +
+            "giới - trên đường ra quốc tế, hoặc ngay ở cửa vào của máy chủ.",
+        ["lag.verdict.relay-udp"] =
+            "Đường vật lý tới máy chủ vẫn ổn nhưng phản hồi của chính máy chủ thì không{0}. Cả hai số đều là một vòng đi-về " +
+            "tới cùng một máy qua cùng một đường, nên chênh lệch không phải do mạng - mà do phần mềm trên máy chủ, hoặc do " +
+            "chính máy tính này xử lý chậm. Chạy lại một lần bằng dây mạng thay vì Wi-Fi sẽ phân biệt được hai trường hợp.",
+        ["lag.verdict.game"] =
+            "Mọi đoạn tới máy chủ đều ổn nhưng ping trong game thì không{0}, nên lỗi nằm sau máy chủ của app - giữa nó và " +
+            "máy chủ game.",
 
     };
 }

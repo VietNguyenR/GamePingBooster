@@ -26,7 +26,8 @@ internal static class StringsEn
         ["main.label.gamePing"] = "Ping in game",
         ["main.label.relayPing"] = "Ping to relay",
         ["main.label.loss"] = "Loss to relay",
-        ["main.label.relay"] = "Relay server",
+        ["main.label.relay"] = "Main relay",
+        ["main.label.adaptive"] = "Adaptive relays",
         ["main.label.game"] = "Game",
         ["main.label.routing"] = "Routing",
         ["main.label.packets"] = "Packets",
@@ -56,8 +57,9 @@ internal static class StringsEn
         ["status.reconnecting"] = "Reconnecting...",
         ["status.faulted"] = "Error",
         ["status.unknown"] = "Unknown",
-        ["action.connect"] = "Connect",
-        ["action.disconnect"] = "Disconnect",
+        ["action.connect"] = "Start boosting",
+        ["action.connect.hint"] = "Works with any supported game - detected automatically",
+        ["action.disconnect"] = "Stop boosting",
 
         ["detail.starting"] = "Starting up...",
         ["detail.disconnecting"] = "Disconnecting...",
@@ -98,8 +100,14 @@ internal static class StringsEn
         ["relay.withPing"] = "{0} - {1} ms",
         ["relay.noAnswer"] = "{0} - no answer",
         ["relay.notForGame"] = "{0} - not used for {1}",
+        ["adaptive.tip"] =
+            "Faster relays for this game's other regions, measured by the app and measured again after every match: " +
+            "{0}. When the game puts your match on a server in one of those regions, the match goes through that relay, " +
+            "and its name turns green. Everything else stays on {1}.",
+        ["adaptive.tip.none"] =
+            "Faster relays for the game's other regions appear here once the app has measured them in the lobby. " +
+            "None for now: this game has one region, or no other relay beats the one you are on.",
         ["relay.tip.regionsHome"] = "{0} - the relay you are connected to. Matches in some regions go through their own, faster relay: {1}.",
-        ["relay.tip.regionsMatch"] = "This match goes through {0}, the faster relay for its region. Everything else goes through {1}. By region: {2}.",
 
         ["licence.renewing"] =
             "Renewing the licence... If your plan has ended, renew it on the website and it is picked up here.",
@@ -145,7 +153,7 @@ internal static class StringsEn
             "programs. Sent between matches, never during one.",
         ["settings.language"] = "Language",
         ["settings.language.hint"] = "Applies immediately. Only this app changes; the game is untouched.",
-        ["settings.saved"] = "Saved. Press Connect in the main window.",
+        ["settings.saved"] = "Saved. Press Start boosting in the main window.",
         ["settings.noService"] = "The service is not running, so there is nothing to save to. Start it and try again.",
         ["settings.serviceUnreachable"] = "Could not reach the service: {0}",
         ["settings.save"] = "Save",
@@ -163,7 +171,7 @@ internal static class StringsEn
             "{0} is running. If you are in a match, finish it first: updating disconnects you, and the game goes " +
             "back to your normal internet route until you connect again.",
         ["update.warn.connected"] =
-            "You are connected. The update will disconnect you while it installs; press Connect again when the app reopens.",
+            "You are connected. The update will disconnect you while it installs; press Start boosting again when the app reopens.",
         ["update.later"] = "Later",
         ["update.now"] = "Update now",
         ["update.downloading"] = "Downloading the new version...",
@@ -212,7 +220,7 @@ internal static class StringsEn
         ["svc.disconnecting"] = "Disconnecting...",
         ["svc.notConnected"] = "Not connected",
         ["svc.idleDisconnect"] =
-            "Disconnected automatically - no game was open for {0} minutes. Press Connect before you play.",
+            "Disconnected automatically - no game was open for {0} minutes. Press Start boosting before you play.",
 
         ["choiceNote.nextConnect"] = "Applies the next time you connect.",
         ["choiceNote.notForGame"] = "{0} is not used for {1} - using {2}.",
@@ -311,15 +319,15 @@ internal static class StringsEn
         ["auth.mismatch"] = "The sign-in that came back is not the one this app started. Nothing was changed. Try again, and if it keeps happening close any other copy of the app first.",
         ["auth.timeout"] = "No answer from the browser within {0} minutes. If no browser window opened, check that Windows has a default browser set.",
 
-        // ------------------------------------------------------------------ notices under the Connect button
+        // ------------------------------------------------------------------ notices under the Start boosting button
         ["notice.profileFailed"] = "Could not update the game list: {0}",
         ["notice.profileUnreachable"] = "Could not reach the licence server to update the game list ({0}).",
         ["notice.minutes.one"] = "1 minute",
         ["notice.minutes.many"] = "{0} minutes",
         ["notice.clock.ahead"] =
-            "This PC's clock is about {0} ahead of the licence server - relays refuse anything more than {1} seconds out. Press Connect: the time is corrected automatically first.",
+            "This PC's clock is about {0} ahead of the licence server - relays refuse anything more than {1} seconds out. Press Start boosting: the time is corrected automatically first.",
         ["notice.clock.behind"] =
-            "This PC's clock is about {0} behind the licence server - relays refuse anything more than {1} seconds out. Press Connect: the time is corrected automatically first.",
+            "This PC's clock is about {0} behind the licence server - relays refuse anything more than {1} seconds out. Press Start boosting: the time is corrected automatically first.",
         ["notice.renewFailed"] = "Could not renew the licence: {0}",
         ["notice.clearFailed"] = "Could not clear the expired licence ({0}).",
         ["notice.renewUnreachable"] = "Could not reach the licence server ({0}). Will try again shortly.",

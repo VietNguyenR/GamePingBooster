@@ -125,6 +125,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// <summary>Whether this installation has a licence server at all.</summary>
     public bool ShowLicence => !string.IsNullOrWhiteSpace(LicenceUrl);
 
+    /// <summary>The licence line under the button: only with a licence server, and only when it has something to say.</summary>
+    public bool ShowLicenceLine => ShowLicence && LicenceText.Length > 0;
+
     /// <summary>What the menu item says. One entry, two states, no dead end either way.</summary>
     public string AccountMenuText => Loc.T(HasToken ? "main.account.account" : "main.account.signIn");
 
@@ -211,7 +214,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             {
                 return Loc.T("licence.signedInShipped");
             }
-            if (TokenExpiresAt is not { } expiry) return Loc.T("licence.signedIn");
+            if (TokenExpiresAt is not { } expiry) return "";
 
             // Renewal happens on its own at half of remaining life, so an expiry hours away is
             // normal and not something to alarm anybody about. Only say something when it is
@@ -224,7 +227,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
             var left = expiry - DateTimeOffset.UtcNow;
             if (left <= TimeSpan.Zero) return Loc.T("licence.expired");
             if (left < TimeSpan.FromHours(2)) return Loc.F("licence.expiresIn", $"{left.TotalMinutes:F0}");
-            return Loc.T("licence.signedIn");
+
+            // Nothing, when all is well: a bare "Signed in" under the button said nothing a player needed (the owner,
+            // 2026-09-30). The line is there for the cases that need doing something - signing in, renewing, a refusal.
+            return "";
         }
     }
 
@@ -239,7 +245,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             if (!Set(ref _state, value)) return;
             Raise(nameof(StatusText));
             Raise(nameof(StatusBrush));
+            RaiseTunnels();
             Raise(nameof(ActionButtonText));
+            Raise(nameof(ShowStartHint));
             Raise(nameof(IsBusy));
             Raise(nameof(CanPressAction));
             Raise(nameof(CanChooseRelay));
@@ -276,6 +284,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             if (!Set(ref _configured, value)) return;
             Raise(nameof(NeedsSetup));
+            Raise(nameof(ShowStartHint));
             Raise(nameof(CanPressAction));
         }
     }
@@ -553,8 +562,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         private set
         {
             if (!Set(ref _relayName, value)) return;
-            Raise(nameof(RelayText));
-            Raise(nameof(RelayTip));
+            RaiseTunnels();
             Raise(nameof(GamePingTip));
             Raise(nameof(LossText));
             Raise(nameof(LossTip));
@@ -572,20 +580,72 @@ public sealed class MainViewModel : INotifyPropertyChanged
         get => _homeRelayName;
         private set
         {
-            if (Set(ref _homeRelayName, value)) Raise(nameof(RelayTip));
+            if (Set(ref _homeRelayName, value)) RaiseTunnels();
         }
     }
 
-    private string _regionPaths = "";
+    private IReadOnlyList<RegionPathStatus> _regionPathList = [];
 
-    /// <summary>Each region leaving by another relay, as "region → relay" joined for the tooltip. Empty with one tunnel.</summary>
-    public string RegionPaths
+    /// <summary>Each region leaving by another relay, and that relay, in the plan's order. Empty with one tunnel.</summary>
+    private IReadOnlyList<RegionPathStatus> RegionPathList
     {
-        get => _regionPaths;
-        private set
+        get => _regionPathList;
+        set
         {
-            if (Set(ref _regionPaths, value)) Raise(nameof(RelayTip));
+            var same = value.Count == _regionPathList.Count &&
+                       value.Zip(_regionPathList).All(p => p.First.Region == p.Second.Region && p.First.RelayName == p.Second.RelayName);
+            if (same) return;
+            _regionPathList = value;
+            RaiseTunnels();
         }
+    }
+
+    /// <summary>Each region leaving by another relay, as "region → relay" joined for the tooltips. Empty with one tunnel.</summary>
+    public string RegionPaths => string.Join("; ", RegionPathList.Select(p => $"{p.Region} → {p.RelayName}"));
+
+    /// <summary>
+    /// The adaptive tunnels: the relays the region plan sends some of this game's regions to, besides home - each
+    /// one once, in the plan's order, and the one carrying the match as well should it have dropped out of the plan
+    /// with a server still on it. Rebuilt whenever a plan changes them, which the service pushes with its status.
+    /// </summary>
+    public IReadOnlyList<AdaptiveTunnel> AdaptiveTunnels
+    {
+        get
+        {
+            var names = RegionPathList.Select(p => p.RelayName).Distinct().ToList();
+            if (CarriedByOther && RelayName is { } carrier && !names.Contains(carrier)) names.Add(carrier);
+            if (names.Count == 0) return [new AdaptiveTunnel(Loc.T("value.none"), ValueBrush)];
+            return [.. names.Select((name, i) => new AdaptiveTunnel(
+                i < names.Count - 1 ? name + "," : name,
+                CarriedByOther && name == RelayName ? CarryingBrush : ValueBrush))];
+        }
+    }
+
+    /// <summary>The match is on an adaptive tunnel rather than home.</summary>
+    private bool CarriedByOther => HomeRelayName is { } home && RelayName is { } carrier && carrier != home;
+
+    public string AdaptiveTip => RegionPaths.Length > 0 || CarriedByOther
+        ? Loc.F("adaptive.tip", RegionPaths.Length > 0 ? RegionPaths : RelayName ?? "", HomeRelayName ?? Loc.T("gamePing.tip.theRelay"))
+        : Loc.T("adaptive.tip.none");
+
+    /// <summary>
+    /// Green on the relay line while home carries the traffic, grey while an adaptive tunnel carries the match - that
+    /// one is green instead, so exactly one name on the card says where the game's packets are going.
+    /// </summary>
+    public IBrush RelayBrush => State == TunnelState.Connected && !CarriedByOther ? CarryingBrush : ValueBrush;
+
+    /// <summary>Connected's green (StatusBrush): the tunnel the game's traffic is on.</summary>
+    private static readonly IBrush CarryingBrush = Brushes.LimeGreen;
+
+    private void RaiseTunnels()
+    {
+        Raise(nameof(RelayText));
+        Raise(nameof(RelayTip));
+        Raise(nameof(RelayBrush));
+        Raise(nameof(RegionPaths));
+        Raise(nameof(AdaptiveTunnels));
+        Raise(nameof(AdaptiveTip));
+        Raise(nameof(PingText));
     }
 
     private int _activeRoutes;
@@ -707,6 +767,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         : "action.connect");
 
     public bool IsBusy => State is TunnelState.Connecting or TunnelState.Reconnecting;
+
+    /// <summary>The line under Start boosting - that the game is found by itself - while the button starts boosting.</summary>
+    public bool ShowStartHint => State is TunnelState.Disconnected or TunnelState.Faulted && !NeedsSetup;
     // Nothing to connect to until a relay and a key exist, so the button is dead until then and
     // the UI says why. Letting it be pressed would produce a failure whose only cure is the
     // settings screen the user has not been told about.
@@ -754,7 +817,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 RelayName ?? Loc.T("gamePing.tip.theRelay"),
                 GameRegionName ?? Loc.T("gamePing.tip.itsServers"));
 
-    public string PingText => PingMs is { } p ? Loc.F("value.ms", $"{p:F0}") : Loc.T("value.none");
+    /// <summary>The ping to the relay carrying the match - named when that is an adaptive tunnel, as the loss is.</summary>
+    public string PingText => PingMs is not { } p
+        ? Loc.T("value.none")
+        : CarriedByOther && RelayName is { } relay
+            ? Loc.F("value.msTo", $"{p:F0}", relay)
+            : Loc.F("value.ms", $"{p:F0}");
     /// <summary>
     /// The loss and the relay it is to: "25.0% to Da Nang". It sat bare under the in-game ping "to Singapore", and on
     /// 2026-09-29 the owner read 25% to Da Nang as 25% to Singapore - the relay is named so the number cannot be
@@ -770,17 +838,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string LossTip => LossRatio is null
         ? Loc.T("loss.tip.pending")
         : Loc.F("loss.tip", RelayName ?? Loc.T("gamePing.tip.theRelay"));
-    public string RelayText => RelayName ?? Loc.T("value.none");
-
     /// <summary>
-    /// The relay line in full, and - while some regions leave by their own relay - which ones, and whether the
-    /// match on now is on one of them. The line itself stays one name: the relay carrying the match.
+    /// Home, the relay connected to - always, since the adaptive tunnels got a line of their own (2026-09-30). Before
+    /// that it named whichever relay carried the match, and home vanished from the card for the length of the match.
     /// </summary>
-    public string RelayTip => HomeRelayName is not { } home || RegionPaths.Length == 0 || RelayName is null
-        ? RelayText
-        : RelayName == home
-            ? Loc.F("relay.tip.regionsHome", home, RegionPaths)
-            : Loc.F("relay.tip.regionsMatch", RelayName, home, RegionPaths);
+    public string RelayText => HomeRelayName ?? RelayName ?? Loc.T("value.none");
+
+    /// <summary>The relay line in full, and - while some regions leave by their own relay - which ones.</summary>
+    public string RelayTip => HomeRelayName is { } home && RegionPaths.Length > 0
+        ? Loc.F("relay.tip.regionsHome", home, RegionPaths)
+        : RelayText;
     public string RouteText => ActiveRoutes > 0 ? Loc.F("value.ranges", ActiveRoutes) : Loc.T("value.none");
 
     /// <summary>
@@ -1149,9 +1216,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         GameCount = status.GameCount;
         RelayName = status.RelayName;
         HomeRelayName = status.HomeRelayName;
-        RegionPaths = status.RegionPaths is { Count: > 0 } paths
-            ? string.Join("; ", paths.Select(p => $"{p.Region} → {p.RelayName}"))
-            : "";
+        RegionPathList = status.RegionPaths ?? [];
         RelayEndpoints = status.RelayEndpoints;
         Configured = status.Configured;
         LicenceUrl = status.LicenceUrl;
@@ -1189,7 +1254,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         LossRatio = null;
         ActiveRoutes = 0;
         HomeRelayName = null;
-        RegionPaths = "";
+        RegionPathList = [];
 
         // Cleared here and NOT on an ordinary disconnect. This method runs when the pipe itself
         // dropped, which means the service is gone - and the service going takes the name policy
@@ -1215,7 +1280,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
         return true;
     }
 
-    private void Raise(string? name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+    private void Raise(string? name)
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+        if (name is nameof(LicenceText) or nameof(ShowLicence))
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowLicenceLine)));
+        }
+    }
 }
 
 /// <summary>
@@ -1278,3 +1350,6 @@ public sealed class RelayChoiceItem : INotifyPropertyChanged
         return pingMs is { } ms ? Loc.F("relay.withPing", place, $"{ms:F0}") : Loc.F("relay.noAnswer", place);
     }
 }
+
+/// <summary>One name on the Adaptive Tunnel line, green while it carries the match.</summary>
+public sealed record AdaptiveTunnel(string Text, IBrush Foreground);
