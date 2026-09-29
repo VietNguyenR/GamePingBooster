@@ -847,6 +847,10 @@ switch ($Verb.ToLowerInvariant()) {
         & (Join-Path $tools 'Test-ProbeProviders.ps1')
         if ($LASTEXITCODE -ne 0) { throw "the provider probe tests failed" }
 
+        Say "Profile check: Steam Datagram Relay games and what stays refused"
+        & (Join-Path $tools 'Test-ProfileRules.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "the profile rule tests failed" }
+
         Say "C#: build and wire-format check"
         & dotnet build (Join-Path $client 'GamePingBooster.sln') --nologo -v quiet
         if ($LASTEXITCODE -ne 0) { throw "C# build failed" }

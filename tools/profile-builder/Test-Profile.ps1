@@ -82,23 +82,26 @@ foreach ($otherPath in $OtherProfilePaths) {
 
     foreach ($g in @($other.games)) {
         if (-not $g -or $ownIds -contains $g.id) { continue }
+        # A Steam Datagram Relay game's ranges and landmarks are Valve's relay list, the same for every
+        # SDR game (see $isSdr below); its lobby addresses are its own.
+        $otherSdr = [bool]$g.landmarksRouted
         foreach ($region in @($g.regions)) {
             if (-not $region) { continue }
             foreach ($c in @($region.cidrs)) {
                 if ("$c" -match '^\d{1,3}(\.\d{1,3}){3}/\d{1,2}$') {
-                    $foreignRanges += [pscustomobject]@{ Cidr = "$c"; Label = "$($g.id)/$($region.id) in $leaf" }
+                    $foreignRanges += [pscustomobject]@{ Cidr = "$c"; Label = "$($g.id)/$($region.id) in $leaf"; Sdr = $otherSdr }
                 }
             }
             foreach ($lm in @($region.landmarks)) {
                 if ("$lm" -match '^\d{1,3}(\.\d{1,3}){3}$') {
-                    $foreignRanges += [pscustomobject]@{ Cidr = "$lm/32"; Label = "landmark of $($g.id)/$($region.id) in $leaf" }
+                    $foreignRanges += [pscustomobject]@{ Cidr = "$lm/32"; Label = "landmark of $($g.id)/$($region.id) in $leaf"; Sdr = $otherSdr }
                 }
             }
         }
         foreach ($entry in @($g.lobbyAddresses)) {
             $address = ("$entry".Trim() -split '/')[0]
             if ($address -match '^\d{1,3}(\.\d{1,3}){3}$') {
-                $foreignRanges += [pscustomobject]@{ Cidr = "$address/32"; Label = "lobby address of $($g.id) in $leaf" }
+                $foreignRanges += [pscustomobject]@{ Cidr = "$address/32"; Label = "lobby address of $($g.id) in $leaf"; Sdr = $false }
             }
         }
     }
@@ -109,6 +112,15 @@ $totalAddresses = 0
 $allCidrs = @()
 
 foreach ($game in $profileData.games) {
+    # A Steam Datagram Relay game (Counter-Strike 2, Dota 2): the profile says so with landmarksRouted,
+    # as the licence server does for a game with sdrAppId. Its ranges are Valve's relays, and the game
+    # probes and plays on the same relay, so its landmarks sit inside its ranges on purpose - the rule
+    # below is PUBG's and does not apply. And two SDR games hold the SAME relay list (GetSDRConfig
+    # returns identical relays for 730 and 570), so overlapping another SDR game's relays is not one
+    # game carrying another's servers. Overlapping anything else - a non-SDR game, any lobby address -
+    # is still an error. The server side is bothFromSdrRelayList in web-service/app/lib/sdr.server.ts.
+    $isSdr = [bool]$game.landmarksRouted
+
     # The game's own datacentre probe endpoints. None of them may be inside a routed range: the
     # game measures these to choose a server, and routing some while leaving the rest on the
     # player's connection makes it compare two different paths. That is not theoretical - it put
@@ -161,6 +173,7 @@ foreach ($game in $profileData.games) {
             }
 
             foreach ($lm in $landmarks) {
+                if ($isSdr) { break }
                 if (Test-IpInCidr $lm.Value $cidr) {
                     $errors += ("$label - CONTAINS LANDMARK $($lm.Address) for region '$($lm.Region)'. " +
                                 "The game would measure that region through the relay and every other " +
@@ -170,6 +183,7 @@ foreach ($game in $profileData.games) {
             }
 
             foreach ($f in $foreignRanges) {
+                if ($isSdr -and $f.Sdr) { continue }
                 if (Test-CidrsOverlap $cidr $f.Cidr) {
                     $errors += ("$label - OVERLAPS $($f.Cidr), the $($f.Label). One game's ranges must " +
                                 "never carry another game's servers. Rebuild both with ./gpb profile - " +

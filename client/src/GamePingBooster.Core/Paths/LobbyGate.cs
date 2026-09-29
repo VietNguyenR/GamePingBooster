@@ -78,9 +78,12 @@ public sealed class LobbyGate
                 return false;
             }
 
-            if (_armed && packets == _packets) return true;
-
+            // Nothing yet - over at least MinWindowMs. A reconnect puts the routes back and the supervisor asks a moment
+            // later, inside the same pass: a match in progress has had no time to send anything, and the shortcut
+            // started a plan in the middle of one (TunnelEngine's failure test, 2026-09-27).
             var window = nowMs - _atMs;
+            if (_armed && packets == _packets && window >= MinWindowMs) return true;
+
             if (window < MinWindowMs) return false;
 
             var rate = (packets - _packets) * 1000.0 / window;

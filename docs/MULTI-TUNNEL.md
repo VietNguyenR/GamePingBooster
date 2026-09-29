@@ -140,7 +140,10 @@ it only (7.1), and over the player's own line - the same instrument on every pat
 3. **Best relay** - the lowest median; ties by profile order.
 4. **Leave home only by the margin**, max(5 ms, 10%). (G2)
 5. **Direct** only if the game allows it and it beats the chosen path by the margin. (G8)
-6. **Cap** - at most `MaxTunnels - 1` relays besides home; over it, the relays saving the most are kept.
+6. **Cap** - at most `MaxTunnels - 1` relays besides home. Over it, every set of that many relays is scored by
+   what it saves over home, each region re-decided among the set; the region the game is expected to use (the one
+   home's path is measured against) counts double. The set the last plan holds stays unless another gains, net of
+   what it costs the regions it pushes onto worse paths, the margin of every region it improves.
 7. **Hysteresis** - a region keeps its current path unless the new choice beats that path by the margin, and
    only while that path is still no slower than home.
 

@@ -279,7 +279,13 @@ internal sealed partial class TunnelEngine
                        inForce.HomeRelayId.Equals(homeRelayId, StringComparison.OrdinalIgnoreCase)
             ? inForce.Paths
             : null;
-        var plan = RegionPlanner.Plan(homeRelayId, measurements, new PlannerOptions(game.RegionDirect, RegionRouting.MaxTunnels, order), previous);
+        // The region the game is expected to use: the one home's path is measured against - connect's prediction over the
+        // player's own line, or the region of the last match home carried (FollowMatchRegionAsync). Matched by name, as there.
+        var targetRegionId = PathFor(tunnel) is { } targetPath
+            ? game.Regions.FirstOrDefault(r => r.Name == targetPath.RegionName)?.Id
+            : null;
+        var plan = RegionPlanner.Plan(homeRelayId, measurements,
+            new PlannerOptions(game.RegionDirect, RegionRouting.MaxTunnels, order, targetRegionId), previous);
         if (mode == RegionRoutingMode.On) plan = ForcedByConfig(plan, homeRelayId, profile, viaMs);
 
         var seconds = Stopwatch.GetElapsedTime(started).TotalSeconds;

@@ -83,5 +83,15 @@ internal static partial class Program
             var due = gate.Observe(home, 25_000, 404);
             Check("A busy pass between quiet ones starts the count again", !quiet && !busy && !quietAgain && due);
         }
+        {
+            // A reconnect in the middle of a match: the routes go back in and the supervisor asks milliseconds later,
+            // before the match has sent anything into the new tunnel. Seen on the failure rig, 2026-09-27.
+            var gate = new LobbyGate();
+            gate.Arm(home, 0, 7_000);
+            var atOnce = gate.Observe(home, 2, 7_000);
+            var match = gate.Observe(home, 5_000, 7_250);
+            var later = gate.Observe(home, 10_000, 7_500);
+            Check("Nothing sent means the lobby only after 2 s of it - a reconnect mid-match does not plan", !atOnce && !match && !later);
+        }
     }
 }

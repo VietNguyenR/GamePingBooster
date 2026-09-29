@@ -47,7 +47,9 @@ public sealed record RegionMeasurement(
 /// <param name="AllowDirect">The game may leave a region unrouted (Game.regionDirect).</param>
 /// <param name="MaxTunnels">Tunnels open at once, home included. At least 1.</param>
 /// <param name="RelayOrder">Relay ids in profile order - the last tie-break, so a plan is deterministic.</param>
-public sealed record PlannerOptions(bool AllowDirect, int MaxTunnels, IReadOnlyList<string> RelayOrder);
+/// <param name="TargetRegionId">The region the game will most likely put this player in - the nearest over the player's
+/// own line as connect measured it, or the last match's. Over the cap it counts double (TargetWeight). Null when unknown.</param>
+public sealed record PlannerOptions(bool AllowDirect, int MaxTunnels, IReadOnlyList<string> RelayOrder, string? TargetRegionId = null);
 
 /// <param name="ChosenMs">What the chosen path measured; null only when the region could not be measured.</param>
 /// <param name="Reason">One line for the log and the quality record.</param>
@@ -84,23 +86,101 @@ public static class RegionPlanner
         var used = decisions.Where(d => d.Path.Kind == PathKind.Relay).Select(d => d.Path.RelayId!).Distinct().ToList();
         var room = options.MaxTunnels - 1;
         if (used.Count <= room) return decisions;
+        if (room == 0) return regions.Select(r => Decide(homeRelayId, r, options, previous, [])).ToList();
 
-        // Over the cap: keep the relays the last plan already used first - they are open, and dropping one
-        // because another edged ahead by a millisecond would flap - then the ones saving the most.
-        var saving = used.ToDictionary(
-            id => id,
-            id => decisions.Where(d => d.Path.Kind == PathKind.Relay && d.Path.RelayId == id)
-                .Sum(d => d.HomeMs!.Value - d.ChosenMs!.Value));
+        // Over the cap: which `room` relays to keep. Every set of that size is scored by what it saves over home,
+        // summed over the regions, each region re-decided among the set's relays - at most C(7, 2) = 21 sets.
+        //
+        //   - The region the game will put this player in counts double (TargetWeight). Trading the player's own
+        //     region for a little more elsewhere is the wrong trade - 2026-09-28, an Apex player on Singapore held on
+        //     vn-3 (47 ms) with sg-1 at 38. Double, not first: a hard pin let 5 ms there evict 46 ms on another region.
+        //   - A set the last plan already used stays unless another clears SetWorthMoving, so jitter never flaps an
+        //     open tunnel. It used to stay whatever the other saved, and then a better relay could never enter once
+        //     two were open.
         var inPrevious = previous?.Values.Where(p => p.Kind == PathKind.Relay).Select(p => p.RelayId!).ToHashSet() ?? [];
-        var kept = used
-            .OrderByDescending(id => inPrevious.Contains(id))
-            .ThenByDescending(id => saving[id])
-            .ThenBy(id => OrderOf(options.RelayOrder, id))
-            .ThenBy(id => id, StringComparer.Ordinal)
-            .Take(room)
-            .ToHashSet(StringComparer.Ordinal);
 
-        return regions.Select(r => Decide(homeRelayId, r, options, previous, kept)).ToList();
+        HashSet<string>? best = null;
+        var bestSaving = double.NegativeInfinity;
+        foreach (var set in Combinations(used.OrderBy(id => OrderOf(options.RelayOrder, id)).ThenBy(id => id, StringComparer.Ordinal).ToList(), room))
+        {
+            var saving = SavingOf(homeRelayId, regions, options, previous, set);
+            if (saving > bestSaving + 1e-9)
+            {
+                best = set;
+                bestSaving = saving;
+            }
+        }
+
+        // The set the previous plan holds, topped up the way the old rule did - by what each relay saves alone.
+        if (inPrevious.Overlaps(used))
+        {
+            var saves = used.ToDictionary(
+                id => id,
+                id => decisions.Where(d => d.Path.Kind == PathKind.Relay && d.Path.RelayId == id)
+                    .Sum(d => Weight(options, d.RegionId) * (d.HomeMs!.Value - d.ChosenMs!.Value)));
+            var incumbent = used
+                .OrderByDescending(id => inPrevious.Contains(id))
+                .ThenByDescending(id => saves[id])
+                .ThenBy(id => OrderOf(options.RelayOrder, id))
+                .ThenBy(id => id, StringComparer.Ordinal)
+                .Take(room)
+                .ToHashSet(StringComparer.Ordinal);
+            if (best is null || !SetWorthMoving(homeRelayId, regions, options, previous, incumbent, best)) best = incumbent;
+        }
+
+        return regions.Select(r => Decide(homeRelayId, r, options, previous, best!)).ToList();
+    }
+
+    /// <summary>How much more the region the game is expected to use counts when relays compete for the cap.</summary>
+    public const double TargetWeight = 2.0;
+
+    private static double Weight(PlannerOptions options, string regionId) =>
+        options.TargetRegionId is { } target && target.Equals(regionId, StringComparison.Ordinal) ? TargetWeight : 1.0;
+
+    /// <summary>What a set of relays saves over home, summed over every region re-decided among them and weighted.</summary>
+    private static double SavingOf(string homeRelayId, IReadOnlyList<RegionMeasurement> regions, PlannerOptions options,
+        IReadOnlyDictionary<string, RegionPath>? previous, HashSet<string> relays) =>
+        regions.Select(r => Decide(homeRelayId, r, options, previous, relays))
+            .Where(d => d.Path.Kind != PathKind.Home && d.HomeMs is not null && d.ChosenMs is not null)
+            .Sum(d => Weight(options, d.RegionId) * (d.HomeMs!.Value - d.ChosenMs!.Value));
+
+    /// <summary>
+    /// Whether <paramref name="candidate"/> is worth closing the open <paramref name="incumbent"/> for. What the swap
+    /// gains, net of what the regions it pushes onto a worse path lose, must reach the margin each improved region
+    /// would pay to move on its own (max(5 ms, 10%) of what its path measures now) - summed, and both weighted. One
+    /// margin for the whole set was tried first and flapped: jitter of a quarter margin per region, summed over five
+    /// regions, clears a single margin (PathCheck, PlansDoNotFlapOnNoise).
+    /// </summary>
+    private static bool SetWorthMoving(string homeRelayId, IReadOnlyList<RegionMeasurement> regions, PlannerOptions options,
+        IReadOnlyDictionary<string, RegionPath>? previous, HashSet<string> incumbent, HashSet<string> candidate)
+    {
+        double gain = 0, bar = 0;
+        foreach (var r in regions)
+        {
+            var now = Decide(homeRelayId, r, options, previous, incumbent);
+            var then = Decide(homeRelayId, r, options, previous, candidate);
+            if (now.Path == then.Path) continue;
+            if ((now.ChosenMs ?? now.HomeMs) is not { } a || (then.ChosenMs ?? then.HomeMs) is not { } b) continue;
+            var w = Weight(options, r.RegionId);
+            gain += w * (a - b);
+            if (b < a) bar += w * Margin(a);
+        }
+        return bar > 0 && gain >= bar;
+    }
+
+    /// <summary>Every subset of <paramref name="items"/> of size <paramref name="size"/>, in a fixed order.</summary>
+    private static IEnumerable<HashSet<string>> Combinations(List<string> items, int size)
+    {
+        var index = Enumerable.Range(0, size).ToArray();
+        while (true)
+        {
+            yield return index.Select(i => items[i]).ToHashSet(StringComparer.Ordinal);
+            var k = size - 1;
+            while (k >= 0 && index[k] == items.Count - size + k) k--;
+            if (k < 0) yield break;
+            index[k]++;
+            for (var j = k + 1; j < size; j++) index[j] = index[j - 1] + 1;
+        }
     }
 
     private static RegionDecision Decide(

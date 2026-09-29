@@ -9,7 +9,8 @@ internal static partial class Program
     private static readonly string[] Relays = ["vn-1", "vn-2", "hk-2", "sg-1", "sg-4"];
     private const string HomeRelay = "vn-2";
 
-    private static PlannerOptions Options(bool allowDirect = false, int maxTunnels = 3) => new(allowDirect, maxTunnels, Relays);
+    private static PlannerOptions Options(bool allowDirect = false, int maxTunnels = 3, string? target = null) =>
+        new(allowDirect, maxTunnels, Relays, target);
 
     private static RegionMeasurement Region(string id, double? home, double? direct = null, bool landmark = true,
         params (string Relay, double Ms)[] via) =>
@@ -30,6 +31,10 @@ internal static partial class Program
         OneTunnelMeansNoOtherRelay();
         OverTheCapTheBiggestSavingsStay();
         OverTheCapTheRelaysAlreadyOpenStay();
+        OverTheCapABetterSetReplacesTheOpenOneByTheMargin();
+        OverTheCapTheTargetRegionCountsDouble();
+        TheTargetRegionDoesNotEvictABigSaving();
+        ApexFromDaNang();
         APathInUseStaysUnlessClearlyBeaten();
         APathSlowerThanHomeIsLeftWhateverTheMargin();
         DeltaForceFromHanoi();
@@ -109,8 +114,10 @@ internal static partial class Program
             Region("sg", 60, via: [("sg-1", 45), ("hk-2", 70)]),     // sg-1 saves 15
             Region("jkt", 60, via: [("sg-4", 40), ("sg-1", 42)]),    // sg-4 saves 20, sg-1 would save 18
         ], Options(maxTunnels: 3));
-        Check("Over the cap: hk-2 (30) and sg-4 (20) kept, sg (only sg-1, 15) goes home, jkt stays on sg-4",
-            PathOf(plan, "hk") == RegionPath.Via("hk-2") && PathOf(plan, "jkt") == RegionPath.Via("sg-4") && PathOf(plan, "sg") == RegionPath.HomePath,
+        // By set: {hk-2, sg-1} saves 30 + 15 + 18 = 63, {hk-2, sg-4} 30 + 0 + 20 = 50, {sg-1, sg-4} 10 + 15 + 20 = 45.
+        // Relay by relay (the rule before 2026-09-29) kept hk-2 and sg-4 and sent sg home - 13 ms less in all.
+        Check("Over the cap: the set saving most - hk-2 for hk, sg-1 for sg and jkt (63 ms against 50 relay by relay)",
+            PathOf(plan, "hk") == RegionPath.Via("hk-2") && PathOf(plan, "sg") == RegionPath.Via("sg-1") && PathOf(plan, "jkt") == RegionPath.Via("sg-1"),
             string.Join(", ", plan.Select(d => $"{d.RegionId}={d.Path}")));
     }
 
@@ -121,11 +128,90 @@ internal static partial class Program
         [
             Region("hk", 60, via: [("hk-2", 30)]),
             Region("sg", 60, via: [("sg-1", 45)]),
-            Region("jkt", 60, via: [("sg-4", 40)]),
+            Region("jkt", 60, via: [("sg-4", 42)]),
         ], Options(maxTunnels: 3), previous);
-        Check("Over the cap: the relay the last plan already used stays before a bigger saving elsewhere",
+        // {hk-2, sg-1} is open and saves 45; {hk-2, sg-4} would move sg home (-15) and jkt to sg-4 (+18): 3 ms more,
+        // against 11 ms of margin for the two regions it moves.
+        Check("Over the cap: the set already open stays when another saves more by less than its moves' margins (48 vs 45)",
             PathOf(plan, "sg") == RegionPath.Via("sg-1") && PathOf(plan, "hk") == RegionPath.Via("hk-2") && PathOf(plan, "jkt") == RegionPath.HomePath,
             string.Join(", ", plan.Select(d => $"{d.RegionId}={d.Path}")));
+    }
+
+    private static void OverTheCapABetterSetReplacesTheOpenOneByTheMargin()
+    {
+        var previous = new Dictionary<string, RegionPath> { ["sg"] = RegionPath.Via("sg-1") };
+        var plan = RegionPlanner.Plan(HomeRelay,
+        [
+            Region("hk", 60, via: [("hk-2", 30)]),
+            Region("sg", 60, via: [("sg-1", 55)]),
+            Region("jkt", 60, via: [("sg-4", 35)]),
+        ], Options(maxTunnels: 3), previous);
+        // Open {hk-2, sg-1} saves 35; {hk-2, sg-4} saves 55 - 20 ms more against 11 ms of margin for sg and jkt.
+        // Before 2026-09-29 sg-1 stayed whatever sg-4 saved.
+        Check("Over the cap: a set saving 20 ms more than the open one replaces it (sg-1 closes, jkt gets sg-4)",
+            PathOf(plan, "hk") == RegionPath.Via("hk-2") && PathOf(plan, "jkt") == RegionPath.Via("sg-4") && PathOf(plan, "sg") == RegionPath.HomePath,
+            string.Join(", ", plan.Select(d => $"{d.RegionId}={d.Path}")));
+    }
+
+    private static void OverTheCapTheTargetRegionCountsDouble()
+    {
+        var regions = new List<RegionMeasurement>
+        {
+            Region("hk", 60, via: [("hk-2", 30)]),                   // saves 30
+            Region("jp", 100, via: [("hk-2", 90), ("vn-1", 75)]),   // vn-1 saves 25
+            Region("sg", 50, via: [("sg-1", 40)]),                   // saves 10
+        };
+        var plain = RegionPlanner.Plan(HomeRelay, regions, Options(maxTunnels: 3));
+        var target = RegionPlanner.Plan(HomeRelay, regions, Options(maxTunnels: 3, target: "sg"));
+        Check("Over the cap with no target: hk-2 and vn-1 (55 ms) - sg goes home",
+            PathOf(plain, "sg") == RegionPath.HomePath && PathOf(plain, "hk") == RegionPath.Via("hk-2") && PathOf(plain, "jp") == RegionPath.Via("vn-1"),
+            string.Join(", ", plain.Select(d => $"{d.RegionId}={d.Path}")));
+        Check("Over the cap with sg the player's region (counts double): sg-1 with hk-2 for hk and jp (60 against 55)",
+            PathOf(target, "sg") == RegionPath.Via("sg-1") && PathOf(target, "hk") == RegionPath.Via("hk-2") && PathOf(target, "jp") == RegionPath.Via("hk-2"),
+            string.Join(", ", target.Select(d => $"{d.RegionId}={d.Path}")));
+    }
+
+    private static void TheTargetRegionDoesNotEvictABigSaving()
+    {
+        // Found by PlansDoNotFlapOnNoise against a hard pin: one tunnel besides home, the target 5.6 ms better on sg-1,
+        // another region 46 ms better on vn-1. Double 5.6 is still far below 46.
+        var plan = RegionPlanner.Plan(HomeRelay,
+        [
+            Region("sg", 40.9, via: [("sg-1", 35.3)]),
+            Region("hk", 75.6, via: [("vn-1", 29.7), ("sg-1", 68.3)]),
+        ], Options(maxTunnels: 2, target: "sg"));
+        Check("The player's region 5.6 ms better does not evict 46 ms on another region: hk on vn-1, sg home",
+            PathOf(plan, "hk") == RegionPath.Via("vn-1") && PathOf(plan, "sg") == RegionPath.HomePath,
+            string.Join(", ", plan.Select(d => $"{d.RegionId}={d.Path}")));
+    }
+
+    /// <summary>
+    /// The plan that showed the old rule's lock-in, from prod (apex, 2026-09-28 17:21 UTC, player on Singapore): home vn-2,
+    /// the previous plan on vn-1 for hk and vn-3 for jp and sg. Relay by relay, vn-1 and vn-3 stayed and sg took vn-3 at
+    /// 47 ms with sg-1 at 38. By set the open pair saves 46.9 and {vn-3, sg-1} 50.0 - 3 ms more for moving two regions,
+    /// so the open pair would still stay; with sg the player's region counting double, sg gains 18.6 against hk's 6.2.
+    /// </summary>
+    private static void ApexFromDaNang()
+    {
+        var previous = new Dictionary<string, RegionPath>
+        {
+            ["asia-hk"] = RegionPath.Via("vn-1"), ["asia-jp"] = RegionPath.Via("vn-3"), ["asia-sg"] = RegionPath.Via("vn-3"),
+        };
+        var regions = new List<RegionMeasurement>
+        {
+            Region("asia-hk", 51.1, via: [("hk", 54.4), ("hk-2", 47.9), ("sg-1", 69), ("sg-2", 78.3), ("sg-4", 73.5), ("vn-1", 44.9), ("vn-3", 54)]),
+            Region("asia-jp", 125.3, via: [("hk", 108.2), ("hk-2", 94.5), ("sg-1", 111.5), ("sg-2", 119), ("sg-4", 118.3), ("vn-1", 104.5), ("vn-3", 97.9)]),
+            Region("asia-sg", 60.5, via: [("hk", 96.9), ("hk-2", 126.9), ("sg-1", 37.9), ("sg-2", 42.6), ("sg-4", 38.1), ("vn-1", 50.9), ("vn-3", 47.2)]),
+        };
+        var without = RegionPlanner.Plan("vn-2", regions, Options(maxTunnels: 3), previous);
+        var plan = RegionPlanner.Plan("vn-2", regions, Options(maxTunnels: 3, target: "asia-sg"), previous);
+        Check("Apex from Da Nang, no target: the open pair (vn-1, vn-3) stays - {vn-3, sg-1} saves only 3 ms more",
+            PathOf(without, "asia-sg") == RegionPath.Via("vn-3") && PathOf(without, "asia-hk") == RegionPath.Via("vn-1"),
+            string.Join(", ", without.Select(d => $"{d.RegionId}={d.Path}")));
+        Check("Apex from Da Nang, player on Singapore: sg on sg-1 (38), jp stays on vn-3, hk goes home",
+            PathOf(plan, "asia-sg") == RegionPath.Via("sg-1") && PathOf(plan, "asia-jp") == RegionPath.Via("vn-3") &&
+            PathOf(plan, "asia-hk") == RegionPath.HomePath,
+            string.Join(", ", plan.Select(d => $"{d.RegionId}={d.Path} ({d.Reason})")));
     }
 
     private static void APathInUseStaysUnlessClearlyBeaten()
@@ -205,7 +291,8 @@ internal static partial class Program
         for (var i = 0; i < 20_000; i++)
         {
             var regions = RandomRegions(rng);
-            var options = Options(allowDirect: rng.Next(2) == 0, maxTunnels: rng.Next(1, 5));
+            var options = Options(allowDirect: rng.Next(2) == 0, maxTunnels: rng.Next(1, 5),
+                target: rng.Next(2) == 0 ? null : regions[rng.Next(regions.Count)].RegionId);
             var previous = rng.Next(2) == 0 ? null : regions.ToDictionary(r => r.RegionId, _ => RandomPath(rng));
             var plan = RegionPlanner.Plan(HomeRelay, regions, options, previous);
             var again = RegionPlanner.Plan(HomeRelay, regions, options, previous);
@@ -274,7 +361,8 @@ internal static partial class Program
         for (var i = 0; i < 20_000 && failure is null; i++)
         {
             var regions = RandomRegions(rng);
-            var options = Options(allowDirect: rng.Next(2) == 0, maxTunnels: rng.Next(1, 5));
+            var options = Options(allowDirect: rng.Next(2) == 0, maxTunnels: rng.Next(1, 5),
+                target: rng.Next(2) == 0 ? null : regions[rng.Next(regions.Count)].RegionId);
 
             double Jitter(double ms) => ms + (rng.NextDouble() * 2 - 1) * RelayPaths.HelpMargin(ms) / 4;
             var noisy = regions.Select(r => r with
