@@ -179,8 +179,106 @@ internal sealed class FakeRelay : IDisposable
         var copy = inner.ToArray();
         Arrivals.Enqueue(new Arrival(copy, pkt, at, ((IPEndPoint)socket.Client.LocalEndPoint!).Port, sid));
 
-        // The relay's kernel answering an echo request to anybody.
-        if (copy[9] == 1 && copy.Length >= 28 && copy[(copy[0] & 0x0F) * 4] == 8) SendToClient(session, EchoReply(copy));
+        // The relay's kernel answering an echo request to anybody - at once, or as EchoRules says the internet would.
+        if (copy[9] == 1 && copy.Length >= 28 && copy[(copy[0] & 0x0F) * 4] == 8)
+        {
+            var target = BinaryPrimitives.ReadUInt32BigEndian(copy.AsSpan(16));
+            if (!EchoRules.TryGetValue(target, out var rule))
+            {
+                SendToClient(session, EchoReply(copy));
+                return;
+            }
+            var nth = Interlocked.Increment(ref rule.Requests);
+            if (rule.Drop?.Invoke(nth) == true) return;
+            var reply = EchoReply(copy);
+            _echoes.Schedule(session, reply, at, rule.DelayMs, this);
+            if (rule.Duplicate) _echoes.Schedule(session, reply, at, rule.DelayMs + 5, this);
+        }
+    }
+
+    /// <summary>
+    /// How the internet beyond this relay answers echoes to one address: after <see cref="DelayMs"/>, measured from
+    /// the request's arrival here, on a spinning thread rather than a timer (Windows timers tick every 15.6 ms, which
+    /// would be the error this is meant to find). <see cref="Drop"/> sees the request's 1-based count.
+    /// </summary>
+    public sealed class EchoRule
+    {
+        public double DelayMs;
+        public Func<long, bool>? Drop;
+        public bool Duplicate;
+        public long Requests;
+    }
+
+    /// <summary>By target address (big-endian uint): echoes to anything not here are answered at once.</summary>
+    public ConcurrentDictionary<uint, EchoRule> EchoRules { get; } = new();
+
+    private readonly EchoScheduler _echoes = new();
+
+    /// <summary>Sends replies at their due time to within a few microseconds - one thread, spinning while anything is due.</summary>
+    private sealed class EchoScheduler : IDisposable
+    {
+        private readonly List<(long Due, Session Session, byte[] Reply, FakeRelay Relay)> _due = [];
+        private readonly ManualResetEventSlim _wake = new();
+        private readonly Thread _thread;
+        private volatile bool _stop;
+
+        public EchoScheduler()
+        {
+            _thread = new Thread(Run) { IsBackground = true, Name = "fake-relay-echoes", Priority = ThreadPriority.AboveNormal };
+            _thread.Start();
+        }
+
+        public void Schedule(Session session, byte[] reply, long arrivedAt, double delayMs, FakeRelay relay)
+        {
+            var due = arrivedAt + (long)(delayMs * Stopwatch.Frequency / 1000.0);
+            lock (_due) _due.Add((due, session, reply, relay));
+            _wake.Set();
+        }
+
+        private void Run()
+        {
+            while (!_stop)
+            {
+                (long Due, Session Session, byte[] Reply, FakeRelay Relay)? next = null;
+                lock (_due)
+                {
+                    if (_due.Count > 0)
+                    {
+                        var i = 0;
+                        for (var j = 1; j < _due.Count; j++) if (_due[j].Due < _due[i].Due) i = j;
+                        if (Stopwatch.GetTimestamp() >= _due[i].Due)
+                        {
+                            next = _due[i];
+                            _due.RemoveAt(i);
+                        }
+                    }
+                }
+                if (next is { } send)
+                {
+                    send.Relay.SendToClient(send.Session, send.Reply);
+                    continue;
+                }
+                bool empty;
+                lock (_due) empty = _due.Count == 0;
+                if (empty)
+                {
+                    _wake.Wait(50);
+                    _wake.Reset();
+                }
+                else
+                {
+                    Thread.SpinWait(20);
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+            _stop = true;
+            _wake.Set();
+            _thread.Join(1000);
+            _wake.Dispose();
+        }
     }
 
     private void PingLike(UdpClient socket, byte[] pkt, IPEndPoint from, byte replyType, bool roam)
@@ -237,6 +335,7 @@ internal sealed class FakeRelay : IDisposable
 
     public void Dispose()
     {
+        _echoes.Dispose();
         _cts.Cancel();
         foreach (var socket in _sockets) socket.Dispose();
         try { Task.WaitAll([.. _loops], TimeSpan.FromSeconds(2)); } catch (AggregateException) { }

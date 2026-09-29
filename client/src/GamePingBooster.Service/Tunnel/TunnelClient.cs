@@ -103,11 +103,12 @@ internal sealed class TunnelClient : IDisposable
     /// It was one slot, when the in-game ping loop was the only caller. Now the region planner measures
     /// through a live tunnel too, and the in-game ping follows whichever tunnel carries the match - a
     /// second caller on one slot got null, which read as "no answer through this tunnel" (MULTI-TUNNEL.md
-    /// 5.6). Four, because there are at most two callers and each has one echo out at a time. Still no
-    /// dictionary: the downlink thread looks at these only while <see cref="_probesInFlight"/> says one
-    /// is out, and then at four references.
+    /// 5.6). Sixteen since the planner measures every region of a game at once (2026-09-29): Delta Force's
+    /// five plus the in-game ping and a match-region probe is seven, and a region count is the profile's to
+    /// grow. A full table returns null, which the planner would count as a lost echo. Still no dictionary:
+    /// the downlink thread looks at these only while <see cref="_probesInFlight"/> says one is out.
     /// </summary>
-    private readonly PendingProbe?[] _pendingProbes = new PendingProbe?[4];
+    private readonly PendingProbe?[] _pendingProbes = new PendingProbe?[16];
     private int _probesInFlight;
     private int _probeSequence;
 
@@ -408,6 +409,91 @@ internal sealed class TunnelClient : IDisposable
         }
 
         return best;
+    }
+
+    /// <summary>
+    /// One echo to each of <paramref name="landmarks"/> through this relay, all in flight at once: the round trip of
+    /// each in milliseconds, by index, or null where nothing came back within <paramref name="timeoutMs"/>.
+    ///
+    /// The region planner's instrument (TunnelEngine.RegionPlan). One region after another, echo after echo, a relay
+    /// with three ways in took 40 round trips a way, one after the other - 12 s for Hong Kong from Vietnam on
+    /// 2026-09-29, while the next match was loading. Five echoes to five landmarks at once cost the slowest of them.
+    ///
+    /// Each echo is timed from its own send and matched on its landmark, its own id and the call's sequence, so a
+    /// reply is never timed against another echo's clock: not a duplicate, not a late answer to an earlier call, not
+    /// one landmark answering for another. A few dozen bytes each, sent back to back - nothing on the path queues them.
+    ///
+    /// Same constraint as <see cref="MeasureThroughTunnelAsync"/>: after the handshake, before the pump threads take
+    /// the socket.
+    /// </summary>
+    public async Task<double?[]> MeasureManyThroughTunnelAsync(IReadOnlyList<IPAddress> landmarks, int timeoutMs, CancellationToken ct)
+    {
+        var results = new double?[landmarks.Count];
+        if (_socket is null || _sessionId == 0 || landmarks.Count == 0) return results;
+
+        var source = Session.ClientIp;
+        var inner = new byte[GpbProtocol.MaxPacketLen];
+        var wire = new byte[GpbProtocol.MaxPacketLen];
+        var buffer = new byte[GpbProtocol.MaxPacketLen];
+
+        // A fresh sequence per call and a fresh id per echo: a reply to an earlier call, or to another landmark of
+        // this one, matches nothing here.
+        var sequence = (ushort)Random.Shared.Next(1, ushort.MaxValue);
+        var ids = new ushort[landmarks.Count];
+        var taken = new HashSet<ushort>();
+        for (var i = 0; i < ids.Length; i++)
+        {
+            ushort id;
+            do id = (ushort)Random.Shared.Next(1, ushort.MaxValue); while (!taken.Add(id));
+            ids[i] = id;
+        }
+
+        ct.ThrowIfCancellationRequested();
+        var sentAt = new long[landmarks.Count];
+        for (var i = 0; i < landmarks.Count; i++)
+        {
+            var innerLen = IcmpEcho.Build(inner, source, landmarks[i], ids[i], sequence);
+            var wireLen = GpbProtocol.WriteData(wire, _sessionId, inner.AsSpan(0, innerLen));
+            sentAt[i] = _clock.ElapsedTicks;
+            try
+            {
+                await _socket.SendAsync(wire.AsMemory(0, wireLen), SocketFlags.None, ct).ConfigureAwait(false);
+            }
+            catch (SocketException)
+            {
+                return results;
+            }
+        }
+
+        // One deadline for the call, started after the last send, so every echo gets at least timeoutMs.
+        var waiting = landmarks.Count;
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromMilliseconds(timeoutMs));
+        try
+        {
+            while (waiting > 0)
+            {
+                var n = await _socket.ReceiveAsync(buffer, SocketFlags.None, timeout.Token).ConfigureAwait(false);
+                var at = _clock.ElapsedTicks;
+                if (!GpbProtocol.TryReadData(buffer.AsSpan(0, n), out var sid, out var ip)) continue;
+                if (sid != _sessionId) continue;
+                for (var i = 0; i < landmarks.Count; i++)
+                {
+                    if (results[i] is not null || !IcmpEcho.IsReplyTo(ip, landmarks[i], ids[i], sequence)) continue;
+                    results[i] = (at - sentAt[i]) * 1000.0 / Stopwatch.Frequency;
+                    waiting--;
+                    break;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // The rest stayed silent - null, as in MeasureThroughTunnelAsync.
+        }
+        catch (SocketException)
+        {
+        }
+        return results;
     }
 
     /// <summary>

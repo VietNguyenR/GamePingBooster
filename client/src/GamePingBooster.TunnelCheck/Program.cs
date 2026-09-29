@@ -46,6 +46,7 @@ internal static partial class Program
             ("Home replaced", AReplacedHomeRewritesInsteadOfReaddressing),
             ("The recorder follows the match", TheRecorderFollowsTheTunnelCarryingTheMatch),
             ("Downlink coupling", DownlinkCouplingAtThreeTunnels),
+            ("Region plan echoes, every region at once", PlanEchoesAtOnce),
         };
 
         foreach (var (title, run) in scenarios)

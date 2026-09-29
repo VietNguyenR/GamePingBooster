@@ -207,24 +207,27 @@ internal sealed partial class TunnelEngine
             {
                 async Task<string?> Home()
                 {
-                    foreach (var (region, landmark) in measurable)
+                    if (Interrupted() is { } why) return why;
+                    var samples = await SampleLiveManyAsync(tunnel, measurable.Select(m => m.Landmark).ToList(), Interrupted, token)
+                        .ConfigureAwait(false);
+                    if (samples is null) return Interrupted();
+                    lock (homeMs)
                     {
-                        if (Interrupted() is { } why) return why;
-                        var median = RescanScore.Median(await SampleLiveAsync(tunnel, landmark, token).ConfigureAwait(false));
-                        lock (homeMs) homeMs[region.Id] = median;
+                        for (var i = 0; i < measurable.Count; i++) homeMs[measurable[i].Region.Id] = RescanScore.Median(samples[i]);
                     }
                     return null;
                 }
                 async Task<string?> Direct()
                 {
-                    foreach (var (region, landmark) in measurable)
+                    if (Interrupted() is { } why) return why;
+                    // Every region at once, each its own Ping and its own spacing - the same instrument as before, side by side.
+                    var medians = await Task.WhenAll(measurable.Select(async m => IsRoutedIntoTunnel(m.Landmark)
+                        ? null
+                        : RescanScore.Median(await LandmarkProbe.SampleAsync(
+                            m.Landmark, RescanScore.Samples, LiveSampleSpacing, ProbeTimeoutMs, token).ConfigureAwait(false)))).ConfigureAwait(false);
+                    lock (directMs)
                     {
-                        if (Interrupted() is { } why) return why;
-                        double? median = IsRoutedIntoTunnel(landmark)
-                            ? null
-                            : RescanScore.Median(await LandmarkProbe.SampleAsync(
-                                landmark, RescanScore.Samples, LiveSampleSpacing, ProbeTimeoutMs, token).ConfigureAwait(false));
-                        lock (directMs) directMs[region.Id] = median;
+                        for (var i = 0; i < measurable.Count; i++) directMs[measurable[i].Region.Id] = medians[i];
                     }
                     return null;
                 }
@@ -415,12 +418,17 @@ internal sealed partial class TunnelEngine
                 // and naming the relay here said "direct to the relay" for a tunnel that came in through an entry.
                 var wayId = OtherTunnelOf(live)?.Way.Id ?? relay.Id;
                 var liveLine = new List<string>();
-                foreach (var (region, landmark) in measurable)
+                var liveSamples = await SampleLiveManyAsync(live, measurable.Select(m => m.Landmark).ToList(), interrupted, token)
+                    .ConfigureAwait(false);
+                if (liveSamples is null) stopped = interrupted();
+                else
                 {
-                    if ((stopped = interrupted()) is not null) break;
-                    var median = RescanScore.Median(await SampleLiveAsync(live, landmark, token).ConfigureAwait(false));
-                    liveLine.Add($"{region.Id} {Ms(median)}");
-                    if (median is { } ms) best[region.Id] = (ms, wayId);
+                    for (var i = 0; i < measurable.Count; i++)
+                    {
+                        var median = RescanScore.Median(liveSamples[i]);
+                        liveLine.Add($"{measurable[i].Region.Id} {Ms(median)}");
+                        if (median is { } ms) best[measurable[i].Region.Id] = (ms, wayId);
+                    }
                 }
                 lines.Add($"  {relay.Name} [{wayId}], open: {string.Join(", ", liveLine)}");
                 return new RelayPlanResult(relay.Id, true, best, lines, stopped);
@@ -441,16 +449,24 @@ internal sealed partial class TunnelEngine
                 open = await HandshakeForPlanAsync(way, psk, token).ConfigureAwait(false);
                 if (open is null) continue;
 
-                var line = new List<string>();
-                foreach (var (region, landmark) in measurable)
+                // Rounds of one echo per region, every region at once (MeasureManyThroughTunnelAsync): a round costs
+                // the slowest landmark, not the sum of them. A pass that stops mid-way records nothing for this way -
+                // a half-sampled median is not the instrument the others were measured with.
+                var landmarks = measurable.Select(m => m.Landmark).ToList();
+                var perRegion = measurable.Select(_ => new List<double?>(RescanScore.Samples)).ToList();
+                for (var round = 0; round < RescanScore.Samples; round++)
                 {
                     if ((stopped = interrupted()) is not null) break;
-                    var samples = new List<double?>(RescanScore.Samples);
-                    for (var i = 0; i < RescanScore.Samples; i++)
-                    {
-                        samples.Add(await open.MeasureThroughTunnelAsync(landmark, attempts: 1, token).ConfigureAwait(false));
-                    }
-                    var median = RescanScore.Median(samples);
+                    var got = await open.MeasureManyThroughTunnelAsync(landmarks, PlanEchoTimeoutMs, token).ConfigureAwait(false);
+                    for (var i = 0; i < got.Length; i++) perRegion[i].Add(got[i]);
+                }
+                if (stopped is not null) break;
+
+                var line = new List<string>();
+                for (var i = 0; i < measurable.Count; i++)
+                {
+                    var region = measurable[i].Region;
+                    var median = RescanScore.Median(perRegion[i]);
                     line.Add($"{region.Id} {Ms(median)}");
                     if (median is { } ms && (!best.TryGetValue(region.Id, out var kept) || ms < kept.Ms)) best[region.Id] = (ms, way.Id);
                 }
@@ -474,6 +490,33 @@ internal sealed partial class TunnelEngine
             open?.Dispose();
         }
         return new RelayPlanResult(relay.Id, measured, best, lines, stopped);
+    }
+
+    /// <summary>
+    /// How long one planner echo through a handshaken way may take. The slowest landmark any plan has measured is about
+    /// 150 ms from Vietnam; an echo not back in a second is lost, and waiting the connect-time 2 s for it cost a
+    /// whole round - and pushed passes into the 40 s budget.
+    /// </summary>
+    internal const int PlanEchoTimeoutMs = 1000;
+
+    /// <summary>
+    /// <see cref="RescanScore.Samples"/> rounds through a LIVE tunnel of one echo to each landmark, all in flight at
+    /// once, <see cref="LiveSampleSpacing"/> apart as <see cref="SampleLiveAsync"/> spaces them: by landmark, the
+    /// samples in round order, null for each unanswered. Null when the pass was interrupted - nothing half-sampled
+    /// is scored. The downlink thread matches each reply to its own probe (TunnelClient.ProbeGameServerAsync).
+    /// </summary>
+    private async Task<List<double?>[]?> SampleLiveManyAsync(TunnelClient tunnel, IReadOnlyList<IPAddress> landmarks,
+        Func<string?> interrupted, CancellationToken ct)
+    {
+        var samples = landmarks.Select(_ => new List<double?>(RescanScore.Samples)).ToArray();
+        for (var round = 0; round < RescanScore.Samples; round++)
+        {
+            if (interrupted() is not null) return null;
+            if (round > 0) await Task.Delay(LiveSampleSpacing, ct).ConfigureAwait(false);
+            var got = await Task.WhenAll(landmarks.Select(l => tunnel.ProbeGameServerAsync(l, ProbeTimeoutMs, ct))).ConfigureAwait(false);
+            for (var i = 0; i < got.Length; i++) samples[i].Add(got[i]);
+        }
+        return samples;
     }
 
     /// <summary>

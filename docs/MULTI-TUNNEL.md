@@ -159,8 +159,10 @@ When it runs:
 - **Applied at once** - safe at any moment because of 5.3.
 
 Measurement never handshakes a relay that has a tunnel open (G5) - it echoes through that tunnel. Other relays
-are measured in parallel, the ways into one relay one after another, within a 40 s budget. Every pass is logged
-number by number and uploaded as a `regionPlan` quality record, without addresses.
+are measured in parallel, the ways into one relay one after another, within a 40 s budget. On every path the
+echoes go in rounds, one to each region's landmark, all in flight at once and each matched on its own id and
+timed from its own send - a round costs the slowest landmark, not the sum; an echo not back in 1 s is lost. Every
+pass is logged number by number and uploaded as a `regionPlan` quality record, without addresses.
 
 ### 5.6 Measurement rules
 
