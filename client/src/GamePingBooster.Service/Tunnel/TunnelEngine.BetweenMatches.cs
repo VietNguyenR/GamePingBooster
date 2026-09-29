@@ -17,7 +17,9 @@ namespace GamePingBooster.Service.Tunnel;
 /// because another relay leaves through another address and the match in progress would drop. Between
 /// matches there is no match to drop. So when a match ends (<see cref="MatchGap"/>), every other relay and
 /// every entry in front of one is measured against the path in use, the same way and at the same moment,
-/// and the tunnel moves to one that is faster by a clear margin (<see cref="RescanScore"/>).
+/// and the tunnel moves to one that is faster by a clear margin (<see cref="RescanScore"/>). "Faster" is on the
+/// score since 2026-09-29: a path losing packets counts <see cref="RelayLoss.PenaltyMs"/> slower, so a relay the
+/// line has started losing packets into is left for a clean one, and a clean one is never left for a lossy one.
 ///
 /// What the move costs: the lobby's TCP connection, which leaves through the new relay's address and has to
 /// be opened again. The owner disconnects and reconnects in the PUBG lobby daily and it comes back by itself.
@@ -182,6 +184,7 @@ internal sealed partial class TunnelEngine
 
             List<double?> hereSamples;
             double hereMs;
+            var hereLoss = PingLoss.Unknown;
             if (forGame)
             {
                 _log(path is null
@@ -205,7 +208,11 @@ internal sealed partial class TunnelEngine
                     return;
                 }
                 hereMs = measured;
-                _log($"  {current.Name} [{current.Id}], in use: {hereMs:F0} ms to {live.RegionName}");
+                // The live tunnel's own keepalives, not a burst: the downlink thread owns its socket. A minute of them
+                // covers the end of the match just played.
+                hereLoss = tunnel.RecentLoss();
+                _log($"  {current.Name} [{current.Id}], in use: {hereMs:F0} ms to {live.RegionName}" +
+                     (hereLoss.IsLossy ? $", losing packets ({hereLoss})" : RelayLoss.Note(hereLoss)));
             }
 
             foreach (var relay in others)
@@ -225,15 +232,22 @@ internal sealed partial class TunnelEngine
                 }
             }
 
-            var best = probes.Where(p => p.EndToEndMs is not null).MinBy(p => p.EndToEndMs!.Value);
-            if (best is null || (!forGame && !RescanScore.WorthMoving(hereMs, best.EndToEndMs!.Value)))
+            // Compared on the score: the round trip, plus the penalty for a path losing packets (RelayLoss).
+            var hereScore = RelayLoss.Score(hereMs, hereLoss);
+            var best = probes.Where(p => p.EndToEndMs is not null).MinBy(p => p.EndToEndScore!.Value);
+            if (best is null || (!forGame && !RescanScore.WorthMoving(hereScore, best.EndToEndScore!.Value)))
             {
                 _log(best is null
                     ? $"Between matches: no other relay could be measured - staying on {current.Name}."
-                    : $"Between matches: staying on {current.Name} at {hereMs:F0} ms - the fastest other path, {best.Relay.Name} " +
-                      $"[{best.Relay.Id}] at {best.EndToEndMs!.Value:F0} ms, is not faster by " +
-                      $"{RelayPaths.HelpMargin(hereMs):F0} ms or more.");
+                    : $"Between matches: staying on {current.Name} at {hereMs:F0} ms{(hereLoss.IsLossy ? ", losing packets" : "")} - " +
+                      $"the best other path, {best.Relay.Name} [{best.Relay.Id}] at {best.EndToEndMs!.Value:F0} ms" +
+                      $"{(best.Loss.IsLossy ? ", losing packets" : "")}, is not better by {RelayPaths.HelpMargin(hereScore):F0} ms or more.");
                 return;
+            }
+            if (!forGame && hereLoss.IsLossy && !best.Loss.IsLossy)
+            {
+                _log($"Between matches: {current.Name} is losing packets ({hereLoss}) and {best.Relay.Name} [{best.Relay.Id}] " +
+                     $"is not - moving at {best.EndToEndMs!.Value:F0} ms against {hereMs:F0} ms.");
             }
 
             if (MatchStarted(tunnel, packetsAtStart) || (!forGame && TooLate(tunnel, current))) return;
@@ -326,14 +340,15 @@ internal sealed partial class TunnelEngine
         {
             client = new TunnelClient(ParseEndpoint(way.Endpoint), AuthFor(way, psk), _clientId, _log);
             await client.HandshakeAsync(attempts: 1, ct).ConfigureAwait(false);
-            var legOne = await client.MeasureRelayRttAsync(attempts: 3, ct).ConfigureAwait(false) ?? client.HandshakeRttMs;
+            var (burstMs, loss) = await client.MeasureRelayBurstAsync(ct).ConfigureAwait(false);
+            var legOne = burstMs ?? client.HandshakeRttMs;
 
             // No landmark: only a move off a relay not used for the game gets here, and it is scored on this leg alone -
             // every candidate the same way, so no relay wins by a number the others were not measured on.
             if (path is null)
             {
-                _log($"  {way.Name} [{way.Id}]: {legOne:F0} ms to the relay");
-                return new RelayProbe(way, legOne, legOne) { Client = client };
+                _log($"  {way.Name} [{way.Id}]: {legOne:F0} ms to the relay{RelayLoss.Note(loss)}");
+                return new RelayProbe(way, legOne, legOne) { Client = client, Loss = loss };
             }
 
             var samples = new List<double?>(RescanScore.Samples);
@@ -343,10 +358,11 @@ internal sealed partial class TunnelEngine
             }
             var median = RescanScore.Median(samples);
 
-            _log(median is { } ms
+            _log((median is { } ms
                 ? $"  {way.Name} [{way.Id}]: {legOne:F0} ms to the relay, {ms:F0} ms to {path.RegionName}"
-                : $"  {way.Name} [{way.Id}]: {legOne:F0} ms to the relay, too few answers from {path.RegionName} to compare");
-            return new RelayProbe(way, legOne, median) { Client = client };
+                : $"  {way.Name} [{way.Id}]: {legOne:F0} ms to the relay, too few answers from {path.RegionName} to compare") +
+                RelayLoss.Note(loss));
+            return new RelayProbe(way, legOne, median) { Client = client, Loss = loss };
         }
         catch (OperationCanceledException)
         {

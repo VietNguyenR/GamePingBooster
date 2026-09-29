@@ -27,6 +27,9 @@ namespace GamePingBooster.Service.Tunnel;
 ///     Disconnect so the next resumes the same session, and the last closed WITH one;
 ///   - the same instrument on every path: the median of <see cref="RescanScore.Samples"/> echoes, at least
 ///     <see cref="RescanScore.MinAnswered"/> answered, or no number at all;
+///   - and every relay's loss beside it (<see cref="RelayLoss"/>): a burst of pings down each way handshaken, the
+///     last minute of keepalives for a tunnel already open. A path losing packets is planned as if it were
+///     <see cref="RelayLoss.PenaltyMs"/> slower - home included, so a region leaves a home that loses for a clean relay;
 ///   - it runs on the supervisor, so it can never overlap a rescan between matches, a reconnect or a move;
 ///   - it stops the moment a match starts loading, or the home tunnel goes quiet, and is tried again later.
 ///
@@ -130,6 +133,8 @@ internal sealed partial class TunnelEngine
         var directMs = new Dictionary<string, double?>(StringComparer.Ordinal);
         var viaMs = measurable.ToDictionary(r => r.Region.Id, _ => new Dictionary<string, double>(StringComparer.Ordinal), StringComparer.Ordinal);
         var viaWay = measurable.ToDictionary(r => r.Region.Id, _ => new Dictionary<string, string>(StringComparer.Ordinal), StringComparer.Ordinal);
+        var lossyVia = measurable.ToDictionary(r => r.Region.Id, _ => new HashSet<string>(StringComparer.Ordinal), StringComparer.Ordinal);
+        var homeLoss = PingLoss.Unknown;
         var relaysMeasured = new List<string>();
         string? stopped = null;
         var retry = false;   // only ever set to true, from any of the measuring tasks
@@ -198,7 +203,8 @@ internal sealed partial class TunnelEngine
             var homeStopped = await homeTask.ConfigureAwait(false);
 
             _log("  " + string.Join(", ", measurable.Select(r =>
-                $"{r.Region.Id}: home {Ms(homeMs.GetValueOrDefault(r.Region.Id))}, direct {Ms(directMs.GetValueOrDefault(r.Region.Id))}")));
+                $"{r.Region.Id}: home {Ms(homeMs.GetValueOrDefault(r.Region.Id))}, direct {Ms(directMs.GetValueOrDefault(r.Region.Id))}")) +
+                (homeLoss.IsLossy ? $" - home is losing packets ({homeLoss})" : RelayLoss.Note(homeLoss)));
 
             // Through home: the live tunnel, never a handshake (G5). Over the player's own line: a landmark inside a
             // routed range would be measured through the tunnel and called direct; the profile rules keep that from
@@ -215,6 +221,8 @@ internal sealed partial class TunnelEngine
                     {
                         for (var i = 0; i < measurable.Count; i++) homeMs[measurable[i].Region.Id] = RescanScore.Median(samples[i]);
                     }
+                    // Home's keepalives, not a burst: the downlink thread owns its socket.
+                    homeLoss = tunnel.RecentLoss();
                     return null;
                 }
                 async Task<string?> Direct()
@@ -246,10 +254,11 @@ internal sealed partial class TunnelEngine
             {
                 foreach (var line in result.Lines) _log(line);
                 if (result.Measured) relaysMeasured.Add(result.RelayId);
-                foreach (var (regionId, (ms, way)) in result.Best)
+                foreach (var (regionId, (ms, way, lossy)) in result.Best)
                 {
                     viaMs[regionId][result.RelayId] = ms;
                     viaWay[regionId][result.RelayId] = way;
+                    if (lossy) lossyVia[regionId].Add(result.RelayId);
                 }
             }
             stopped = homeStopped ?? results.Select(r => r.Stopped).FirstOrDefault(r => r is not null);
@@ -276,7 +285,9 @@ internal sealed partial class TunnelEngine
             r.Landmark is not null,
             homeMs.GetValueOrDefault(r.Region.Id),
             viaMs.TryGetValue(r.Region.Id, out var via) ? via : new Dictionary<string, double>(),
-            directMs.GetValueOrDefault(r.Region.Id))).ToList();
+            directMs.GetValueOrDefault(r.Region.Id),
+            homeLoss.IsLossy,
+            lossyVia.TryGetValue(r.Region.Id, out var lossy) ? lossy : null)).ToList();
         var order = profile.Relays.Where(r => r.ViaRelayId is null).Select(r => r.Id).ToList();
         var previous = _planInForce is { } inForce && inForce.GameId == game.Id &&
                        inForce.HomeRelayId.Equals(homeRelayId, StringComparison.OrdinalIgnoreCase)
@@ -388,11 +399,14 @@ internal sealed partial class TunnelEngine
     private TimeSpan SilenceOfAll(TunnelClient home) =>
         LastSentAnyMs(home) is { } at ? TimeSpan.FromMilliseconds(Math.Max(0, NowMs() - at)) : TimeSpan.MaxValue;
 
-    /// <summary>What one relay measured for a plan: its best number and way per region, and its log lines in order.</summary>
+    /// <summary>
+    /// What one relay measured for a plan: its best number and way per region - best on the score, so a way losing
+    /// packets only wins when every way does - whether that way was losing packets, and its log lines in order.
+    /// </summary>
     private sealed record RelayPlanResult(
         string RelayId,
         bool Measured,
-        Dictionary<string, (double Ms, string Way)> Best,
+        Dictionary<string, (double Ms, string Way, bool Lossy)> Best,
         List<string> Lines,
         string? Stopped);
 
@@ -405,7 +419,7 @@ internal sealed partial class TunnelEngine
     private async Task<RelayPlanResult> MeasureRelayForPlanAsync(RelayEntry relay, ProfileBundle profile,
         List<(RegionEntry Region, IPAddress Landmark)> measurable, byte[] psk, Func<string?> interrupted, CancellationToken token)
     {
-        var best = new Dictionary<string, (double Ms, string Way)>(StringComparer.Ordinal);
+        var best = new Dictionary<string, (double Ms, string Way, bool Lossy)>(StringComparer.Ordinal);
         var lines = new List<string>();
         string? stopped = null;
         var measured = false;
@@ -420,6 +434,7 @@ internal sealed partial class TunnelEngine
                 var liveLine = new List<string>();
                 var liveSamples = await SampleLiveManyAsync(live, measurable.Select(m => m.Landmark).ToList(), interrupted, token)
                     .ConfigureAwait(false);
+                var liveLoss = live.RecentLoss();
                 if (liveSamples is null) stopped = interrupted();
                 else
                 {
@@ -427,10 +442,10 @@ internal sealed partial class TunnelEngine
                     {
                         var median = RescanScore.Median(liveSamples[i]);
                         liveLine.Add($"{measurable[i].Region.Id} {Ms(median)}");
-                        if (median is { } ms) best[measurable[i].Region.Id] = (ms, wayId);
+                        if (median is { } ms) best[measurable[i].Region.Id] = (ms, wayId, liveLoss.IsLossy);
                     }
                 }
-                lines.Add($"  {relay.Name} [{wayId}], open: {string.Join(", ", liveLine)}");
+                lines.Add($"  {relay.Name} [{wayId}], open: {string.Join(", ", liveLine)}{LossText(liveLoss)}");
                 return new RelayPlanResult(relay.Id, true, best, lines, stopped);
             }
 
@@ -448,6 +463,9 @@ internal sealed partial class TunnelEngine
                 open = null;
                 open = await HandshakeForPlanAsync(way, psk, token).ConfigureAwait(false);
                 if (open is null) continue;
+
+                // The way's loss first, while nothing else is reading the socket: a burst of pings (RelayLoss).
+                var (_, loss) = await open.MeasureRelayBurstAsync(token).ConfigureAwait(false);
 
                 // Rounds of one echo per region, every region at once (MeasureManyThroughTunnelAsync): a round costs
                 // the slowest landmark, not the sum of them. A pass that stops mid-way records nothing for this way -
@@ -468,9 +486,13 @@ internal sealed partial class TunnelEngine
                     var region = measurable[i].Region;
                     var median = RescanScore.Median(perRegion[i]);
                     line.Add($"{region.Id} {Ms(median)}");
-                    if (median is { } ms && (!best.TryGetValue(region.Id, out var kept) || ms < kept.Ms)) best[region.Id] = (ms, way.Id);
+                    if (median is { } ms &&
+                        (!best.TryGetValue(region.Id, out var kept) || RelayLoss.Score(ms, loss) < RelayLoss.Score(kept.Ms, kept.Lossy)))
+                    {
+                        best[region.Id] = (ms, way.Id, loss.IsLossy);
+                    }
                 }
-                lines.Add($"  {way.Name} [{way.Id}]: {string.Join(", ", line)}");
+                lines.Add($"  {way.Name} [{way.Id}]: {string.Join(", ", line)}{LossText(loss)}");
                 measured = true;
                 if (stopped is not null) break;
             }
@@ -592,4 +614,7 @@ internal sealed partial class TunnelEngine
     }
 
     private static string Ms(double? ms) => ms is { } value ? $"{value:F0} ms" : "no answer";
+
+    /// <summary>" - losing packets (lost 5 of 16 pings (31%))", " (lost 1 of 16 pings (6%))", or "" for a clean way.</summary>
+    private static string LossText(PingLoss loss) => loss.IsLossy ? $" - losing packets ({loss})" : RelayLoss.Note(loss);
 }

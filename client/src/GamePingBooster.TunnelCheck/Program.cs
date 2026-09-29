@@ -47,6 +47,7 @@ internal static partial class Program
             ("The recorder follows the match", TheRecorderFollowsTheTunnelCarryingTheMatch),
             ("Downlink coupling", DownlinkCouplingAtThreeTunnels),
             ("Region plan echoes, every region at once", PlanEchoesAtOnce),
+            ("Relay loss", RelayLossIsMeasured),
         };
 
         foreach (var (title, run) in scenarios)

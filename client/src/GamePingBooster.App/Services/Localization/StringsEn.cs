@@ -25,7 +25,7 @@ internal static class StringsEn
 
         ["main.label.gamePing"] = "Ping in game",
         ["main.label.relayPing"] = "Ping to relay",
-        ["main.label.loss"] = "Packet loss",
+        ["main.label.loss"] = "Loss to relay",
         ["main.label.relay"] = "Relay server",
         ["main.label.game"] = "Game",
         ["main.label.routing"] = "Routing",
@@ -67,6 +67,7 @@ internal static class StringsEn
         ["value.none"] = "-",
         ["value.ms"] = "{0} ms",
         ["value.msTo"] = "{0} ms to {1}",
+        ["value.lossTo"] = "{0}% to {1}",
         ["value.ranges"] = "{0} ranges",
         ["value.packets"] = "{0} up / {1} down",
 
@@ -81,6 +82,12 @@ internal static class StringsEn
             "its own server - changing the relay changes the route to it, not the server. In a match it follows " +
             "the region the game actually uses, where that can be told from its traffic.",
         ["gamePing.tip.theRelay"] = "the relay",
+        ["loss.tip.pending"] = "Appears a few seconds after connecting.",
+        ["loss.tip"] =
+            "The share of test packets from this PC to {0} that went unanswered, over about the last minute. This is " +
+            "the leg from your PC to the relay, not to the game's server. A relay that is losing packets is ranked " +
+            "below one that is not when the app chooses, even if its ping is lower; if a better relay exists, the app " +
+            "moves between matches.",
         ["gamePing.tip.itsServers"] = "own",
 
         ["relay.automatic"] = "Automatic - the fastest",

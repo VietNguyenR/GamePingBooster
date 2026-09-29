@@ -38,6 +38,12 @@ internal static partial class Program
         APathInUseStaysUnlessClearlyBeaten();
         APathSlowerThanHomeIsLeftWhateverTheMargin();
         DeltaForceFromHanoi();
+        AHomeLosingPacketsIsLeftForACleanRelay();
+        AHomeLosingPacketsIsLeftForACleanRelayMuchSlower();
+        ALossyRelayNeverBeatsACleanHomeOnSpeed();
+        WhenEveryPathLosesTheFastestStillWins();
+        APathInUseThatStartsLosingIsLeft();
+        ALossyPathInUseIsLeftForAHomeThatIsNot();
         PlansHoldForEveryRandomInput();
         PlansDoNotFlapOnNoise();
     }
@@ -251,6 +257,69 @@ internal static partial class Program
             string.Join(", ", plan.Select(d => $"{d.RegionId}={d.Path} ({d.Reason})")));
     }
 
+    // ------------------------------------------------------------ packet loss (RelayLoss)
+
+    private static RegionMeasurement Lossy(RegionMeasurement region, bool home = false, params string[] via) =>
+        region with { HomeLossy = home, LossyVia = via.ToHashSet(StringComparer.Ordinal) };
+
+    /// <summary>
+    /// The evening that made loss count, 2026-09-29: the owner's line lost 26% into Da Nang (home) and nothing into
+    /// Ho Chi Minh (vn-3), and the plan kept hcm home because 34 ms is not 5 ms faster than 38.
+    /// </summary>
+    private static void AHomeLosingPacketsIsLeftForACleanRelay()
+    {
+        var plan = RegionPlanner.Plan(HomeRelay, [Lossy(Region("hcm", 38, via: [("vn-3", 34), ("sg-4", 88)]), home: true)], Options());
+        Check("2026-09-29: hcm leaves a home losing packets (38 ms) for vn-3 (34 ms), inside the margin on speed alone",
+            PathOf(plan, "hcm") == RegionPath.Via("vn-3"), string.Join(", ", plan.Select(d => $"{d.Path} ({d.Reason})")));
+    }
+
+    private static void AHomeLosingPacketsIsLeftForACleanRelayMuchSlower()
+    {
+        var plan = RegionPlanner.Plan(HomeRelay, [Lossy(Region("sg", 40, via: ("sg-1", 110)), home: true)], Options());
+        Check($"A home losing packets (40 ms) is left for a clean relay 70 ms slower - under the {RelayLoss.PenaltyMs:F0} ms penalty",
+            PathOf(plan, "sg") == RegionPath.Via("sg-1"), $"got {PathOf(plan, "sg")} ({plan[0].Reason})");
+        Check("  and the decision reports what the path measured, not its score",
+            plan[0].ChosenMs == 110 && plan[0].HomeMs == 40 && plan[0].ChosenScore == 110 && plan[0].HomeScore == 140,
+            $"ms {plan[0].ChosenMs}/{plan[0].HomeMs}, score {plan[0].ChosenScore}/{plan[0].HomeScore}");
+    }
+
+    private static void ALossyRelayNeverBeatsACleanHomeOnSpeed()
+    {
+        var plan = RegionPlanner.Plan(HomeRelay, [Lossy(Region("hk", 60, via: [("hk-2", 20), ("sg-1", 55)]), false, "hk-2")], Options());
+        Check("A relay losing packets at 20 ms does not take a region from a clean home at 60 ms",
+            PathOf(plan, "hk") == RegionPath.HomePath, $"got {PathOf(plan, "hk")} ({plan[0].Reason})");
+    }
+
+    /// <summary>
+    /// Both scores carry the penalty, so speed decides - but the margin is the score's, max(5 ms, 10%) of 140, so
+    /// two lossy paths are held apart by more than two clean ones. The side to err on: neither is worth a move.
+    /// </summary>
+    private static void WhenEveryPathLosesTheFastestStillWins()
+    {
+        var plan = RegionPlanner.Plan(HomeRelay, [Lossy(Region("hk", 40, via: ("hk-2", 25)), true, "hk-2")], Options());
+        Check("Every path losing packets: speed decides - hk-2 25 ms against home 40",
+            PathOf(plan, "hk") == RegionPath.Via("hk-2"), $"got {PathOf(plan, "hk")} ({plan[0].Reason})");
+        plan = RegionPlanner.Plan(HomeRelay, [Lossy(Region("hk", 40, via: ("hk-2", 30)), true, "hk-2")], Options());
+        Check("  but by the margin of the score: hk-2 30 ms against home 40 stays home (14 ms needed)",
+            PathOf(plan, "hk") == RegionPath.HomePath, $"got {PathOf(plan, "hk")} ({plan[0].Reason})");
+    }
+
+    private static void APathInUseThatStartsLosingIsLeft()
+    {
+        var previous = new Dictionary<string, RegionPath> { ["hk"] = RegionPath.Via("hk-2") };
+        var plan = RegionPlanner.Plan(HomeRelay, [Lossy(Region("hk", 40, via: ("hk-2", 30)), false, "hk-2")], Options(), previous);
+        Check("Hysteresis does not keep a path that has started losing packets when home has not",
+            PathOf(plan, "hk") == RegionPath.HomePath, $"got {PathOf(plan, "hk")} ({plan[0].Reason})");
+    }
+
+    private static void ALossyPathInUseIsLeftForAHomeThatIsNot()
+    {
+        var previous = new Dictionary<string, RegionPath> { ["hk"] = RegionPath.Via("sg-1") };
+        var plan = RegionPlanner.Plan(HomeRelay, [Lossy(Region("hk", 50, via: [("sg-1", 45), ("hk-2", 52)]), true, "sg-1")], Options(), previous);
+        Check("Home and the path in use both losing: the region goes to the one clean relay, hk-2, though it is the slowest",
+            PathOf(plan, "hk") == RegionPath.Via("hk-2"), $"got {PathOf(plan, "hk")} ({plan[0].Reason})");
+    }
+
     // ------------------------------------------------------------ properties
 
     private static List<RegionMeasurement> RandomRegions(Random rng)
@@ -266,7 +335,9 @@ internal static partial class Program
                 via[relay] = home is { } h && rng.Next(2) == 0 ? h + (rng.NextDouble() - 0.6) * 30 : 5 + rng.NextDouble() * 150;
             }
             var direct = rng.Next(3) == 0 ? (double?)null : 5 + rng.NextDouble() * 150;
-            regions.Add(new RegionMeasurement($"r{regions.Count}", rng.Next(6) != 0, home, via, direct));
+            // A path in five losing packets, home included, so every property below also holds on the score.
+            var lossyVia = via.Keys.Where(_ => rng.Next(5) == 0).ToHashSet(StringComparer.Ordinal);
+            regions.Add(new RegionMeasurement($"r{regions.Count}", rng.Next(6) != 0, home, via, direct, rng.Next(5) == 0, lossyVia));
         }
         return regions;
     }
@@ -314,10 +385,14 @@ internal static partial class Program
                 if (d.Path.Kind == PathKind.Relay && d.Path.RelayId == HomeRelay) Broke("home is not a relay path", $"{at} {d.RegionId}");
                 if (d.Path.Kind == PathKind.Relay && !m.ViaRelayMs.ContainsKey(d.Path.RelayId!)) Broke("a relay chosen has a number", $"{at} {d.RegionId}");
 
-                if (d.Path == RegionPath.HomePath || m.HomeMs is not { } home) continue;
-                var chosen = d.Path.Kind == PathKind.Direct ? m.DirectMs!.Value : m.ViaRelayMs[d.Path.RelayId!];
+                if (d.Path == RegionPath.HomePath || m.HomeMs is not { } homeMs) continue;
+                // Scores throughout: the round trip, plus the penalty for a path losing packets. Direct has none.
+                var home = RelayLoss.Score(homeMs, m.HomeLossy);
+                var chosen = d.Path.Kind == PathKind.Direct
+                    ? m.DirectMs!.Value
+                    : RelayLoss.Score(m.ViaRelayMs[d.Path.RelayId!], m.IsLossyVia(d.Path.RelayId!));
 
-                // G2, always: never a path measured slower than home.
+                // G2, always: never a path that scores worse than home.
                 if (chosen > home) Broke("G2 never slower than home", $"{at} {d.RegionId}: {d.Path} {chosen:F1} vs home {home:F1}");
 
                 // G2 and G8 in full, for a plan made from nothing: leaving home, and going direct, take the margin.
@@ -328,7 +403,7 @@ internal static partial class Program
                     var kept = plan.Where(x => x.Path.Kind == PathKind.Relay).Select(x => x.Path.RelayId!).ToHashSet();
                     var capFull = kept.Count >= options.MaxTunnels - 1;
                     var bestRelay = m.ViaRelayMs.Where(kv => kv.Key != HomeRelay && (!capFull || kept.Contains(kv.Key)))
-                        .Select(kv => kv.Value).DefaultIfEmpty(double.NaN).Min();
+                        .Select(kv => RelayLoss.Score(kv.Value, m.IsLossyVia(kv.Key))).DefaultIfEmpty(double.NaN).Min();
                     if (!double.IsNaN(bestRelay) && !RescanScore.WorthMoving(bestRelay, chosen))
                         Broke("G8 direct beats the best relay by the margin", $"{at} {d.RegionId}: direct {chosen:F1} vs relay {bestRelay:F1}");
                 }
@@ -383,13 +458,15 @@ internal static partial class Program
 
                 var m = regions[r];
                 var held = second[r].Path;
-                var heldMs = held.Kind switch
+                var heldScore = held.Kind switch
                 {
                     PathKind.Direct => m.DirectMs,
-                    PathKind.Relay => m.ViaRelayMs.TryGetValue(held.RelayId!, out var ms) ? ms : (double?)null,
+                    PathKind.Relay => m.ViaRelayMs.TryGetValue(held.RelayId!, out var ms)
+                        ? RelayLoss.Score(ms, m.IsLossyVia(held.RelayId!))
+                        : (double?)null,
                     _ => m.HomeMs,
                 };
-                if (held.Kind != PathKind.Home && heldMs is { } w && m.HomeMs is { } h && w > h) continue;   // G2
+                if (held.Kind != PathKind.Home && heldScore is { } w && m.HomeMs is { } h && w > RelayLoss.Score(h, m.HomeLossy)) continue;   // G2
 
                 failure = $"seed {Seed}, game {i}: {m.RegionId} went {first[r].Path} -> {held} -> {third[r].Path} on jitter ({third[r].Reason})";
                 break;

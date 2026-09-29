@@ -25,7 +25,7 @@ internal static class StringsVi
 
         ["main.label.gamePing"] = "Ping trong game",
         ["main.label.relayPing"] = "Ping tới relay",
-        ["main.label.loss"] = "Mất gói",
+        ["main.label.loss"] = "Mất gói tới relay",
         ["main.label.relay"] = "Máy chủ relay",
         ["main.label.game"] = "Game",
         ["main.label.routing"] = "Định tuyến",
@@ -67,6 +67,7 @@ internal static class StringsVi
         ["value.none"] = "-",
         ["value.ms"] = "{0} ms",
         ["value.msTo"] = "{0} ms tới {1}",
+        ["value.lossTo"] = "{0}% tới {1}",
         ["value.ranges"] = "{0} dải IP",
         ["value.packets"] = "{0} gửi / {1} nhận",
 
@@ -81,6 +82,11 @@ internal static class StringsVi
             "của nó - đổi relay là đổi đường đi tới máy chủ, không đổi được máy chủ. Khi đang trong trận, số này " +
             "bám theo đúng khu vực game đang dùng, nếu nhận ra được từ traffic của game.",
         ["gamePing.tip.theRelay"] = "relay",
+        ["loss.tip.pending"] = "Hiện ra sau khi kết nối được vài giây.",
+        ["loss.tip"] =
+            "Tỷ lệ gói kiểm tra từ máy bạn tới {0} không được trả lời, trong khoảng một phút gần nhất. Đây là chặng từ " +
+            "máy bạn tới relay, không phải tới máy chủ game. Relay đang mất gói bị xếp sau relay không mất gói khi app " +
+            "chọn relay, kể cả khi nó ping thấp hơn; nếu có relay tốt hơn, app chuyển sang giữa hai trận.",
         ["gamePing.tip.itsServers"] = "riêng",
 
         ["relay.automatic"] = "Tự động - nhanh nhất",

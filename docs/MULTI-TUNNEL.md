@@ -50,7 +50,7 @@ Two observations make it safe:
 | # | Guarantee | Enforced by |
 |---|---|---|
 | G1 | The exit address of a destination in use never changes. | Sticky destinations (5.3); a tunnel stays open while anything is stuck to it. |
-| G2 | No region gets a path measured slower than home, and a region leaves home only when another path beats it by max(5 ms, 10%). | Planner rules 3-4 and 7 (5.5). |
+| G2 | No region gets a path that scores worse than home, and a region leaves home only when another path beats it by max(5 ms, 10%). A score is the round trip, plus 100 ms for a relay path losing packets (5.5). | Planner rules 3-4 and 7 (5.5). |
 | G3 | A region that cannot be measured fairly stays on home - exactly the single-tunnel behaviour. | Planner rule 1. |
 | G4 | With region routing off, the client behaves as a single-tunnel client. | No dispatcher exists until a plan leaves home. |
 | G5 | Never two paths into one relayd: a second handshake to a relay in use would steal its session. | The planner chooses relays, not ways into them; a relay with a tunnel open is measured through that tunnel. |
@@ -135,17 +135,23 @@ The planner is a pure function of what one measuring pass found: per region, the
 landmark (6 answered) through home, through each other relay that carries the game or is set to carry a region of
 it only (7.1), and over the player's own line - the same instrument on every path.
 
+Beside each relay path, its loss: a burst of 16 pings down each way handshaken, the last minute of pings for a tunnel
+already open. A path that lost at least 2 and at least 10% is **lossy**, and is planned on its **score** - the median
+plus 100 ms. Every rule below compares scores; without loss a score is the median. A median of 8 lets 2 echoes go
+missing unseen, and on 2026-09-29 a home losing 26% of the owner's packets kept a region against a clean relay 4 ms
+faster. Direct carries no penalty: its loss is the player's own line's.
+
 1. **Unmeasurable stays home** - no landmark, or no number through home. (G3)
 2. Candidates are relays with a number for the region.
-3. **Best relay** - the lowest median; ties by profile order.
-4. **Leave home only by the margin**, max(5 ms, 10%). (G2)
+3. **Best relay** - the lowest score; ties by profile order.
+4. **Leave home only by the margin**, max(5 ms, 10%) of home's score. (G2)
 5. **Direct** only if the game allows it and it beats the chosen path by the margin. (G8)
 6. **Cap** - at most `MaxTunnels - 1` relays besides home. Over it, every set of that many relays is scored by
    what it saves over home, each region re-decided among the set; the region the game is expected to use (the one
    home's path is measured against) counts double. The set the last plan holds stays unless another gains, net of
    what it costs the regions it pushes onto worse paths, the margin of every region it improves.
 7. **Hysteresis** - a region keeps its current path unless the new choice beats that path by the margin, and
-   only while that path is still no slower than home.
+   only while that path still scores no worse than home.
 
 When it runs:
 
@@ -194,7 +200,7 @@ home after 60 s without a match on it, or at once when its tunnel closes.
 |---|---|
 | In-game ping | probes the match server through the carrier; the estimate uses a per-tunnel second leg |
 | Spike recorder, match summary | records say `"carried": "home"` or `"other"` while region routing is in force |
-| App status | relay name, pings and loss are the carrier's; `homeRelayName` and `regionPaths` list the rest |
+| App status | relay name, pings and loss are the carrier's (loss over the last minute, shown with the relay's name); `homeRelayName` and `regionPaths` list the rest |
 
 Summed over every tunnel instead: match detection, the between-matches trigger, discovery gating, packet
 counters. Entry switching stays on home (11).

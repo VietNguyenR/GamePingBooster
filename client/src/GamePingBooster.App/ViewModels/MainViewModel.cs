@@ -496,7 +496,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         get => _lossRatio;
         private set
         {
-            if (Set(ref _lossRatio, value)) Raise(nameof(LossText));
+            if (!Set(ref _lossRatio, value)) return;
+            Raise(nameof(LossText));
+            Raise(nameof(LossTip));
         }
     }
 
@@ -543,6 +545,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             Raise(nameof(RelayText));
             Raise(nameof(RelayTip));
             Raise(nameof(GamePingTip));
+            Raise(nameof(LossText));
+            Raise(nameof(LossTip));
         }
     }
 
@@ -737,7 +741,21 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 GameRegionName ?? Loc.T("gamePing.tip.itsServers"));
 
     public string PingText => PingMs is { } p ? Loc.F("value.ms", $"{p:F0}") : Loc.T("value.none");
-    public string LossText => LossRatio is { } l ? $"{l * 100:F1}%" : Loc.T("value.none");
+    /// <summary>
+    /// The loss and the relay it is to: "25.0% to Da Nang". It sat bare under the in-game ping "to Singapore", and on
+    /// 2026-09-29 the owner read 25% to Da Nang as 25% to Singapore - the relay is named so the number cannot be
+    /// taken for the game server's.
+    /// </summary>
+    public string LossText => LossRatio is not { } l
+        ? Loc.T("value.none")
+        : RelayName is { } relay
+            ? Loc.F("value.lossTo", $"{l * 100:F1}", relay)
+            : $"{l * 100:F1}%";
+
+    /// <summary>What the loss figure measures, and what the app does about a relay that loses.</summary>
+    public string LossTip => LossRatio is null
+        ? Loc.T("loss.tip.pending")
+        : Loc.F("loss.tip", RelayName ?? Loc.T("gamePing.tip.theRelay"));
     public string RelayText => RelayName ?? Loc.T("value.none");
 
     /// <summary>
@@ -1003,6 +1021,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(GamePingTip));
         Raise(nameof(PingText));
         Raise(nameof(LossText));
+        Raise(nameof(LossTip));
         Raise(nameof(RelayText));
         Raise(nameof(RouteText));
         Raise(nameof(UnblockText));

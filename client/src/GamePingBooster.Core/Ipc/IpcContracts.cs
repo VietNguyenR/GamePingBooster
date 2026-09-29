@@ -338,7 +338,11 @@ public sealed class StatusMessage
     /// <summary>Display name of the region the game will use, e.g. "Southeast Asia (Singapore)".</summary>
     [JsonPropertyName("gameRegionName")] public string? GameRegionName { get; set; }
 
-    /// <summary>Packet loss estimated from pings, 0..1.</summary>
+    /// <summary>
+    /// Packet loss to <see cref="RelayName"/> - the relay carrying the match - over about the last minute, from the
+    /// tunnel's pings: 0..1. The leg from this PC to that relay, never to the game's server; the app says which relay
+    /// beside it, since a bare figure under a ping "to Singapore" was read as loss to Singapore (2026-09-29).
+    /// </summary>
     [JsonPropertyName("lossRatio")] public double? LossRatio { get; set; }
 
     /// <summary>Whether a game process is running - this drives route install/removal.</summary>

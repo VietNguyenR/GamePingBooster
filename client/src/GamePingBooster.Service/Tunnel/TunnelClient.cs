@@ -2,6 +2,7 @@
 using System.Net;
 using System.Net.Sockets;
 using GamePingBooster.Core.Protocol;
+using GamePingBooster.Core.Quality;
 using GamePingBooster.Service.Native;
 
 namespace GamePingBooster.Service.Tunnel;
@@ -63,6 +64,13 @@ internal sealed class TunnelClient : IDisposable
     private long _pingsSent;
     private long _pongsReceived;
     private double _lastRttMs = -1;
+
+    // The two counters above, as they stood at each of the last keepalive ticks - one a second - so the loss of
+    // the last minute can be read (RecentLoss) rather than the loss since connect, which an evening dilutes.
+    private readonly (long Sent, long Answered)[] _lossTicks = new (long, long)[RelayLoss.LiveWindowSeconds * 2 + 1];
+    private int _lossTickNext;
+    private int _lossTickCount;
+    private readonly object _lossTickLock = new();
 
     // The last time anything of this session came back from the relay: a pong or a data packet.
     // Written by the downlink thread on every packet, so a plain volatile store, not Interlocked.
@@ -215,6 +223,41 @@ internal sealed class TunnelClient : IDisposable
             var answered = Interlocked.Read(ref _pongsReceived);
             var outstanding = sent - 1;
             return Math.Clamp((double)(outstanding - answered) / outstanding, 0, 1);
+        }
+    }
+
+    /// <summary>
+    /// The pings of about the last <paramref name="seconds"/> - keepalives, the recorder's, and the connect burst
+    /// while the tunnel is younger than that - and how many were answered. What a relay comparison reads for a
+    /// tunnel that is already carrying traffic, where a burst of its own would be a second, competing reader.
+    ///
+    /// The newest ping is left out, as in <see cref="LossRatio"/>: it is normally still in flight.
+    /// </summary>
+    public PingLoss RecentLoss(int seconds = RelayLoss.LiveWindowSeconds)
+    {
+        seconds = Math.Clamp(seconds, 1, _lossTicks.Length - 1);
+        lock (_lossTickLock)
+        {
+            // A tick is taken just after its ping went out, so that ping - whose pong comes after the tick - belongs to
+            // the window: counted from one before the tick's count. A tunnel younger than the window counts from zero.
+            var (sentFrom, answeredFrom) = _lossTickCount > seconds
+                ? _lossTicks[(_lossTickNext - 1 - seconds + _lossTicks.Length * 2) % _lossTicks.Length]
+                : (0L, 0L);
+            if (sentFrom > 0) sentFrom--;
+            var sent = Interlocked.Read(ref _pingsSent) - sentFrom - 1;
+            if (sent <= 0) return PingLoss.Unknown;
+            var answered = Math.Clamp(Interlocked.Read(ref _pongsReceived) - answeredFrom, 0, sent);
+            return new PingLoss((int)sent, (int)answered);
+        }
+    }
+
+    private void NoteLossTick()
+    {
+        lock (_lossTickLock)
+        {
+            _lossTicks[_lossTickNext] = (Interlocked.Read(ref _pingsSent), Interlocked.Read(ref _pongsReceived));
+            _lossTickNext = (_lossTickNext + 1) % _lossTicks.Length;
+            if (_lossTickCount < _lossTicks.Length) _lossTickCount++;
         }
     }
 
@@ -587,6 +630,113 @@ internal sealed class TunnelClient : IDisposable
     private const int RelayPingTimeoutMs = 500;
 
     /// <summary>
+    /// <see cref="RelayLoss.BurstPings"/> pings to the relay, two at a time <see cref="RelayLoss.BurstSpacingMs"/>
+    /// apart, and every answer collected until the last is in or <see cref="RelayLoss.BurstWaitMs"/> after the last
+    /// went out: the best round trip, and how many came back.
+    ///
+    /// <see cref="MeasureRelayRttAsync"/>'s number plus the one thing three pings cannot show. On 2026-09-29 the
+    /// owner's line lost 26% of its packets into Da Nang, and connect chose Da Nang: best of three pings, one after
+    /// the other, lost nothing it could see - a lost one only cost a timeout, and the best of the other two still
+    /// won. Sixteen see a quarter going missing.
+    ///
+    /// On a clean line it costs what the three did - eight timer ticks, about 120 ms, against three round trips one
+    /// after the other - and half a second more on a line that loses, which is the line worth waiting for.
+    ///
+    /// Counted in <see cref="LossRatio"/> and <see cref="RecentLoss"/>, so a tunnel that goes on to carry the game
+    /// starts with what it measured here. Same constraint as <see cref="MeasureThroughTunnelAsync"/>: after the
+    /// handshake, before the pump threads take the socket.
+    /// </summary>
+    public async Task<(double? BestMs, PingLoss Loss)> MeasureRelayBurstAsync(CancellationToken ct)
+    {
+        var socket = _socket;
+        if (socket is null || _sessionId == 0) return (null, PingLoss.Unknown);
+
+        // Each ping's stamp is its send time, echoed back by the relay: a pong is matched to its own ping and timed
+        // against it, never against another's.
+        var pending = new HashSet<ulong>();
+        var sent = 0;
+        var answered = 0;
+        var sending = true;
+        double? best = null;
+        var allIn = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var receiving = ReceiveAsync();
+        try
+        {
+            for (var i = 0; i < RelayLoss.BurstPings; i++)
+            {
+                if (i > 0 && i % 2 == 0) await Task.Delay(RelayLoss.BurstSpacingMs, ct).ConfigureAwait(false);
+                ulong stamp;
+                lock (pending)
+                {
+                    stamp = (ulong)_clock.ElapsedTicks;
+                    while (!pending.Add(stamp)) stamp++;
+                }
+                try
+                {
+                    await socket.SendAsync(GpbProtocol.BuildPing(_sessionId, stamp), SocketFlags.None, ct).ConfigureAwait(false);
+                }
+                catch (SocketException)
+                {
+                    lock (pending) pending.Remove(stamp);
+                    break;
+                }
+                Interlocked.Increment(ref _pingsSent);
+                lock (pending) sent++;
+            }
+
+            lock (pending)
+            {
+                sending = false;
+                if (pending.Count == 0) allIn.TrySetResult();
+            }
+            await Task.WhenAny(allIn.Task, Task.Delay(RelayLoss.BurstWaitMs, ct)).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+        }
+        finally
+        {
+            stop.Cancel();
+            await receiving.ConfigureAwait(false);
+        }
+
+        lock (pending) return (best, new PingLoss(sent, answered));
+
+        async Task ReceiveAsync()
+        {
+            var buffer = new byte[GpbProtocol.MaxPacketLen];
+            try
+            {
+                while (true)
+                {
+                    var n = await socket.ReceiveAsync(buffer, SocketFlags.None, stop.Token).ConfigureAwait(false);
+                    var at = _clock.ElapsedTicks;
+                    if (!GpbProtocol.TryReadPong(buffer.AsSpan(0, n), out var sid, out var stamp) || sid != _sessionId) continue;
+                    lock (pending)
+                    {
+                        if (!pending.Remove(stamp)) continue;
+                        answered++;
+                        Interlocked.Increment(ref _pongsReceived);
+                        var rtt = (at - (long)stamp) * 1000.0 / Stopwatch.Frequency;
+                        if (best is null || rtt < best) best = rtt;
+                        if (!sending && pending.Count == 0) allIn.TrySetResult();
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // The burst is over: what came back is counted, the rest was lost.
+            }
+            catch (SocketException)
+            {
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+    }
+
+    /// <summary>
     /// One ICMP echo to <paramref name="target"/> through the tunnel while it is carrying
     /// traffic, answered by the downlink thread.
     ///
@@ -935,6 +1085,7 @@ internal sealed class TunnelClient : IDisposable
                 if (_socket is not { } socket) continue;
                 socket.Send(ping, SocketFlags.None);
                 Interlocked.Increment(ref _pingsSent);
+                NoteLossTick();
 
                 // Every thirtieth tick, so still once every 30 seconds now that the tick is a
                 // second - the same cadence as the relay's own stats line, which makes the two

@@ -48,6 +48,10 @@ internal sealed class FakeRelay : IDisposable
 
     public long Spoofed;
     public long Pings;
+
+    /// <summary>Pings this returns true for, by their 1-based number, are dropped without a pong. Null drops none.</summary>
+    public volatile Func<long, bool>? DropPing;
+
     public long Probes;
     public long Disconnects;
     public long Handshakes;
@@ -116,8 +120,10 @@ internal sealed class FakeRelay : IDisposable
                     Data(socket, pkt, received.RemoteEndPoint, at);
                     break;
                 case GpbProtocol.TypePing:
+                    // Counted first, so DropPing sees the ping's 1-based number - a line losing packets, as on 2026-09-29.
+                    var nth = Interlocked.Increment(ref Pings);
+                    if (DropPing?.Invoke(nth) == true) break;
                     PingLike(socket, pkt, received.RemoteEndPoint, GpbProtocol.TypePong, roam: true);
-                    Interlocked.Increment(ref Pings);
                     break;
                 case GpbProtocol.TypeProbe:
                     PingLike(socket, pkt, received.RemoteEndPoint, GpbProtocol.TypeProbeReply, roam: false);

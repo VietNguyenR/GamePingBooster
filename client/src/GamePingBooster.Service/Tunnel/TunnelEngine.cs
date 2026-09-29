@@ -6,6 +6,7 @@ using System.Net.Sockets;
 using System.Text.Json;
 using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Profiles;
+using GamePingBooster.Core.Quality;
 using GamePingBooster.Service.Discovery;
 using GamePingBooster.Service.Native;
 using GamePingBooster.Service.Network;
@@ -1286,13 +1287,13 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             client = new TunnelClient(ParseEndpoint(relay.Endpoint), AuthFor(relay, psk), _clientId, _log);
             await client.HandshakeAsync(attempts: 2, ct).ConfigureAwait(false);
 
-            // Both legs measured the same way, best of three. The handshake RTT is still
-            // taken and still logged, but it is one sample, and subtracting one sample from a
-            // best-of-three echo is what made the second leg come out as zero - see
-            // MeasureRelayRttAsync. It stays as the fallback for a relay that answers a
-            // handshake but not a ping.
-            var legOne = await client.MeasureRelayRttAsync(attempts: 3, ct).ConfigureAwait(false)
-                         ?? client.HandshakeRttMs;
+            // Both legs measured as a best-of. The handshake RTT is still taken and still logged,
+            // but it is one sample, and subtracting one sample from a best-of-three echo is what
+            // made the second leg come out as zero - see MeasureRelayRttAsync. It stays as the
+            // fallback for a relay that answers a handshake but not a ping. The first leg is a
+            // burst of pings, so the relay's loss is measured with it - see RelayLoss.
+            var (burstMs, loss) = await client.MeasureRelayBurstAsync(ct).ConfigureAwait(false);
+            var legOne = burstMs ?? client.HandshakeRttMs;
 
             double? endToEnd = null;
             if (target is not null)
@@ -1301,8 +1302,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     .ConfigureAwait(false);
             }
 
-            _log($"  {relay.Name} [{relay.Id}] ({relay.Location}): {Describe(legOne, endToEnd, target)}");
-            return new RelayProbe(relay, legOne, endToEnd) { Client = client };
+            _log($"  {relay.Name} [{relay.Id}] ({relay.Location}): {Describe(legOne, endToEnd, target)}{RelayLoss.Note(loss)}");
+            return new RelayProbe(relay, legOne, endToEnd) { Client = client, Loss = loss };
         }
         catch (OperationCanceledException)
         {
@@ -1334,6 +1335,12 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         if (probes.Count == 0)
         {
             _log("No relay answered directly - trying the entries in front of them.");
+            return true;
+        }
+        if (probes.All(p => p.Loss.IsLossy))
+        {
+            _log("Every relay is losing packets on the way from here - trying the entries in front of them, " +
+                 "which reach the same relays by another route.");
             return true;
         }
         if (target is null || probes.Any(p => p.EndToEndMs is null)) return false;
@@ -1398,19 +1405,21 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             }
         }
 
-        var fastest = measured.MinBy(p => p.LegOneMs)!;
-        if (ReferenceEquals(fastest, best) || best.LegOneMs - fastest.LegOneMs < GamePingBooster.Core.Quality.DoorSwitchPolicy.Margin(fastest.LegOneMs))
+        // On the score, not the round trip alone: a way in that loses packets is no faster road (RelayLoss).
+        var fastest = measured.MinBy(p => p.LegOneScore)!;
+        if (ReferenceEquals(fastest, best) || best.LegOneScore - fastest.LegOneScore < GamePingBooster.Core.Quality.DoorSwitchPolicy.Margin(fastest.LegOneScore))
         {
             _log($"Entry switching: starting on {best.Relay.Name} [{best.Relay.Id}] at {best.LegOneMs:F0} ms" +
                  (ReferenceEquals(fastest, best)
                      ? " - no other way in is faster."
-                     : $" - {fastest.Relay.Id} at {fastest.LegOneMs:F0} ms is not faster by " +
-                       $"{GamePingBooster.Core.Quality.DoorSwitchPolicy.Margin(fastest.LegOneMs):F0} ms or more."));
+                     : $" - {fastest.Relay.Id} at {fastest.LegOneMs:F0} ms{LossyNote(fastest)} is not better by " +
+                       $"{GamePingBooster.Core.Quality.DoorSwitchPolicy.Margin(fastest.LegOneScore):F0} ms or more."));
             return best;
         }
 
         _log($"Entry switching: starting on {fastest.Relay.Name} [{fastest.Relay.Id}] at {fastest.LegOneMs:F0} ms rather " +
-             $"than {best.Relay.Id} at {best.LegOneMs:F0} ms - the same relay, reached by a faster road right now.");
+             $"than {best.Relay.Id} at {best.LegOneMs:F0} ms{LossyNote(best)} - the same relay, reached by a " +
+             (best.Loss.IsLossy && !fastest.Loss.IsLossy ? "road that is not losing packets right now." : "faster road right now."));
         _connectLeftDoor = best.Relay.Id;
         return fastest;
     }
@@ -1477,6 +1486,28 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     }
 
     /// <summary>
+    /// Names the paths that measured faster than the one chosen but lost the comparison on their packet loss - the
+    /// reason the fastest number did not win, which the log would otherwise leave the reader to guess. Every path
+    /// losing packets is said too: then the fastest of them was taken, as it always was.
+    /// </summary>
+    private void LogLossyLeftOut(List<RelayProbe> probes, RelayProbe chosen, Func<RelayProbe, double> ms)
+    {
+        foreach (var p in probes.Where(p => !ReferenceEquals(p, chosen) && p.Loss.IsLossy && ms(p) < ms(chosen)))
+        {
+            _log($"  {p.Relay.Name} [{p.Relay.Id}] measured faster, {ms(p):F0} ms, but is losing packets on the way from " +
+                 $"here ({p.Loss}) - counted as {RelayLoss.PenaltyMs:F0} ms slower, a game hides ping far better than loss.");
+        }
+        if (chosen.Loss.IsLossy)
+        {
+            _log(probes.All(p => p.Loss.IsLossy)
+                ? $"  Every relay measured is losing packets on the way from here - {chosen.Relay.Name} [{chosen.Relay.Id}] " +
+                  "is the fastest of them. That is this line to the relays, not the game; they are measured again between matches."
+                : $"  {chosen.Relay.Name} [{chosen.Relay.Id}] is losing packets, but every relay that is not is more than " +
+                  $"{RelayLoss.PenaltyMs:F0} ms slower still.");
+        }
+    }
+
+    /// <summary>
     /// One path measured during selection. <see cref="Client"/> is the open tunnel, and null once it
     /// has been closed - to make way for another path to the same relay, or because it lost.
     /// </summary>
@@ -1486,7 +1517,18 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         public double LegOneMs { get; } = legOneMs;
         public double? EndToEndMs { get; } = endToEndMs;
         public TunnelClient? Client { get; set; }
+
+        /// <summary>The pings of the burst that measured <see cref="LegOneMs"/>. Unknown - never lossy - when there was none.</summary>
+        public PingLoss Loss { get; init; } = PingLoss.Unknown;
+
+        /// <summary>What a comparison ranks this path on: the round trip, plus the penalty when it loses packets.</summary>
+        public double? EndToEndScore => EndToEndMs is { } ms ? RelayLoss.Score(ms, Loss) : null;
+
+        public double LegOneScore => RelayLoss.Score(LegOneMs, Loss);
     }
+
+    /// <summary>", losing packets (lost 4 of 16 pings (25%))" for a lossy probe, "" otherwise.</summary>
+    private static string LossyNote(RelayProbe probe) => probe.Loss.IsLossy ? $", losing packets ({probe.Loss})" : "";
 
     /// <summary>
     /// What the chosen relay measured on the way to the game's datacentre, kept for the status.
@@ -1571,9 +1613,10 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     {
         if (target is not null && probes.All(p => p.EndToEndMs is not null))
         {
-            var best = probes.OrderBy(p => p.EndToEndMs!.Value).First();
+            var best = probes.OrderBy(p => p.EndToEndScore!.Value).First();
+            LogLossyLeftOut(probes, best, p => p.EndToEndMs!.Value);
             _log($"Chose {best.Relay.Name} [{best.Relay.Id}] at {best.EndToEndMs!.Value:F0} ms " +
-                 $"end to end to {target.RegionName} ({best.LegOneMs:F0} ms of that is the relay leg).");
+                 $"end to end to {target.RegionName} ({best.LegOneMs:F0} ms of that is the relay leg){LossyNote(best)}.");
             RecordPath(target, best.LegOneMs, best.EndToEndMs.Value);
             return best;
         }
@@ -1595,8 +1638,9 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         }
 
         _path = null;
-        var fallback = probes.OrderBy(p => p.LegOneMs).First();
-        _log($"Chose {fallback.Relay.Name} [{fallback.Relay.Id}] at {fallback.LegOneMs:F0} ms " +
+        var fallback = probes.OrderBy(p => p.LegOneScore).First();
+        LogLossyLeftOut(probes, fallback, p => p.LegOneMs);
+        _log($"Chose {fallback.Relay.Name} [{fallback.Relay.Id}] at {fallback.LegOneMs:F0} ms{LossyNote(fallback)} " +
              "(leg 1 only - see GameServerTally).");
         return fallback;
     }
@@ -3195,7 +3239,9 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             GamePingMs = direct ?? (carrierPath is { } p && carrier?.LastRttMs is { } live ? live + p.Offset : null),
             GamePingDirect = direct is not null,
             GameRegionName = carrierPath?.RegionName,
-            LossRatio = carrier?.LossRatio,
+            // The last minute, as relay comparisons read it (RelayLoss): since connect, an hour of clean play hid
+            // loss that had just started, and loss that had stopped stayed on screen for the rest of the evening.
+            LossRatio = carrier?.RecentLoss() is { Sent: >= 5 } recent ? recent.Share : null,
             GameRunning = _watcher?.IsGameRunning ?? false,
             // The game being played, or - when none is - the only one there is. With several there is
             // no selector, so naming the one relays happened to be measured for would read as a choice

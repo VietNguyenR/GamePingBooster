@@ -220,6 +220,38 @@
       "azureRegions": [],
       "asns": [396982],
       "note": "Captured 2026-09-25 on two PCs, AS region selected every time, about six matches. Gameplay is UDP from NarakaBladepoint.exe on ports 28xxx at about 100 packets/s, and the match server also takes TCP 280xx (35.200.60.217:28009, 34.146.142.128:28005):\n  34.146.108.224   97890 / 961 s  = 102/s  GCP asia-northeast1 (Tokyo)  match\n  34.146.142.128   39185 / 396 s  =  99/s  GCP asia-northeast1 (Tokyo)  match\n  34.146.147.138  104617 / 997 s  = 105/s  GCP asia-northeast1 (Tokyo)  match\n  35.200.60.217    96128 / 976 s  =  98/s  GCP asia-northeast1 (Tokyo)  match\n  34.146.241.71    93080 / 1388 s =  67/s  GCP asia-northeast1 (Tokyo)  match, plus lobby keepalive to the same server\n  216.133.158.10  101629 / 1046 s =  97/s  Zenlayer AS62610, Ho Chi Minh City  match\nSo the AS region is Tokyo and Vietnam so far. Singapore has the game's infrastructure but has carried no match yet: 34.87.83.78 TCP 39993 is in every session (the lobby), 34.126.143.105 ran UDP at 10/s, and 34.126.130.169 took a TCP 28005 with no UDP after it. If a Singapore match turns up, it is AS396982 too and needs nothing declared.\n\nAS396982 is Google Cloud as a whole, shared by every customer, like Tencent for deltaforce: the builder widens only around observed addresses and clamps to /20. Zenlayer is NOT declared here: the server is in Vietnam (33 ms from the PC, 20 from vn, 96 from hk2), so 216.133.158.10 stays in observed-naraka-unverified.txt and ./gpb profile naraka still writes ONE region, as396982. PRODUCTION IS SPLIT SINCE 2026-09-26; since 2026-09-27 it is asia-sg (GCP Singapore, 34.126.128.0/20 + discovery /32s, landmark the lobby 34.87.83.78) and hcm (Zenlayer /32s only - relay vn-3 216.27.174.144 shares their /24 - landmark 216.133.158.1), with NO Tokyo region by the owner's call, from profiles/naraka-regions-import.json - the operator judged a relay helps lines with a worse route to HCM. REVISED 2026-09-26 evening: the operator dropped hcm - Vietnamese servers are no longer routed at all, a VN match plays on the player's own line; then Tokyo too - the import file now holds asia-sg only, and a Tokyo or VN match plays on the player's own line. NEVER import the builder's file into the dashboard: an import is the whole truth for the game and would retire hcm.\n\nONE SERVER HAS TWO RATES, SO JUDGE A RECORD, NOT AN ADDRESS. 34.146.241.71 first appeared at 1108 / 1213 s = 0.9/s on UDP 28204 and was removed by hand as a lobby target. It was then made the landmark, and the next capture showed it carrying a whole match. The game keeps a trickle to a server outside the match as well as playing on it. 34.126.143.105 (10/s) was removed from observed-naraka.txt by hand for the same reason and stays out until it is seen above ~50/s. The builder does not judge rate, so a new address under that has to be removed by hand before a build.\n\nLANDMARK: 34.85.0.48, the game's own HTTPS API (TCP 443) in GCP Tokyo, outside every routed /20 and never a match. It must never be routed. ICMP min on 2026-09-25, landmark vs the Tokyo servers: PC 73 vs 73-74, hk2 50.3 vs 51.5-52.4, sg 74.1 vs 74.6-75.6, vn 66.6 vs 67.7-68.1, vn2 72.7 vs 76.7-78.3. That is within about 2 ms, except vn2 at 4-5 ms. Never use a match server as the landmark: the builder drops any /20 that covers one. A 'no Azure region' warning for this landmark is the builder checking every game against Azure and means nothing here.\n\nDOES THE TUNNEL HELP? Not on the first capture PC's line. Direct to Tokyo is 73-77 ms. Relay totals (PC->relay + relay->server) are hk2 30+52 = 82, vn2 10+67..78 = 77-88, vn 20+68..71 = 88-91, sg/sg2/sg4 43+74 = 117. Only hk2 comes close, and Singapore is no use for Tokyo. A line whose own route to Japan is worse may still gain through hk2."
+    },
+
+    "ros": {
+      "name": "Rules of Survival",
+      "watchProcess": "ros64",
+      "probePort": null,
+      "observedPath": "observed-ros.txt",
+      "landmarkPath": null,
+      "tcpSessionsPath": "tcp-sessions-ros.txt",
+      "unverifiedPath": "observed-ros-unverified.txt",
+      "manualCidrPath": "manual-cidrs-ros.txt",
+      "profilePath": "../../profiles/ros-vn.json",
+      "awsRegions": [],
+      "azureRegions": [],
+      "asns": [16276],
+      "note": "Captured 2026-09-29, one session: 139.99.144.170 on UDP 7026, 4112 packets / 28 s = 147/s - a match, but a short one, so the evidence is thin. 139.99.128.0/17 is announced by OVH AS16276 and GeoIP puts it in Sydney; ICMP from the capture PC (Hanoi) answers at 183-188 ms, which is Sydney, not OVH Singapore (~40 ms). AS16276 is OVH as a whole, shared by every customer, so the builder widens only around observed addresses and clamps to /20. Capture more matches before trusting the region: if Singapore or another region shows up it is probably OVH too and needs nothing declared."
+    },
+
+    "aniimo": {
+      "name": "Aniimo",
+      "watchProcess": "Aniimo",
+      "probePort": null,
+      "observedPath": "observed-aniimo.txt",
+      "landmarkPath": null,
+      "tcpSessionsPath": "tcp-sessions-aniimo.txt",
+      "unverifiedPath": "observed-aniimo-unverified.txt",
+      "manualCidrPath": "manual-cidrs-aniimo.txt",
+      "profilePath": "../../profiles/aniimo-vn.json",
+      "awsRegions": [],
+      "azureRegions": [],
+      "asns": [],
+      "note": "Captured 2026-09-29 from Hanoi with ./gpb capture aniimo all, four sessions: NO UDP AT ALL - observed-aniimo.txt was never written. The game is TCP. Gameplay is TCP 20000, one long connection per server, to Alibaba Cloud Singapore (AS45102):\n  47.237.210.48   34808 / 606 s = 57/s\n  43.106.7.69     31312 / 586 s = 53/s (also 12550 / 182 s = 69/s)\n  47.237.216.175   6399 / 172 s = 37/s\n  47.84.93.165     5082 / 149 s = 34/s\n  47.245.126.28    2197 /  90 s = 24/s\nFive servers in four different /16s (43.106/16, 47.237/16, 47.84/17, 47.245/19): Alibaba hands out addresses per instance, so a /20 around one server says nothing about the next. 8.219.197.133 TCP 10000 (~0.4/s, open the whole session) is the gateway; 47.253.108.56, 47.90.219.239, 8.214.x, 47.89.139.22, 100.2x.x.x, 43.152-153.x are HTTPS 443 - never route those. None of the servers answer ICMP. TCP connect RTT from the capture PC, min of 5: every one 43.3-44.5 ms, the gateway 44.1 - all Singapore. The cross-check stays empty because the pipeline is UDP-only end to end: capture writes only UDP to observed, the client's discovery (GameDestinationRecorder) listens to UDP only, and rescan-between-matches reads 10 s of zero game UDP as 'match over' - which a TCP game is all the time. Decide TCP support before building a profile."
     }
   }
 }

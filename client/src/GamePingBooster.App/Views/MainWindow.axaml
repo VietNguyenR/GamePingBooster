@@ -156,7 +156,7 @@
           <TextBlock Grid.Row="1" Grid.Column="1" Classes="value" Text="{Binding PingText}" Margin="0,10,0,0" />
 
           <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="{DynamicResource main.label.loss}" Margin="0,10,0,0" />
-          <TextBlock Grid.Row="2" Grid.Column="1" Classes="value" Text="{Binding LossText}" Margin="0,10,0,0" />
+          <TextBlock Grid.Row="2" Grid.Column="1" Classes="value" Text="{Binding LossText}" Margin="0,10,0,0" ToolTip.Tip="{Binding LossTip}" />
 
           <TextBlock Grid.Row="3" Grid.Column="0" Classes="label" Text="{DynamicResource main.label.relay}" Margin="0,10,0,0" />
           <TextBlock Grid.Row="3" Grid.Column="1" Classes="value" Text="{Binding RelayText}" Margin="0,10,0,0" ToolTip.Tip="{Binding RelayTip}" />
