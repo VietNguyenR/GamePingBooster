@@ -339,6 +339,15 @@ public sealed class StatusMessage
     [JsonPropertyName("gameRegionName")] public string? GameRegionName { get; set; }
 
     /// <summary>
+    /// The relay <see cref="GamePingMs"/> is through when that is not <see cref="RelayName"/>, else null. Only between
+    /// matches with region routing in force, when the plan sends the expected region to another relay: the headline is
+    /// then that relay's estimate for the next match, not home's. Home's is the road a match there will not take - on
+    /// 2026-09-30 a customer read "64 ms to Singapore" beside "Ha Noi" in the lobby, while a Singapore match would go
+    /// through Singapore at about 44.
+    /// </summary>
+    [JsonPropertyName("gamePingRelayName")] public string? GamePingRelayName { get; set; }
+
+    /// <summary>
     /// Packet loss to <see cref="RelayName"/> - the relay carrying the match - over about the last minute, from the
     /// tunnel's pings: 0..1. The leg from this PC to that relay, never to the game's server; the app says which relay
     /// beside it, since a bare figure under a ping "to Singapore" was read as loss to Singapore (2026-09-29).

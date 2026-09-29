@@ -466,6 +466,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    private string? _gamePingRelayName;
+    /// <summary>The relay the headline is through when it is not <see cref="RelayName"/> - between matches only.</summary>
+    public string? GamePingRelayName
+    {
+        get => _gamePingRelayName;
+        private set
+        {
+            if (Set(ref _gamePingRelayName, value)) Raise(nameof(GamePingTip));
+        }
+    }
+
     private bool _gamePingDirect;
     public bool GamePingDirect
     {
@@ -734,6 +745,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </summary>
     public string GamePingTip => GamePingMs is null
         ? Loc.T("gamePing.tip.pending")
+        : GamePingRelayName is { } via
+            ? Loc.F("gamePing.tip.nextMatch", via, GameRegionName ?? Loc.T("gamePing.tip.itsServers"),
+                RelayName ?? Loc.T("gamePing.tip.theRelay"))
         : GamePingDirect
             ? Loc.T("gamePing.tip.measured")
             : Loc.F("gamePing.tip.estimated",
@@ -1128,6 +1142,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         GamePingMs = status.GamePingMs;
         GamePingDirect = status.GamePingDirect;
         GameRegionName = status.GameRegionName;
+        GamePingRelayName = status.GamePingRelayName;
         LossRatio = status.LossRatio;
         GameRunning = status.GameRunning;
         GameName = status.GameName;
@@ -1170,6 +1185,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         GamePingMs = null;
         GamePingDirect = false;
         GameRegionName = null;
+        GamePingRelayName = null;
         LossRatio = null;
         ActiveRoutes = 0;
         HomeRelayName = null;

@@ -81,6 +81,9 @@ internal static class StringsVi
             "Số ước tính: ping tới {0} cộng với quãng đường từ đó tới máy chủ {1} của game. Game tự chọn máy chủ " +
             "của nó - đổi relay là đổi đường đi tới máy chủ, không đổi được máy chủ. Khi đang trong trận, số này " +
             "bám theo đúng khu vực game đang dùng, nếu nhận ra được từ traffic của game.",
+        ["gamePing.tip.nextMatch"] =
+            "Số ước tính cho trận tới. Máy chủ {1} của game đi qua {0} nhanh hơn qua {2}, nên trận ở đó sẽ đi qua " +
+            "{0}; sảnh và mọi thứ khác vẫn đi qua {2}. Số này là ping tới {0} cộng quãng đường từ đó tới các máy chủ đó.",
         ["gamePing.tip.theRelay"] = "relay",
         ["loss.tip.pending"] = "Hiện ra sau khi kết nối được vài giây.",
         ["loss.tip"] =

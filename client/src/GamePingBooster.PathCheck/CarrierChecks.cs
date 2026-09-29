@@ -82,6 +82,23 @@ internal static partial class Program
             Check("A reconnect's new home is the carrier, not the old one", ReferenceEquals(answer, replaced), $"got {answer}");
         }
 
+        {
+            var run = new CarrierRun(home);
+            var minute = MatchCarrier<FakeTunnel>.HomeAfter;
+            run.Seconds(120, 1, (hk, 0));
+            var lobby = run.Carrier.CarriedMatchWithin(home, run.NowMs, minute);
+            run.Seconds(300, 30, (hk, 0));
+            var match = run.Carrier.CarriedMatchWithin(home, run.NowMs, minute);
+            run.Seconds(59, 0, (hk, 0));
+            var stall = run.Carrier.CarriedMatchWithin(home, run.NowMs, minute);
+            run.Seconds(2, 0, (hk, 0));
+            var over = run.Carrier.CarriedMatchWithin(home, run.NowMs, minute);
+            Check("CarriedMatchWithin: a lobby trickle is no match, a match and its stall are, a minute of nothing ends it",
+                !lobby && match && stall && !over, $"lobby {lobby}, match {match}, 59 s after {stall}, 61 s after {over}");
+            Check("CarriedMatchWithin: a tunnel never read carried nothing",
+                !run.Carrier.CarriedMatchWithin(new FakeTunnel("unseen"), run.NowMs, minute));
+        }
+
         CarrierFollowsItsRules();
     }
 
@@ -161,6 +178,8 @@ internal static partial class Program
         private long _second;
 
         public FakeTunnel? Last { get; private set; }
+        public MatchCarrier<FakeTunnel> Carrier => _carrier;
+        public long NowMs => _second * 1_000;
 
         public FakeTunnel Seconds(int seconds, int homeRate, params (FakeTunnel Tunnel, int Rate)[] others)
         {

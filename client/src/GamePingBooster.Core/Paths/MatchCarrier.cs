@@ -48,10 +48,26 @@ public sealed class MatchCarrier<TTunnel> where TTunnel : class
 
         /// <summary>When this tunnel started carrying a match's rate without a break, or -1 while it is not.</summary>
         public long BusySinceMs = -1;
+
+        /// <summary>The last reading at which it carried a match's rate, or -1 if it never has.</summary>
+        public long LastBusyMs = -1;
     }
 
     /// <summary>The tunnel carrying the match, or null before the first <see cref="Update"/>.</summary>
     public TTunnel? Current => _current;
+
+    /// <summary>
+    /// Whether <paramref name="tunnel"/> carried a match's rate at any reading in the last <paramref name="within"/> -
+    /// a match on it, a stall of that match included. False for a tunnel never read.
+    /// </summary>
+    public bool CarriedMatchWithin(TTunnel tunnel, long nowMs, TimeSpan within)
+    {
+        lock (_gate)
+        {
+            return _readings.TryGetValue(tunnel, out var reading) && reading.LastBusyMs >= 0 &&
+                   nowMs - reading.LastBusyMs <= within.TotalMilliseconds;
+        }
+    }
 
     /// <summary>
     /// One reading of every open tunnel: <paramref name="home"/>, and <paramref name="others"/> with each one's
@@ -122,6 +138,10 @@ public sealed class MatchCarrier<TTunnel> where TTunnel : class
         reading.Packets = packets;
         reading.AtMs = nowMs;
         if (reading.Rate < MatchPacketsPerSecond) reading.BusySinceMs = -1;
-        else if (reading.BusySinceMs < 0) reading.BusySinceMs = nowMs - elapsed;
+        else
+        {
+            if (reading.BusySinceMs < 0) reading.BusySinceMs = nowMs - elapsed;
+            reading.LastBusyMs = nowMs;
+        }
     }
 }

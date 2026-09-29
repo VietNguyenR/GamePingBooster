@@ -81,6 +81,10 @@ internal static class StringsEn
             "Estimated: the ping to {0} plus the distance from there to the game's {1} servers. The game picks " +
             "its own server - changing the relay changes the route to it, not the server. In a match it follows " +
             "the region the game actually uses, where that can be told from its traffic.",
+        ["gamePing.tip.nextMatch"] =
+            "Estimated for your next match. The game's {1} servers are faster through {0} than through {2}, so a " +
+            "match there goes through {0}; the lobby and everything else stay on {2}. The figure is the ping to {0} " +
+            "plus the distance from there to those servers.",
         ["gamePing.tip.theRelay"] = "the relay",
         ["loss.tip.pending"] = "Appears a few seconds after connecting.",
         ["loss.tip"] =
