@@ -32,7 +32,7 @@ public sealed class CommandMessage
 
     /// <summary>
     /// "connect" | "disconnect" | "status" | "reload-profile" | "set-relay" | "set-token" |
-    /// "set-profile" | "games" | "relays" | "set-relay-choice"
+    /// "set-profile" | "set-profiles" | "games" | "relays" | "set-relay-choice"
     /// </summary>
     [JsonPropertyName("verb")] public string Verb { get; set; } = "status";
 
@@ -120,6 +120,14 @@ public sealed class CommandMessage
     /// hold them even briefly.
     /// </summary>
     [JsonPropertyName("profile")] public string? Profile { get; set; }
+
+    /// <summary>
+    /// set-profiles: every sealed profile one sync brought, as hex - possibly none. The service stores them all, reloads
+    /// once and marks the sync done (StatusMessage.ProfileUpdatedAt). What POST /profiles on the licence server answers
+    /// is only the games whose content changed, so an empty list is the ordinary case and still means "synced now".
+    /// A service older than the verb refuses it, and the app then sends each one as set-profile - see ProfileSync.
+    /// </summary>
+    [JsonPropertyName("profiles")] public List<string>? Profiles { get; set; }
 
     // ------------------------------------------------------------ connection quality
     //
@@ -488,6 +496,16 @@ public sealed class StatusMessage
     /// profile.
     /// </summary>
     [JsonPropertyName("profileUpdatedAt")] public long? ProfileUpdatedAt { get; set; }
+
+    /// <summary>
+    /// The content hash of every game's profile the service holds from the licence server, by game id - read from inside
+    /// each stored envelope, so authenticated. The app sends it as POST /profiles' `have`, and the server seals only what
+    /// differs. A profile from a server older than the hash is not listed, and is simply sent again.
+    ///
+    /// Additive: an older UI ignores it, and a newer UI reads null from an older service - which it takes as a service
+    /// that does not know set-profiles either.
+    /// </summary>
+    [JsonPropertyName("profileHashes")] public Dictionary<string, string>? ProfileHashes { get; set; }
 
     /// <summary>
     /// Whether this installation sends connection quality after each match, or null from a service

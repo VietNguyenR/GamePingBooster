@@ -261,6 +261,21 @@ internal sealed class PipeServer
             // Get-NetRoute while the tunnel is up. It is still validated here, because a file
             // that does not parse would leave the service unable to load any profile at all -
             // a denial of service any local process could trigger.
+            // Everything one sync brought, stored together and reloaded once - see TunnelEngine.SetProfilesAsync. The
+            // same untrusted-input rules as set-profile below, per envelope.
+            case "set-profiles":
+            {
+                var error = await _engine.SetProfilesAsync(cmd.Profiles ?? [], ct).ConfigureAwait(false);
+                if (error is not null) _log($"set-profiles: {error}");
+
+                // Once per sync rather than once per game: the unblock list is the same in every game's profile.
+                await _unblock.RefreshAsync(ct).ConfigureAwait(false);
+                var status = _engine.Snapshot();
+                status.Error = error;
+                await PushAsync(status).ConfigureAwait(false);
+                break;
+            }
+
             case "set-profile":
             {
                 if (string.IsNullOrWhiteSpace(cmd.Profile))

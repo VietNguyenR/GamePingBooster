@@ -1,4 +1,4 @@
-namespace GamePingBooster.PathCheck;
+﻿namespace GamePingBooster.PathCheck;
 
 /// <summary>
 /// Checks the pieces multi-tunnel stands on, before any of them carries a packet: the inner-address NAT,
@@ -50,6 +50,10 @@ internal static partial class Program
         Console.WriteLine();
         Console.WriteLine("When the lobby is sure enough to plan:");
         LobbyChecks();
+
+        Console.WriteLine();
+        Console.WriteLine("What a profile sync stores and asks for:");
+        ProfileSyncChecks();
 
         Console.WriteLine();
         if (_failures == 0)

@@ -11,6 +11,13 @@ public sealed class ProfileBundle
 {
     [JsonPropertyName("schemaVersion")] public int SchemaVersion { get; set; } = 1;
 
+    /// <summary>
+    /// SHA-256 of the bundle's content as the licence server built it (profileContentHash in its profile-sync.ts), or
+    /// null from a server older than the field and in every shipped file. Only ever compared, never recomputed here:
+    /// the service reports it back, and the server sends a game again only when its content has moved.
+    /// </summary>
+    [JsonPropertyName("contentHash")] public string? ContentHash { get; set; }
+
     /// <summary>When the profile was generated, so the UI can show "updated N days ago".</summary>
     [JsonPropertyName("generatedUtc")] public DateTimeOffset GeneratedUtc { get; set; }
 

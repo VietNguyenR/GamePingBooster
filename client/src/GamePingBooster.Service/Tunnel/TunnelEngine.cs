@@ -158,88 +158,13 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     /// caps its age anyway.
     /// </summary>
     /// <summary>
-    /// Stores a profile the UI fetched from the licence server, and reloads from it.
-    ///
-    /// Everything arriving here is untrusted: the pipe is open to BuiltinUsers, so a hostile
-    /// local process can call this. It is parsed before it is written - a file that does not
-    /// deserialise would leave the service unable to load a profile at all on the next start,
-    /// which is a denial of service anybody could trigger.
-    ///
-    /// The worst a hostile caller achieves after those checks is routing their own choice of
-    /// addresses through the relay from their own machine, which they could do by editing the
-    /// routing table directly. This is not a new capability.
+    /// Stores one profile the UI fetched from the licence server, and reloads from it - set-profile, what an app older
+    /// than set-profiles sends one game at a time. The checks are <see cref="StoreSealedAsync"/>'s.
     /// </summary>
     public async Task<string?> SetProfileAsync(string envelopeHex, CancellationToken ct)
     {
-        // A sealed profile is tens of kilobytes of hex. A megabyte is not one.
-        const int MaxChars = 8 * 1024 * 1024;
-        if (envelopeHex.Length > MaxChars) return "That profile is too large.";
-
-        byte[] envelope;
-        try
-        {
-            envelope = Convert.FromHexString(envelopeHex.Trim());
-        }
-        catch (FormatException)
-        {
-            return "That is not a sealed profile.";
-        }
-
-        // Opened BEFORE it is written. The envelope is authenticated, so this is the check that
-        // makes the verb safe: the pipe is open to BuiltinUsers, and without it any local
-        // process could drop a file the service cannot use and leave it unable to load a profile
-        // at all on the next start.
-        string json;
-        try
-        {
-            var plaintext = _device.OpenSealedProfile(envelope);
-            try
-            {
-                json = System.Text.Encoding.UTF8.GetString(plaintext);
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(plaintext);
-            }
-        }
-        catch (CryptographicException ex)
-        {
-            return ex.Message;
-        }
-
-        ProfileBundle? parsed;
-        try
-        {
-            parsed = JsonSerializer.Deserialize(json, ProfileJsonContext.Default.ProfileBundle);
-        }
-        catch (JsonException ex)
-        {
-            return $"The sealed profile did not contain a valid one: {ex.Message}";
-        }
-        if (parsed is null || parsed.Games.Count == 0) return "That profile names no games.";
-
-        // Stored per game, under the game's own id. The licence server seals one game per profile,
-        // and a single shared file meant fetching Counter-Strike 2 overwrote PUBG. The id becomes a
-        // file name and this pipe is open to BuiltinUsers, so it is held to a shape that can only
-        // ever name a file inside the one directory.
-        var game = parsed.Games[0];
-        if (!IsStorableGameId(game.Id))
-        {
-            return $"That profile's game id cannot be stored: '{game.Id}'.";
-        }
-
-        try
-        {
-            Directory.CreateDirectory(SealedProfileDirectory);
-            var path = SealedProfilePathFor(game.Id);
-            var tmp = path + ".tmp";
-            await File.WriteAllBytesAsync(tmp, envelope, ct).ConfigureAwait(false);
-            File.Move(tmp, path, overwrite: true);
-        }
-        catch (Exception ex)
-        {
-            return $"Could not store the profile: {ex.Message}";
-        }
+        var (error, stored) = await StoreSealedAsync(envelopeHex, ct).ConfigureAwait(false);
+        if (error is not null) return error;
 
         RetireLegacySealedProfile();
 
@@ -252,11 +177,144 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             return $"Stored, but could not load it: {ex.Message}";
         }
 
-        var cidrs = parsed.Games.Sum(g => g.Regions.Sum(r => r.Cidrs.Count));
-        _log($"Profile for {game.Name} updated from the licence server: {cidrs} ranges, " +
-             $"{parsed.Relays.Count} relay(s). It applies from the next connect.");
+        _log($"Profile for {stored!.Game.Name} updated from the licence server: {stored.Cidrs} ranges, " +
+             $"{stored.Relays} relay(s). It applies from the next connect.");
         StatusChanged?.Invoke(Snapshot());
         return null;
+    }
+
+    /// <summary>The most one set-profiles may carry - far above any catalogue, far below a problem.</summary>
+    private const int MaxProfilesPerPush = 512;
+
+    /// <summary>
+    /// Stores every profile one sync brought - each checked exactly as <see cref="SetProfileAsync"/> checks one - then
+    /// reloads ONCE and marks the sync done, whether anything changed or not (<see cref="SyncMarkerPath"/>).
+    ///
+    /// The app used to push one game at a time, and every push reloaded every stored profile and re-verified the
+    /// unblock list: ten games, ten reloads, on every connect. The licence server now sends only the games whose content
+    /// moved (POST /profiles), so the usual push is empty and costs one reload.
+    ///
+    /// One bad envelope does not stop the rest - each is its own game - and is named in the error returned.
+    /// </summary>
+    public async Task<string?> SetProfilesAsync(IReadOnlyList<string> envelopesHex, CancellationToken ct)
+    {
+        if (envelopesHex.Count > MaxProfilesPerPush) return $"At most {MaxProfilesPerPush} profiles in one push.";
+
+        var problems = new List<string>();
+        var updated = new List<StoredProfile>();
+        foreach (var hex in envelopesHex)
+        {
+            var (error, stored) = await StoreSealedAsync(hex, ct).ConfigureAwait(false);
+            if (error is not null) problems.Add(error);
+            else updated.Add(stored!);
+        }
+
+        try
+        {
+            Directory.CreateDirectory(SealedProfileDirectory);
+            await File.WriteAllTextAsync(SyncMarkerPath, DateTimeOffset.UtcNow.ToString("O"), ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Only the start-up gate reads it: at worst the app fetches again sooner than it needed to.
+            _log($"Could not mark the profile sync: {ex.Message}");
+        }
+
+        RetireLegacySealedProfile();
+
+        if (updated.Count > 0)
+        {
+            try
+            {
+                await LoadProfileAsync(ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                problems.Add($"Stored, but could not load them: {ex.Message}");
+            }
+        }
+
+        _log(updated.Count == 0
+            ? "Profiles checked with the licence server: nothing changed."
+            : $"Profiles updated from the licence server: {string.Join(", ", updated.Select(u => $"{u.Game.Name} ({u.Cidrs} ranges)"))}" +
+              $" - the rest unchanged. It applies from the next connect.");
+        StatusChanged?.Invoke(Snapshot());
+        return problems.Count == 0 ? null : string.Join(" ", problems);
+    }
+
+    private sealed record StoredProfile(GameEntry Game, int Cidrs, int Relays);
+
+    /// <summary>
+    /// Checks one sealed profile and writes it under its game's file, or says why not. Does not reload.
+    ///
+    /// Everything arriving here is untrusted: the pipe is open to BuiltinUsers, so a hostile
+    /// local process can call this. It is parsed before it is written - a file that does not
+    /// deserialise would leave the service unable to load a profile at all on the next start,
+    /// which is a denial of service anybody could trigger.
+    ///
+    /// The worst a hostile caller achieves after those checks is routing their own choice of
+    /// addresses through the relay from their own machine, which they could do by editing the
+    /// routing table directly. This is not a new capability.
+    /// </summary>
+    private async Task<(string? Error, StoredProfile? Stored)> StoreSealedAsync(string envelopeHex, CancellationToken ct)
+    {
+        // A sealed profile is tens of kilobytes of hex. A megabyte is not one.
+        const int MaxChars = 8 * 1024 * 1024;
+        if (envelopeHex.Length > MaxChars) return ("That profile is too large.", null);
+
+        byte[] envelope;
+        try
+        {
+            envelope = Convert.FromHexString(envelopeHex.Trim());
+        }
+        catch (FormatException)
+        {
+            return ("That is not a sealed profile.", null);
+        }
+
+        // Opened BEFORE it is written. The envelope is authenticated, so this is the check that
+        // makes the verb safe: the pipe is open to BuiltinUsers, and without it any local
+        // process could drop a file the service cannot use and leave it unable to load a profile
+        // at all on the next start.
+        ProfileBundle? parsed;
+        try
+        {
+            parsed = OpenSealed(envelope);
+        }
+        catch (CryptographicException ex)
+        {
+            return (ex.Message, null);
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+        {
+            return ($"The sealed profile did not contain a valid one: {ex.Message}", null);
+        }
+        if (parsed.Games.Count == 0) return ("That profile names no games.", null);
+
+        // Stored per game, under the game's own id. The licence server seals one game per profile,
+        // and a single shared file meant fetching Counter-Strike 2 overwrote PUBG. The id becomes a
+        // file name and this pipe is open to BuiltinUsers, so it is held to a shape that can only
+        // ever name a file inside the one directory.
+        var game = parsed.Games[0];
+        if (!IsStorableGameId(game.Id))
+        {
+            return ($"That profile's game id cannot be stored: '{game.Id}'.", null);
+        }
+
+        try
+        {
+            Directory.CreateDirectory(SealedProfileDirectory);
+            var path = SealedProfilePathFor(game.Id);
+            var tmp = path + ".tmp";
+            await File.WriteAllBytesAsync(tmp, envelope, ct).ConfigureAwait(false);
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            return ($"Could not store the profile: {ex.Message}", null);
+        }
+
+        return (null, new StoredProfile(game, parsed.Games.Sum(g => g.Regions.Sum(r => r.Cidrs.Count)), parsed.Relays.Count));
     }
 
     /// <summary>Forgets the stored token. Signing out, or a token the server has revoked.</summary>
@@ -312,6 +370,31 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             : [];
         if (File.Exists(LegacySealedProfilePath)) files.Add(LegacySealedProfilePath);
         return files;
+    }
+
+    /// <summary>
+    /// Written by every set-profiles: the last time the app synced with the licence server, whether or not anything
+    /// changed. Not *.sealed, so never read as a profile.
+    /// </summary>
+    private static string SyncMarkerPath => Path.Combine(SealedProfileDirectory, "synced");
+
+    /// <summary>
+    /// When the profiles were last known current: the last set-profiles, or - before any - the oldest stored write.
+    ///
+    /// Not the oldest write alone any more: set-profiles only rewrites the games that changed, so an unchanged game's
+    /// file keeps its old date and would read as "stale" to the start-up gate forever - which is what a game the app
+    /// never fetched did to every launch until 2026-09-29 (wot, left out by a cap of eight).
+    /// </summary>
+    private static DateTimeOffset? LastProfileSync()
+    {
+        try
+        {
+            if (File.Exists(SyncMarkerPath)) return new DateTimeOffset(File.GetLastWriteTimeUtc(SyncMarkerPath));
+        }
+        catch (IOException)
+        {
+        }
+        return OldestSealedProfileWrite();
     }
 
     /// <summary>
@@ -389,6 +472,9 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     ///                                been pushed yet, so a fresh install still connects.
     ///   self-hosted               -> the local file, exactly as before. Nothing pushes.
     /// </summary>
+    /// <summary>Content hash of each pushed game's profile, by game id - StatusMessage.ProfileHashes. Replaced whole on a load.</summary>
+    private Dictionary<string, string> _profileHashes = new(StringComparer.Ordinal);
+
     public async Task LoadProfileAsync(CancellationToken ct)
     {
         // "Licensed" is having a licence server, full stop. There is no separate profile
@@ -414,6 +500,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
 
         var sealedFiles = SealedProfileFiles();
         var bundles = new List<ProfileBundle>();
+        var hashes = new Dictionary<string, string>(StringComparer.Ordinal);
         string source;
         string chosen;
 
@@ -427,7 +514,16 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                 try
                 {
                     var envelope = await File.ReadAllBytesAsync(file, ct).ConfigureAwait(false);
-                    bundles.Add(OpenSealed(envelope));
+                    var bundle = OpenSealed(envelope);
+                    bundles.Add(bundle);
+
+                    // What this machine holds of each game, for POST /profiles' `have`. The per-game files only: the
+                    // legacy one is read last and never decides anything.
+                    if (!file.Equals(LegacySealedProfilePath, StringComparison.OrdinalIgnoreCase) &&
+                        bundle.Games.Count > 0 && bundle.ContentHash is { Length: 64 } hash && hash.All(char.IsAsciiHexDigit))
+                    {
+                        hashes[bundle.Games[0].Id.ToLowerInvariant()] = hash.ToLowerInvariant();
+                    }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -484,6 +580,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
 
         _profile = ProfileMerge.Merge(bundles);
         _profileSource = source;
+        _profileHashes = source == "pushed" ? hashes : [];
         var games = string.Join(", ", _profile.Games.Select(g => g.Name));
 
         if (licensed && source != "pushed")
@@ -3136,7 +3233,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             // Read from the file rather than remembered in a field, so it is right after a restart
             // and right after somebody has copied a profile in by hand. A missing file is null,
             // which the UI reads as "never" - correct on a machine that has never signed in.
-            ProfileUpdatedAt = OldestSealedProfileWrite()?.ToUnixTimeSeconds(),
+            ProfileUpdatedAt = LastProfileSync()?.ToUnixTimeSeconds(),
+            ProfileHashes = new Dictionary<string, string>(_profileHashes, StringComparer.Ordinal),
             QualitySharing = _config.ShareQuality,
         };
     }

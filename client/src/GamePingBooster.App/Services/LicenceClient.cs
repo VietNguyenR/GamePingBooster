@@ -348,6 +348,45 @@ public sealed class LicenceClient : IDisposable
             }).ConfigureAwait(false);
         });
 
+    /// <summary>
+    /// Every game's profile in one request, sealed only where the content differs from <paramref name="have"/> (game id
+    /// -> content hash, as the service reports what it holds). POST /profiles on the licence server.
+    ///
+    /// A 404 or 405 is a server older than the endpoint: the caller falls back to <see cref="FetchProfileAsync"/> per
+    /// game. Every other refusal means what it means for GET /profile.
+    /// </summary>
+    public Task<ProfilesResult> FetchProfilesAsync(string refreshToken, string devicePublicKey,
+        IReadOnlyDictionary<string, string> have, CancellationToken ct) =>
+        WithDeadline(RequestTimeout, ct, async t =>
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, "profiles")
+            {
+                Content = JsonContent.Create(new ProfilesRequest
+                {
+                    Device = devicePublicKey,
+                    Have = new Dictionary<string, string>(have, StringComparer.Ordinal),
+                }, LicenceJsonContext.Default.ProfilesRequest),
+            };
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshToken);
+
+            using var response = await _http.SendAsync(request, t).ConfigureAwait(false);
+            if (response.IsSuccessStatusCode)
+            {
+                var body = await response.Content
+                    .ReadFromJsonAsync(LicenceJsonContext.Default.ProfilesResult, t)
+                    .ConfigureAwait(false);
+                if (body is null || body.Profiles is null) throw new LicenceException(Loc.T("licenceErr.emptyGameList"));
+                return body;
+            }
+
+            throw await ErrorAsync(response, t, new()
+            {
+                [System.Net.HttpStatusCode.Unauthorized] = Loc.T("licenceErr.profileUnauthorized"),
+                [System.Net.HttpStatusCode.PaymentRequired] = Loc.T("licenceErr.noSubscription"),
+                [System.Net.HttpStatusCode.TooManyRequests] = Loc.T("licenceErr.tooOften"),
+            }).ConfigureAwait(false);
+        });
+
     /// <summary>The account, for the Account screen. Nothing here is a credential.</summary>
     public Task<AccountResult> FetchAccountAsync(string refreshToken, CancellationToken ct) =>
         WithDeadline(RequestTimeout, ct, async t =>
@@ -542,6 +581,36 @@ public sealed class SealedProfileResult
     [JsonPropertyName("availableGames")] public List<string>? AvailableGames { get; set; }
 }
 
+public sealed class ProfilesRequest
+{
+    [JsonPropertyName("device")] public string Device { get; set; } = "";
+
+    /// <summary>Game id -> content hash of the profile this machine holds. Empty sends everything.</summary>
+    [JsonPropertyName("have")] public Dictionary<string, string> Have { get; set; } = [];
+}
+
+public sealed class ProfilesResult
+{
+    /// <summary>Every game the server has a profile for this account.</summary>
+    [JsonPropertyName("available")] public List<string>? Available { get; set; }
+
+    [JsonPropertyName("profiles")] public List<ProfilesEntry>? Profiles { get; set; }
+}
+
+public sealed class ProfilesEntry
+{
+    [JsonPropertyName("game")] public string Game { get; set; } = "";
+    [JsonPropertyName("profileVersion")] public int ProfileVersion { get; set; }
+    [JsonPropertyName("hash")] public string Hash { get; set; } = "";
+
+    /// <summary>"sealed" (Envelope holds it), "unchanged" (this machine has it) or "limited" (changed, but the hourly
+    /// allowance for this game is spent - keep what is held). Anything else is treated as "limited".</summary>
+    [JsonPropertyName("status")] public string Status { get; set; } = "";
+
+    /// <summary>The sealed envelope as hex when Status is "sealed". Opaque here - only the service can open it.</summary>
+    [JsonPropertyName("envelope")] public string? Envelope { get; set; }
+}
+
 public sealed class AccountResult
 {
     [JsonPropertyName("email")] public string Email { get; set; } = "";
@@ -596,6 +665,8 @@ public sealed class QualityUploadResult
 [JsonSerializable(typeof(TokenRequest))]
 [JsonSerializable(typeof(TokenResult))]
 [JsonSerializable(typeof(SealedProfileResult))]
+[JsonSerializable(typeof(ProfilesRequest))]
+[JsonSerializable(typeof(ProfilesResult))]
 [JsonSerializable(typeof(AccountResult))]
 [JsonSerializable(typeof(ErrorResponse))]
 [JsonSerializable(typeof(DiagnosticRequest))]

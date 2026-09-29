@@ -1,4 +1,5 @@
 ﻿using GamePingBooster.Core.Ipc;
+using GamePingBooster.Core.Profiles;
 using GamePingBooster.App.Services.Localization;
 
 namespace GamePingBooster.App.Services;
@@ -76,20 +77,6 @@ public sealed class ProfileSync
     private const string FirstGame = "pubg";
 
     /// <summary>
-    /// The games still to fetch after the first, from the server's list: shaped like a game code,
-    /// each once, and a handful at most - the list arrives over the network, and every entry is one
-    /// more request against the account's hourly allowance.
-    /// </summary>
-    private static IEnumerable<string> OtherGames(IEnumerable<string>? available) =>
-        (available ?? [])
-            .Select(code => code.Trim().ToLowerInvariant())
-            .Where(code => code.Length is > 0 and <= 32 &&
-                           code.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_'))
-            .Where(code => code != FirstGame)
-            .Distinct()
-            .Take(8);
-
-    /// <summary>
     /// Hands one sealed profile to the service. Passed straight through: this process cannot open it
     /// and does not try - the envelope is encrypted to the device key, which lives in the service.
     /// </summary>
@@ -104,7 +91,32 @@ public sealed class ProfileSync
         _pipe = pipe;
         _report = report;
         _upgradeRequired = upgradeRequired;
+
+        // What the service holds, kept current from every status it pushes - it pushes one after each store. Subscribed
+        // here, before App.axaml.cs subscribes the start-up sync, so the first sync already knows.
+        _pipe.StatusReceived += status =>
+        {
+            if (status.ProfileHashes is { } hashes)
+            {
+                _held = ProfileSyncPlan.Have(hashes);
+                _serviceTakesMany = true;
+            }
+        };
     }
+
+    /// <summary>Game id -> content hash of what the service holds; empty until its first status says.</summary>
+    private volatile Dictionary<string, string> _held = new(StringComparer.Ordinal);
+
+    /// <summary>The service reports hashes, so it knows set-profiles. False for a service older than both.</summary>
+    private volatile bool _serviceTakesMany;
+
+    /// <summary>
+    /// The fetch in progress, if any. A connect pressed while the start-up sync is still fetching waits for that one
+    /// instead of starting a second: two at once is what made a connect take twelve seconds on 2026-09-29, each of them
+    /// fetching every game.
+    /// </summary>
+    private Task? _inFlight;
+    private readonly Lock _gate = new();
 
     /// <summary>
     /// Fetches and pushes, unless it is too soon or there is nothing to fetch with.
@@ -132,29 +144,55 @@ public sealed class ProfileSync
             if (profileUpdatedAt is { } written && DateTimeOffset.UtcNow - written < MinInterval) return;
         }
 
+        Task run;
+        lock (_gate)
+        {
+            run = _inFlight is { IsCompleted: false } running
+                ? running
+                : _inFlight = FetchAndPushAsync(licenceUrl, devicePublicKey, refreshToken, ct);
+        }
+        await run.ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// One request for every game (POST /profiles), saying what the service already holds; the server seals only what
+    /// changed, and everything it sealed goes to the service in one set-profiles - which also marks the sync done when
+    /// nothing changed. Against a server older than that endpoint, one request per game as before.
+    /// </summary>
+    private async Task FetchAndPushAsync(string licenceUrl, string devicePublicKey, string refreshToken, CancellationToken ct)
+    {
         try
         {
             using var client = new LicenceClient(licenceUrl);
 
-            // One request per game: the server seals, and the service stores, each game's profile on
-            // its own. The first request has to name a game; its answer lists every game the server
-            // has, so a game added there reaches this client without a new release.
-            var first = await client
-                .FetchProfileAsync(refreshToken, devicePublicKey, FirstGame, ct)
-                .ConfigureAwait(false);
+            // Only a service that reports hashes knows set-profiles; for an older one, ask for everything and push each.
+            var many = _serviceTakesMany;
+            ProfilesResult answer;
+            try
+            {
+                answer = await client
+                    .FetchProfilesAsync(refreshToken, devicePublicKey, many ? _held : new Dictionary<string, string>(), ct)
+                    .ConfigureAwait(false);
+            }
+            catch (LicenceException ex) when (ex.StatusCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.MethodNotAllowed)
+            {
+                await FetchOneByOneAsync(client, refreshToken, devicePublicKey, ct).ConfigureAwait(false);
+                return;
+            }
 
             // Recorded before the push, not after: a push that fails in the service is not a
             // reason to hammer the server again in a second.
             _lastFetch = DateTimeOffset.UtcNow;
 
-            await PushAsync(first.Envelope).ConfigureAwait(false);
-
-            foreach (var game in OtherGames(first.AvailableGames))
+            var envelopes = ProfileSyncPlan.EnvelopesToStore(
+                answer.Profiles!.Select(p => (p.Game, p.Status, p.Envelope)));
+            if (many)
             {
-                var next = await client
-                    .FetchProfileAsync(refreshToken, devicePublicKey, game, ct)
-                    .ConfigureAwait(false);
-                await PushAsync(next.Envelope).ConfigureAwait(false);
+                await _pipe.SendAsync(new CommandMessage { Verb = "set-profiles", Profiles = envelopes }).ConfigureAwait(false);
+            }
+            else
+            {
+                foreach (var envelope in envelopes) await PushAsync(envelope).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -187,6 +225,28 @@ public sealed class ProfileSync
             // Network, DNS, server down. Not worth alarming anybody: the previous profile is
             // still in place and a profile is not urgent.
             _report(Loc.F("notice.profileUnreachable", ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// GET /profile per game, pushed one at a time - how every sync worked before POST /profiles, kept for a licence
+    /// server older than it. The first request has to name a game; its answer lists every game the server has, so a game
+    /// added there reaches this client without a new release.
+    /// </summary>
+    private async Task FetchOneByOneAsync(LicenceClient client, string refreshToken, string devicePublicKey, CancellationToken ct)
+    {
+        var first = await client
+            .FetchProfileAsync(refreshToken, devicePublicKey, FirstGame, ct)
+            .ConfigureAwait(false);
+        _lastFetch = DateTimeOffset.UtcNow;
+        await PushAsync(first.Envelope).ConfigureAwait(false);
+
+        foreach (var game in ProfileSyncPlan.LegacyGamesAfter(FirstGame, first.AvailableGames))
+        {
+            var next = await client
+                .FetchProfileAsync(refreshToken, devicePublicKey, game, ct)
+                .ConfigureAwait(false);
+            await PushAsync(next.Envelope).ConfigureAwait(false);
         }
     }
 }
