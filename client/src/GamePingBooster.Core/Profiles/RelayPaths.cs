@@ -87,6 +87,15 @@ public static class RelayPaths
     /// so moving between them changes nothing the server can see. Moving to another RELAY changes that
     /// address, and the match drops.
     /// </summary>
+    /// <summary>
+    /// The path with this id - a relay, or an entry in front of one - or null. An entry is not in the profile's
+    /// relay list, only inside its relay's entries: looked up in the list alone, every way a switch decision named
+    /// that was an entry came back "no such way", and no tunnel ever moved onto one (the rig, 2026-09-30).
+    /// </summary>
+    public static RelayEntry? Find(IReadOnlyList<RelayEntry> relays, string id) =>
+        relays.FirstOrDefault(r => r.ViaRelayId is null && r.Id.Equals(id, StringComparison.OrdinalIgnoreCase)) ??
+        Expand(relays).FirstOrDefault(r => r.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
+
     public static List<RelayEntry> DoorsOf(IEnumerable<RelayEntry> relays, string relayId)
     {
         var relay = relays.FirstOrDefault(r => r.ViaRelayId is null && r.Id.Equals(relayId, StringComparison.OrdinalIgnoreCase));

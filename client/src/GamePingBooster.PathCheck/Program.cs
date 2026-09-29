@@ -56,6 +56,10 @@ internal static partial class Program
         ProfileSyncChecks();
 
         Console.WriteLine();
+        Console.WriteLine("Who owns a pinned address:");
+        PinChecks();
+
+        Console.WriteLine();
         if (_failures == 0)
         {
             Console.WriteLine("All path checks passed.");

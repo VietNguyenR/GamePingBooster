@@ -52,6 +52,12 @@ internal sealed class FakeRelay : IDisposable
     /// <summary>Pings this returns true for, by their 1-based number, are dropped without a pong. Null drops none.</summary>
     public volatile Func<long, bool>? DropPing;
 
+    /// <summary>
+    /// Extra time before a Pong or a Probe reply leaves each door, by door index: a road into the relay that has become
+    /// slow, as Viettel's to sg-2 was on 2026-09-15. Zero sends at once. Set it before, or while, a scenario runs.
+    /// </summary>
+    public double[] DoorDelayMs { get; }
+
     public long Probes;
     public long Disconnects;
     public long Handshakes;
@@ -65,6 +71,7 @@ internal sealed class FakeRelay : IDisposable
     {
         _psk = psk;
         _nextInner = firstInner;
+        DoorDelayMs = new double[doors];
         for (var i = 0; i < doors; i++)
         {
             var socket = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
@@ -299,7 +306,18 @@ internal sealed class FakeRelay : IDisposable
         }
         var reply = (byte[])pkt.Clone();
         reply[0] = (byte)((GpbProtocol.Version << 4) | replyType);
-        socket.Send(reply, reply.Length, from);
+        var door = _sockets.IndexOf(socket);
+        var delay = door >= 0 ? Volatile.Read(ref DoorDelayMs[door]) : 0;
+        if (delay <= 0)
+        {
+            socket.Send(reply, reply.Length, from);
+            return;
+        }
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(delay));
+            try { socket.Send(reply, reply.Length, from); } catch (ObjectDisposedException) { } catch (SocketException) { }
+        });
     }
 
     private void Disconnect(byte[] pkt, IPEndPoint from)

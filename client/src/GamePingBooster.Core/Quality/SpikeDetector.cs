@@ -87,6 +87,13 @@ public sealed class QualityTick(long index, DateTimeOffset startUtc)
     public string? CurrentDoor { get; set; }
 
     /// <summary>
+    /// The relay those ways lead to, set with <see cref="CurrentDoor"/>. Home's relay, or - with region routing in force
+    /// - the other relay the match is on: each relay's ways are judged by a switch policy of their own, so a decision
+    /// about one tunnel's road never waits on, or is undone by, another's (2026-09-30).
+    /// </summary>
+    public string? DoorRelayId { get; set; }
+
+    /// <summary>
     /// The OTHER ways into the same relay, each timed by a Probe that left in this quarter second - see
     /// <see cref="DoorSwitchPolicy"/>. <see cref="DoorIds"/>[i] names the way <see cref="DoorSent"/>[i]
     /// and <see cref="DoorMs"/>[i] measured; the array is shared by every tick of one set of ways.

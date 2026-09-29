@@ -118,7 +118,7 @@ public sealed class DoorSwitchPolicy
     public const int ReturnWindowTicks = 2 * 60 * SpikeDetector.TicksPerSecond;
 
     /// <summary>How much faster the way left must be in a quarter second to count as better for going back.</summary>
-    internal const double ReturnMargin = 3.0;
+    public const double ReturnMargin = 3.0;
 
     /// <summary>Probes the way left may lose in <see cref="ReturnWindowTicks"/> and still count as recovered.</summary>
     internal const int ReturnMaxLost = 4;

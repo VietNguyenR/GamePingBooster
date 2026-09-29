@@ -30,6 +30,8 @@ namespace GamePingBooster.Service.Tunnel;
 ///   - and every relay's loss beside it (<see cref="RelayLoss"/>): a burst of pings down each way handshaken, the
 ///     last minute of keepalives for a tunnel already open. A path losing packets is planned as if it were
 ///     <see cref="RelayLoss.PenaltyMs"/> slower - home included, so a region leaves a home that loses for a clean relay;
+///   - a relay with a tunnel open has every way into it measured with Probes as well, and the tunnel is moved to a
+///     clearly better way before the next match (TunnelEngine.OtherDoors.cs) - the region's numbers then follow it;
 ///   - it runs on the supervisor, so it can never overlap a rescan between matches, a reconnect or a move;
 ///   - it stops the moment a match starts loading, or the home tunnel goes quiet, and is tried again later.
 ///
@@ -254,7 +256,9 @@ internal sealed partial class TunnelEngine
             {
                 foreach (var line in result.Lines) _log(line);
                 if (result.Measured) relaysMeasured.Add(result.RelayId);
-                foreach (var (regionId, (ms, way, lossy)) in result.Best)
+                var best = result.Best;
+                if (result.WayMove is { } move) best = MoveBeforeNextMatch(result, move, Interrupted);
+                foreach (var (regionId, (ms, way, lossy)) in best)
                 {
                     viaMs[regionId][result.RelayId] = ms;
                     viaWay[regionId][result.RelayId] = way;
@@ -408,7 +412,44 @@ internal sealed partial class TunnelEngine
         bool Measured,
         Dictionary<string, (double Ms, string Way, bool Lossy)> Best,
         List<string> Lines,
-        string? Stopped);
+        string? Stopped,
+        WayMove? WayMove = null);
+
+    /// <summary>
+    /// An open tunnel's better way in, found while the plan measured it: where to, and what the ways measured to relayd
+    /// - the tunnel's current one and the one moved to - so the region's numbers can be carried across the move.
+    /// </summary>
+    private sealed record WayMove(string From, string To, WaySample FromSample, WaySample ToSample, bool Return);
+
+    /// <summary>
+    /// Makes the move <see cref="CheckWaysAsync"/> found for an open tunnel, when that relay's entry switching is on and
+    /// no match has started meanwhile, and returns the relay's numbers as they are down the new way: each region's
+    /// median through the tunnel shifted by what the move saves to relayd, since the relay's own route to the region is
+    /// the same whichever way the packets came in (ChooseDoorAsync's reasoning). Unchanged when nothing moved.
+    /// </summary>
+    private Dictionary<string, (double Ms, string Way, bool Lossy)> MoveBeforeNextMatch(RelayPlanResult result, WayMove move,
+        Func<string?> interrupted)
+    {
+        if (SwitchingFor(result.RelayId) != EntrySwitchingMode.On)
+        {
+            _log($"  Entry switching is \"record\" for {result.RelayId}: its tunnel would move to {move.To} - not moved.");
+            return result.Best;
+        }
+        if (interrupted() is { } why)
+        {
+            _log($"  The tunnel to {result.RelayId} stays on {move.From} for now - {why}.");
+            return result.Best;
+        }
+        // Not a rollback even when it goes back to the road left: a way that goes silent right after this move is left again
+        // (MoveOtherTunnelsBackAfterSilence), as after the switch policy's own returns.
+        if (!MoveOtherToDoor(result.RelayId, move.To, rollback: false, why: "between matches")) return result.Best;
+
+        var delta = move.ToSample.MedianMs!.Value - (move.FromSample.MedianMs ?? move.ToSample.MedianMs.Value);
+        return result.Best.ToDictionary(
+            kv => kv.Key,
+            kv => (Math.Max(0, kv.Value.Ms + delta), move.To, move.ToSample.Loss.IsLossy),
+            StringComparer.Ordinal);
+    }
 
     /// <summary>
     /// One relay, every way into it one after another - see PlanRegionsAsync for why never two at once. A relay with a
@@ -430,10 +471,14 @@ internal sealed partial class TunnelEngine
             {
                 // The way the open tunnel is on, which may be an entry: the record says which way gave the number,
                 // and naming the relay here said "direct to the relay" for a tunnel that came in through an entry.
-                var wayId = OtherTunnelOf(live)?.Way.Id ?? relay.Id;
+                var openTunnel = OtherTunnelOf(live);
+                var wayId = openTunnel?.Way.Id ?? relay.Id;
                 var liveLine = new List<string>();
+                // Every way into the relay measured by Probes alongside, from sockets of their own - see CheckWaysAsync.
+                var waysTask = openTunnel is null ? Task.FromResult<(IReadOnlyList<WaySample>, WayChoice)?>(null) : CheckWaysAsync(openTunnel, token);
                 var liveSamples = await SampleLiveManyAsync(live, measurable.Select(m => m.Landmark).ToList(), interrupted, token)
                     .ConfigureAwait(false);
+                var ways = await waysTask.ConfigureAwait(false);
                 var liveLoss = live.RecentLoss();
                 if (liveSamples is null) stopped = interrupted();
                 else
@@ -446,7 +491,19 @@ internal sealed partial class TunnelEngine
                     }
                 }
                 lines.Add($"  {relay.Name} [{wayId}], open: {string.Join(", ", liveLine)}{LossText(liveLoss)}");
-                return new RelayPlanResult(relay.Id, true, best, lines, stopped);
+
+                WayMove? wayMove = null;
+                if (ways is { } w)
+                {
+                    lines.Add($"    ways in, by Probe: {string.Join(", ", w.Item1)} - {w.Item2.Reason}.");
+                    if (w.Item2.MoveTo is { } to &&
+                        w.Item1.FirstOrDefault(x => x.Id.Equals(to, StringComparison.OrdinalIgnoreCase)) is { MedianMs: not null } toSample &&
+                        w.Item1.FirstOrDefault(x => x.Id.Equals(wayId, StringComparison.OrdinalIgnoreCase)) is { } fromSample)
+                    {
+                        wayMove = new WayMove(wayId, to, fromSample, toSample, w.Item2.Return);
+                    }
+                }
+                return new RelayPlanResult(relay.Id, true, best, lines, stopped, wayMove);
             }
 
             foreach (var way in RelayPaths.DoorsOf(profile.Relays, relay.Id))

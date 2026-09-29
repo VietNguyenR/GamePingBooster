@@ -24,7 +24,14 @@ internal static partial class Program
     private static readonly byte[] Psk = "tunnelcheck-pre-shared-key-0123456789"u8.ToArray();
     private static readonly ConcurrentQueue<string> Log = new();
 
-    private static int Main()
+    private static int Main(string[] args)
+    {
+        if (args.Length > 0 && args[0] == "rig") return RigMain(args[1..]);
+        if (args.Length > 0 && args[0] == "service") return ServiceMain(args[1..]);
+        return AllScenarios();
+    }
+
+    private static int AllScenarios()
     {
         var scenarios = new (string Title, Func<Task> Run)[]
         {
@@ -48,6 +55,7 @@ internal static partial class Program
             ("Downlink coupling", DownlinkCouplingAtThreeTunnels),
             ("Region plan echoes, every region at once", PlanEchoesAtOnce),
             ("Relay loss", RelayLossIsMeasured),
+            ("A region's tunnel moves its way in, like home", ARegionsTunnelMovesItsWayInLikeHome),
         };
 
         foreach (var (title, run) in scenarios)
@@ -110,6 +118,9 @@ internal static partial class Program
             Pump.SetHome(tunnel);
             return tunnel;
         }
+
+        /// <summary>Takes a tunnel opened elsewhere - to a real relay - into this rig's teardown.</summary>
+        public void Track(TunnelClient tunnel) => _tunnels.Add(tunnel);
 
         public async Task<TunnelClient> OpenAsync(FakeRelay relay, ulong clientId, int door = 0)
         {

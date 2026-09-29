@@ -20,7 +20,7 @@ namespace GamePingBooster.QualityCheck;
 /// scenarios marked 2026-09-15 replay shapes from the first real session, where the first version
 /// of the detector got them wrong.
 /// </summary>
-internal static class Program
+internal static partial class Program
 {
     private static int _failures;
 
@@ -88,6 +88,10 @@ internal static class Program
         AMatchKeepsItsGapClosed();
         TheGapIsTimedFromTheLastPacket();
         RescanComparesMediansByAClearMargin();
+
+        Console.WriteLine();
+        Console.WriteLine("A region's tunnel, between matches (WayCheck):");
+        WayCheckChecks();
 
         Console.WriteLine();
         if (_failures == 0)

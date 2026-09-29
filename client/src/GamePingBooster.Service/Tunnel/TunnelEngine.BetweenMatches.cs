@@ -420,7 +420,7 @@ internal sealed partial class TunnelEngine
             _path = path is null ? null : new PathMeasurement(path.RegionName, Math.Max(0, nowMs - chosen.LegOneMs), path.Landmark);
             ForgetDirectPing();
             _pendingDoorMove = null;
-            _movedFromDoor = null;
+            ForgetMoveOf(previous);
             _connectLeftDoor = null;
 
             _tunnel = client;

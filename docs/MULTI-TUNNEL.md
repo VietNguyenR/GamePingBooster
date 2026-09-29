@@ -201,9 +201,35 @@ home after 60 s without a match on it, or at once when its tunnel closes.
 | In-game ping | probes the match server through the carrier; the estimate uses a per-tunnel second leg |
 | Spike recorder, match summary | records say `"carried": "home"` or `"other"` while region routing is in force |
 | App status | relay name, pings and loss are the carrier's (loss over the last minute, shown with the relay's name); `homeRelayName` and `regionPaths` list the rest |
+| Entry switching | the carrier's relay's ways in are probed and its switch policy decides - 5.10 |
 
 Summed over every tunnel instead: match detection, the between-matches trigger, discovery gating, packet
-counters. Entry switching stays on home (11).
+counters.
+
+### 5.10 Entry switching on every tunnel
+
+Since 2026-09-30 a secondary changes its way in as home does. Its relay never changes under a match - the game
+server sees that relay's address - only the road into it: the direct way or an entry, the same session, the same
+inner address, so the dispatcher and the game server see nothing.
+
+- **During a match on it** the recorder follows the carrier (5.8) and probes the other ways into the carrier's relay.
+  Each relay has a switch policy of its own - window, five-minute cooldown, way back - so a move on one tunnel never
+  holds another's still, and never closes its way back.
+- **Between matches**, when home is judged in the lobby, a secondary is idle and unwatched. The re-plan after a match
+  probes every way into each open secondary, the one in use too, with rounds of Probes (no return-address move) and
+  moves it before the next match by the policy's bars: better by max(10 ms, 15%), or back to the road it was put off
+  once that is 3 ms faster and clean, on the loss-aware score. The region's numbers follow the move.
+- **A way that goes silent** within 30 s of a move, for 3 s, is left for the way the tunnel came from - before 5.9's
+  fifteen seconds give the tunnel up and send its regions home.
+- **Nothing in flight is lost.** A move keeps reading the way left for a second (TunnelClient's drain): what was
+  already on its way back down it still reaches the game. Before, a move off a road 80 ms slow lost three of a match's
+  packets - home's moves too. The downlink never blocks on one socket for more than 50 ms, so the new way is read at once.
+- **Probes stay under relayd's cap** of 20 a second per session: the rounds between matches are spaced by the number
+  of ways (WayCheck.SpacingFor), or relayd's silent drops read as loss.
+- **Pins.** Every way into every relay a tunnel is on is pinned to the physical adapter. One address is often several
+  things (vn-1 home AND the entry vn-1-sg), so pins are owned (PinLedger): added when the first owner wants one,
+  deleted when the last lets go, never re-added under a live tunnel.
+- Per relay, `entrySwitching` in the profile (or config.json) decides as for home: `on` moves, `record` only says.
 
 ### 5.9 Faults inside the dispatcher
 
@@ -284,7 +310,12 @@ The real pump, dispatcher and tunnels against in-process fake relays that keep r
 anti-spoofing, roaming) and a fake adapter that catches any use after its session ends. Single-tunnel scenarios
 hold the refactored data plane to the old one byte for byte; multi-tunnel scenarios cover two regions on two
 relays, remapping under load, a relay dying, a dispatcher fault, ICMP errors through another relay, home being
-replaced, concurrent echoes, the recorder following the match, and downlink coupling at three tunnels.
+replaced, concurrent echoes, the recorder following the match, downlink coupling at three tunnels, and a secondary
+moving its way in mid-match with home's policy moving home straight after (5.10).
+
+`TunnelCheck rig` runs the same data plane against two real relayd in WSL (tools/multi-tunnel-rig): entries by
+iptables DNAT, one way at a time made slow or lossy by netem. `TunnelCheck service` runs the whole service there -
+real adapter, routes and pins - as the app drives it, with a stand-in game, and puts the PC back afterwards.
 
 ### 10.3 Existing suites
 
@@ -299,8 +330,6 @@ than a third of the time has a landmark that does not stand for its servers, and
 ## 11. Not built, and risks
 
 - **Direct.** The planner can choose it; the client keeps such a region on home and says so.
-- **Entry switching on a secondary.** A secondary keeps the way into its relay that it opened on; only home moves
-  between ways.
 - **A secondary dying while home reconnects** is noticed after the reconnect.
 - **ICMP is not the game's UDP** - some routes treat them differently; 10.4 checks plans against the real server.
 - **A landmark stands for a region only as well as it sits next to its servers** - within ~2 ms of them from

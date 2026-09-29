@@ -187,7 +187,20 @@ internal sealed class SpikeRecorder : IQualitySink
     // ------------------------------------------------------------------ the other ways into the relay
 
     private readonly Func<DoorDecision, bool> _requestMove;
-    private readonly DoorSwitchPolicy _policy = new();
+
+    /// <summary>
+    /// One switch policy per relay, by relay id: home's, and each other relay a match has been carried on. The window,
+    /// the five-minute cooldown and the way back all belong to one tunnel's road, and a single policy for every tunnel
+    /// let a move on the Singapore tunnel hold home's roads still for five minutes - and closed home's way back the
+    /// moment a match moved to Singapore. See QualityTick.DoorRelayId.
+    /// </summary>
+    private readonly Dictionary<string, DoorSwitchPolicy> _policies = new(StringComparer.OrdinalIgnoreCase);
+
+    private DoorSwitchPolicy PolicyFor(string relayId)
+    {
+        if (!_policies.TryGetValue(relayId, out var policy)) _policies[relayId] = policy = new DoorSwitchPolicy();
+        return policy;
+    }
 
     /// <summary>Probes down the ways the tunnel is not using, for the list and session they were made for.</summary>
     private DoorProbes? _doors;
@@ -328,11 +341,11 @@ internal sealed class SpikeRecorder : IQualitySink
 
         // A connect that started on an entry because the direct road was slow: the policy treats it as a move it
         // made, so the road is gone back to once it recovers. See DoorSwitchPolicy.StartedOnDetour.
-        if (context.ConnectLeftDoor is { } left && context.EntryId is { } entry && session != 0 &&
-            _detourSeen != (left, session))
+        if (context.ConnectLeftDoor is { } left && context.EntryId is { } entry && context.RelayId is { } detourRelay &&
+            session != 0 && _detourSeen != (left, session))
         {
             _detourSeen = (left, session);
-            _policy.StartedOnDetour(left, entry);
+            PolicyFor(detourRelay).StartedOnDetour(left, entry);
         }
 
         var cadence = tunnel?.TakeCadence();
@@ -370,6 +383,7 @@ internal sealed class SpikeRecorder : IQualitySink
             if ((active || lobby) && _doors is { } doors)
             {
                 tick.CurrentDoor = context.EntryId ?? context.RelayId;
+                tick.DoorRelayId = context.RelayId;
                 tick.DoorIds = doors.Ids;
                 tick.DoorSent = new bool[doors.Ids.Length];
                 tick.DoorMs = new double?[doors.Ids.Length];
@@ -428,7 +442,12 @@ internal sealed class SpikeRecorder : IQualitySink
         {
             foreach (var settled in settledTicks)
             {
-                if (_policy.Feed(settled) is { } decision) (decisions ??= []).Add(decision);
+                // Only the policy of the relay whose ways the tick compared. The others see a hole in their ticks
+                // when they are next fed, and start their window again - what they were judging was not measured meanwhile.
+                if (settled.DoorRelayId is { } relayId && PolicyFor(relayId).Feed(settled) is { } decision)
+                {
+                    (decisions ??= []).Add(decision);
+                }
                 if (Follow(settled) is { } done) (followed ??= []).Add(done);
             }
         }

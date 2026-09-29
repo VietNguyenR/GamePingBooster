@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using GamePingBooster.Core.Native;
+using GamePingBooster.Core.Paths;
 using GamePingBooster.Service.Native;
 
 namespace GamePingBooster.Service.Network;
@@ -60,22 +61,15 @@ internal sealed class RouteManager
     // list would have RemoveGameRoutes pull the lobby off the tunnel every time a match ended.
     private readonly List<string> _lobbyPrefixes = [];
 
-    private string? _pinnedRelayPrefix;
+    // Every /32 pinned to the physical adapter - the home relay, every way into a relay a tunnel is on, the other
+    // tunnels' relays - and who wants each. One address is often several of these at once (vn-1 home and the entry
+    // vn-1-sg), and it stays pinned until the last of them lets go. See PinLedger.
+    private readonly PinLedger _pins = new();
 
-    // The interface the pin was made through. Deleting a route REQUIRES naming its interface, and
+    // The interface each pin was made through. Deleting a route REQUIRES naming its interface, and
     // the physical adapter can change between pinning and unpinning (Wi-Fi to Ethernet), so the
     // index has to be remembered rather than looked up again at delete time.
-    private uint _pinnedRelayInterface;
-
-    // Every way into the relay in use - itself and its entries - pinned the same way, so a probe
-    // measuring the ways the tunnel is NOT using can never follow a game route into the tunnel.
-    // Keyed by prefix, valued by the interface the pin went through. May include _pinnedRelayPrefix,
-    // which stays PinRelayRoute's to install and delete.
-    private readonly Dictionary<string, uint> _pinnedDoorPrefixes = [];
-
-    // Multi-tunnel: the relays of the other tunnels, and the way into each, pinned to the physical adapter like
-    // the home relay. Never holds a prefix that is _pinnedRelayPrefix or a door - those stay theirs.
-    private readonly Dictionary<string, uint> _pinnedPathPrefixes = [];
+    private readonly Dictionary<string, uint> _pinInterfaces = new(StringComparer.Ordinal);
 
     // Multi-tunnel: destinations in use on another tunnel, pinned INTO the virtual adapter while the home tunnel
     // is reconnecting and the game's ranges are out - so a match on another tunnel keeps its exit (G1).
@@ -83,8 +77,7 @@ internal sealed class RouteManager
 
     /// <summary>Number of routes currently installed.</summary>
     public int ActiveRouteCount =>
-        _installedPrefixes.Count + _lobbyPrefixes.Count + (_pinnedRelayPrefix is null ? 0 : 1) +
-        _pinnedDoorPrefixes.Keys.Count(p => p != _pinnedRelayPrefix);
+        _installedPrefixes.Count + _lobbyPrefixes.Count + _pins.CountOwnedByAny(PinOwner.Relay, PinOwner.Doors);
 
     /// <summary>
     /// Game routes only, excluding the pinned relay route and the lobby. The reconnect path uses
@@ -182,118 +175,77 @@ internal sealed class RouteManager
 
     private void PinRelayRouteCore(IPAddress relayIp)
     {
-        var (physIndex, gateway) = LookUpRoute(relayIp)
-            ?? throw new InvalidOperationException(
-                "No network adapter with a default gateway was found - is the machine offline?");
-
         var prefix = $"{relayIp}/32";
 
-        // Failing over to another relay pins a different address, and _pinnedRelayPrefix only
-        // holds one. Overwriting it without deleting first would strand the previous /32 in the
-        // routing table forever: RemoveAll can only delete the prefix it still remembers, so the
-        // old entry would outlive the service.
-        if (_pinnedRelayPrefix is not null && _pinnedRelayPrefix != prefix)
-        {
-            // Unless it is one of the doors: switching from the relay to its entry keeps the relay
-            // pinned, because it is now the other way in, and probes still measure it.
-            if (!_pinnedDoorPrefixes.ContainsKey(_pinnedRelayPrefix))
-            {
-                DeleteRoute(_pinnedRelayPrefix, _pinnedRelayInterface);
-            }
-            _pinnedRelayPrefix = null;
-        }
+        // Already pinned for somebody else - a way into the relay, another tunnel's relay: a move onto it. Taken over as
+        // it stands; deleting and adding it again would leave the address unpinned for a moment under that tunnel.
+        var sharedAlready = _pins.IsPinned(prefix) && !_pins.IsOwnedOnlyBy(prefix, PinOwner.Relay);
+        var (add, remove) = _pins.Set(PinOwner.Relay, [prefix]);
 
-        // Already pinned as a way into the relay: a move onto it. Taken over as it stands - deleting and adding
-        // it again would leave the address unpinned for a moment on the move.
-        if (_pinnedDoorPrefixes.TryGetValue(prefix, out var doorInterface))
-        {
-            _pinnedRelayPrefix = prefix;
-            _pinnedRelayInterface = doorInterface;
-            return;
-        }
+        // Pinned for the relay alone, and asked again: a reconnect. Replaced, not kept - this route goes through the
+        // PHYSICAL adapter, and the gateway it names may have changed since (Wi-Fi to Ethernet).
+        if (add.Count == 0 && !sharedAlready) add.Add(prefix);
 
-        // Always delete before adding. This route goes through the PHYSICAL adapter, so unlike
-        // the game routes it does not disappear when the virtual adapter goes away - a service
-        // that was killed rather than stopped cleanly leaves it behind, possibly through a gateway
-        // that has since changed. Replacing it is the only way to be sure it points where it should.
-        DeleteRoute(prefix, physIndex);
-
-        AddRoute(prefix, physIndex, gateway);
-        _pinnedRelayPrefix = prefix;
-        _pinnedRelayInterface = physIndex;
+        Apply(add, remove, relayIp);
     }
 
     /// <summary>
-    /// Pins exactly these addresses - every way into the relay in use, the current one included - and
-    /// unpins any door pinned before that is no longer one. Same mechanics as
-    /// <see cref="PinRelayRoute"/>, whose own pin is never deleted from here.
+    /// Pins exactly these addresses - every way into every relay a tunnel is on, the current ones included - and
+    /// unpins any door pinned before that is no longer one, unless something else still wants it. Same mechanics as
+    /// <see cref="PinRelayRoute"/>.
     ///
-    /// Why the other ways need a pin at all: the tunnel only pins the address it is using. A probe to
+    /// Why the other ways need a pin at all: a tunnel only pins the address it is using. A probe to
     /// the relay's own address while the tunnel runs through an entry would otherwise take the
     /// ordinary routing table, and if a game range happens to contain that address it goes into the
     /// tunnel - measuring a loop, and switching the player onto one.
     /// </summary>
     public void PinDoorRoutes(IReadOnlyCollection<IPAddress> addresses) =>
-        Timed($"pinned {addresses.Count} way(s) into the relay", () => PinDoorRoutesCore(addresses));
-
-    private void PinDoorRoutesCore(IReadOnlyCollection<IPAddress> addresses)
-    {
-        var wanted = new Dictionary<string, IPAddress>();
-        foreach (var address in addresses) wanted[$"{address}/32"] = address;
-
-        foreach (var (prefix, iface) in _pinnedDoorPrefixes.ToList())
+        Timed($"pinned {addresses.Count} way(s) into the relays", () =>
         {
-            if (wanted.ContainsKey(prefix)) continue;
-            _pinnedDoorPrefixes.Remove(prefix);
-            if (prefix != _pinnedRelayPrefix) DeleteRoute(prefix, iface);
-        }
-
-        foreach (var (prefix, address) in wanted)
-        {
-            if (_pinnedDoorPrefixes.ContainsKey(prefix)) continue;
-            if (prefix == _pinnedRelayPrefix)
-            {
-                _pinnedDoorPrefixes[prefix] = _pinnedRelayInterface;
-                continue;
-            }
-
-            var (physIndex, gateway) = LookUpRoute(address)
-                ?? throw new InvalidOperationException(
-                    "No network adapter with a default gateway was found - is the machine offline?");
-            DeleteRoute(prefix, physIndex);
-            // Recorded before the add, as the game routes are: if it fails the table may still hold it.
-            _pinnedDoorPrefixes[prefix] = physIndex;
-            AddRoute(prefix, physIndex, gateway);
-        }
-    }
+            var (add, remove) = _pins.Set(PinOwner.Doors, addresses.Select(a => $"{a}/32"));
+            Apply(add, remove);
+        });
 
     /// <summary>
-    /// Pins the relays of the other tunnels - and the way into each they use - to the physical adapter, the way the
-    /// home relay is pinned: a backstop, since no profile routes a relay's address. The set replaces the last one.
+    /// Pins the relays of the other tunnels - the way into each they use - to the physical adapter, the way the home
+    /// relay is pinned: a backstop, since no profile routes a relay's address. The set replaces the last one.
     /// </summary>
     public void PinPathRoutes(IReadOnlyCollection<IPAddress> addresses) =>
         Timed($"pinned {addresses.Count} other tunnel relay(s)", () =>
         {
-            var wanted = new Dictionary<string, IPAddress>();
-            foreach (var address in addresses) wanted[$"{address}/32"] = address;
-
-            foreach (var (prefix, iface) in _pinnedPathPrefixes.ToList())
-            {
-                if (wanted.ContainsKey(prefix)) continue;
-                _pinnedPathPrefixes.Remove(prefix);
-                DeleteRoute(prefix, iface);
-            }
-            foreach (var (prefix, address) in wanted)
-            {
-                if (_pinnedPathPrefixes.ContainsKey(prefix) || prefix == _pinnedRelayPrefix || _pinnedDoorPrefixes.ContainsKey(prefix)) continue;
-                var (physIndex, gateway) = LookUpRoute(address)
-                    ?? throw new InvalidOperationException(
-                        "No network adapter with a default gateway was found - is the machine offline?");
-                DeleteRoute(prefix, physIndex);
-                _pinnedPathPrefixes[prefix] = physIndex;
-                AddRoute(prefix, physIndex, gateway);
-            }
+            var (add, remove) = _pins.Set(PinOwner.Paths, addresses.Select(a => $"{a}/32"));
+            Apply(add, remove);
         });
+
+    /// <summary>
+    /// Installs what the ledger says to add and deletes what it says to remove - adds first, so a tunnel moving from one
+    /// address to another is never left with neither pinned. <paramref name="lookUp"/> is the address to find the way out
+    /// for when adding one prefix; otherwise each prefix is parsed back into its address.
+    /// </summary>
+    private void Apply(List<string> add, List<string> remove, IPAddress? lookUp = null)
+    {
+        foreach (var prefix in add)
+        {
+            var address = lookUp ?? IPAddress.Parse(prefix[..prefix.IndexOf('/')]);
+            var (physIndex, gateway) = LookUpRoute(address)
+                ?? throw new InvalidOperationException(
+                    "No network adapter with a default gateway was found - is the machine offline?");
+
+            // Always delete before adding. This route goes through the PHYSICAL adapter, so unlike the game routes
+            // it does not disappear when the virtual adapter goes away - a service that was killed rather than
+            // stopped cleanly leaves it behind, possibly through a gateway that has since changed. Replacing it is
+            // the only way to be sure it points where it should.
+            if (_pinInterfaces.TryGetValue(prefix, out var was) && was != physIndex) DeleteRoute(prefix, was);
+            DeleteRoute(prefix, physIndex);
+            // Recorded before the add, as the game routes are: if it fails the table may still hold it.
+            _pinInterfaces[prefix] = physIndex;
+            AddRoute(prefix, physIndex, gateway);
+        }
+        foreach (var prefix in remove)
+        {
+            if (_pinInterfaces.Remove(prefix, out var iface)) DeleteRoute(prefix, iface);
+        }
+    }
 
     /// <summary>
     /// Pins each of <paramref name="destinations"/> into the virtual adapter as a /32, for while the game's ranges
@@ -477,21 +429,15 @@ internal sealed class RouteManager
         RemoveGameRoutes(tunInterfaceIndex);
         RemoveLobbyRoutes(tunInterfaceIndex);
         UnpinStuckDestinations(tunInterfaceIndex);
-        if (_pinnedPathPrefixes.Count > 0) PinPathRoutes([]);
+        if (_pins.CountOwnedByAny(PinOwner.Paths) > 0) PinPathRoutes([]);
 
         Timed("removed the relay pins", () =>
         {
-            if (_pinnedRelayPrefix is not null)
+            foreach (var prefix in _pins.Clear())
             {
-                DeleteRoute(_pinnedRelayPrefix, _pinnedRelayInterface);
-            }
-            foreach (var (prefix, iface) in _pinnedDoorPrefixes)
-            {
-                if (prefix != _pinnedRelayPrefix) DeleteRoute(prefix, iface);
+                if (_pinInterfaces.Remove(prefix, out var iface)) DeleteRoute(prefix, iface);
             }
         });
-        _pinnedDoorPrefixes.Clear();
-        _pinnedRelayPrefix = null;
     }
 
     /// <summary>

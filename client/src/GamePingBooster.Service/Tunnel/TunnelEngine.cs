@@ -1798,7 +1798,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
 
         // Nor does a move asked for, or made, on the last connection carry over to this one.
         _pendingDoorMove = null;
-        _movedFromDoor = null;
+        _movedFrom.Clear();
         _matchGap = new GamePingBooster.Core.Quality.MatchGap();
         _moveFollow = null;
         _moveOffForGame = false;
@@ -1838,7 +1838,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     // Here and nowhere else, so a move between ways into the relay can never run beside a
                     // reconnect: this loop is the only thing that ever replaces or moves the tunnel.
                     if (MovedBackAfterSilence(tunnel, silence)) continue;
-                    if (Interlocked.Exchange(ref _pendingDoorMove, null) is { } door) MoveToDoor(tunnel, door, rollback: false);
+                    MoveOtherTunnelsBackAfterSilence();
+                    if (Interlocked.Exchange(ref _pendingDoorMove, null) is { } door) MakeDoorMove(tunnel, door);
 
                     // Awaited here, for the same reason: a move to another relay is a tunnel replaced.
                     if (_moveOffForGame)
@@ -1857,7 +1858,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     continue;
                 }
                 _pendingDoorMove = null;
-                _movedFromDoor = null;
+                ForgetMoveOf(_relay);
 
                 _log($"No answer from the relay for {silence.TotalSeconds:F0}s - reconnecting.");
                 await ReconnectAsync(ct).ConfigureAwait(false);
@@ -2015,8 +2016,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     /// </param>
     private SpikeRecorder.Context SpikeContext(bool home = false)
     {
-        // The tunnel carrying the match (5.8). Another relay's has no ways in to compare and never moves: entry
-        // switching stays home's, and the others keep the way they were opened on.
+        // The tunnel carrying the match (5.8), home or another relay's. Since 2026-09-30 the other relays' ways in are
+        // compared and switched the way home's are: the recorder follows the tunnel the match is on, and so do its probes.
         var carrying = home ? new Carrying(_tunnel, _relay, IsHome: true) : CarryingNow();
         var relay = carrying.Relay;
         var relayAddress = relay is not null && IPEndPoint.TryParse(relay.Endpoint, out var endpoint)
@@ -2026,36 +2027,51 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         var gameRunning = _config.RouteWithoutGame || (_watcher?.IsGameRunning ?? false);
         // Said on every record only while region routing is in force, so records from one tunnel are unchanged.
         var carried = _paths is null || home ? null : carrying.IsHome ? "home" : "other";
-        if (!carrying.IsHome)
-        {
-            return new SpikeRecorder.Context(carrying.Tunnel, RelayPaths.RelayIdOf(relay!), relay!.ViaRelayId is null ? null : relay.Id,
-                relay.Name, relayAddress, path?.Landmark, path?.RegionName, _game?.Id, gameRunning, [], MovesEnabled: false,
-                ConnectLeftDoor: null, Carried: carried);
-        }
         // A path through an entry is a RelayEntry whose Id is the entry's and ViaRelayId the relay's.
         // Recorded as the relay plus the entry, never as the entry alone: that split one relay's
         // spikes across as many rows as it has entries, and hid an incident on it.
         var relayId = relay is null ? null : RelayPaths.RelayIdOf(relay);
         var entryId = relay?.ViaRelayId is null ? null : relay.Id;
-        var switching = _switching;
+        var switching = carrying.IsHome ? _switching : SwitchingFor(relayId);
         // Not for a record's context: DoorsBeside's cache belongs to the recorder's thread, and a record needs no doors.
-        var doors = !home && relay is not null && _tunnel is not null && switching != EntrySwitchingMode.Off ? DoorsBeside(relay) : [];
+        var doors = !home && relay is not null && carrying.Tunnel is not null && switching != EntrySwitchingMode.Off
+            ? DoorsBeside(relay)
+            : [];
+        var leftDoor = carrying.IsHome ? _connectLeftDoor : carrying.Tunnel is { } t ? OtherTunnelOf(t)?.LeftDoor : null;
         return new SpikeRecorder.Context(carrying.Tunnel, relayId, entryId, relay?.Name, relayAddress,
             path?.Landmark, path?.RegionName, _game?.Id, gameRunning, doors, switching == EntrySwitchingMode.On,
-            _connectLeftDoor, carried);
+            leftDoor, carried);
     }
 
-    // ------------------------------------------------------------ moving between ways into the relay
+    // ------------------------------------------------------------ moving between ways into a relay
 
-    /// <summary>The way into the relay the switch policy asked for, until the supervisor's next pass takes it.</summary>
-    private string? _pendingDoorMove;
+    /// <summary>A move the switch policy asked for: the relay whose tunnel moves, and the way into it.</summary>
+    private sealed record DoorMove(string RelayId, string DoorId);
 
-    /// <summary>This connection's entry-switching mode, decided in <see cref="PinDoors"/>. Read by the recorder's thread.</summary>
+    /// <summary>The move the switch policy asked for, until the supervisor's next pass takes it.</summary>
+    private DoorMove? _pendingDoorMove;
+
+    /// <summary>Home's entry-switching mode, decided in <see cref="PinDoors"/>. Read by the recorder's thread.</summary>
     private volatile EntrySwitchingMode _switching = EntrySwitchingMode.Record;
 
-    /// <summary>The way the tunnel was on before its last move, while that move is young enough to undo. Supervisor only.</summary>
-    private string? _movedFromDoor;
-    private long _movedAtTick;
+    /// <summary>Every tunnel's mode by relay id, home's included, decided in <see cref="PinDoors"/>. Replaced whole, never changed.</summary>
+    private volatile IReadOnlyDictionary<string, EntrySwitchingMode> _switchingByRelay =
+        new Dictionary<string, EntrySwitchingMode>(StringComparer.OrdinalIgnoreCase);
+
+    private EntrySwitchingMode SwitchingFor(string? relayId) =>
+        relayId is not null && _switchingByRelay.TryGetValue(relayId, out var mode) ? mode : EntrySwitchingMode.Record;
+
+    /// <summary>
+    /// Per relay, the way its tunnel was on before its last move, while that move is young enough to undo. Supervisor only.
+    /// Per relay since 2026-09-30: home and a tunnel to another relay can each have moved inside the same thirty seconds.
+    /// </summary>
+    private readonly Dictionary<string, (string From, long AtTick)> _movedFrom = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Forgets the undo of a move on <paramref name="relay"/>'s tunnel - it has been replaced or left.</summary>
+    private void ForgetMoveOf(RelayEntry? relay)
+    {
+        if (relay is not null) _movedFrom.Remove(RelayPaths.RelayIdOf(relay));
+    }
 
     /// <summary>
     /// The relay's direct road, when this connection started on an entry because the entry was faster (ChooseDoorAsync).
@@ -2072,51 +2088,59 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     /// Undoes a move whose new way went silent. The policy only moves onto a way that answered nine probes in ten
     /// for the last thirty seconds, so this is rare - but the alternative is the supervisor's own rule, fifteen
     /// seconds of silence and then a reconnect, and a reconnect takes the game routes down and drops the match.
-    /// Going back to the way the tunnel just came from keeps it.
+    /// Going back to the way the tunnel just came from keeps it. Home's tunnel; see
+    /// <see cref="MoveOtherTunnelsBackAfterSilence"/> for the others.
     /// </summary>
     private bool MovedBackAfterSilence(TunnelClient tunnel, TimeSpan silence)
     {
-        if (_movedFromDoor is not { } previous) return false;
-        if (Environment.TickCount64 - _movedAtTick > MoveBackWithin.TotalMilliseconds)
+        if (_relay is not { } relay || !_movedFrom.TryGetValue(RelayPaths.RelayIdOf(relay), out var moved)) return false;
+        if (Environment.TickCount64 - moved.AtTick > MoveBackWithin.TotalMilliseconds)
         {
-            _movedFromDoor = null;
+            _movedFrom.Remove(RelayPaths.RelayIdOf(relay));
             return false;
         }
         if (silence < MoveBackSilence) return false;
 
-        _movedFromDoor = null;
+        _movedFrom.Remove(RelayPaths.RelayIdOf(relay));
         _log($"Entry switching: nothing has answered for {silence.TotalSeconds:F0} s since the move - going back to " +
-             $"{previous} rather than waiting for the tunnel to be given up for dead.");
-        MoveToDoor(tunnel, previous, rollback: true);
+             $"{moved.From} rather than waiting for the tunnel to be given up for dead.");
+        MoveToDoor(tunnel, moved.From, rollback: true);
         return true;
     }
 
-    /// <summary>The relay whose ways in are all pinned to the physical adapter, or null. See <see cref="PinDoors"/>.</summary>
-    private volatile string? _doorsPinnedRelayId;
+    /// <summary>
+    /// The relays whose ways in are all pinned to the physical adapter - home's and each other tunnel's with entry
+    /// switching not off. Replaced whole. See <see cref="PinDoors"/>.
+    /// </summary>
+    private volatile IReadOnlySet<string> _doorsPinnedRelays = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The relays named in the log as having their ways probed, so each is said once while it stays.</summary>
+    private IReadOnlySet<string> _doorsAnnounced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
     // DoorsBeside's cache, touched only by the recorder's thread: one list object per relay, way and profile,
     // which is also how the recorder tells that its probes need rebuilding.
     private RelayEntry? _doorsFor;
     private object? _doorsProfile;
-    private string? _doorsPinnedFor;
+    private IReadOnlySet<string>? _doorsPinnedFor;
     private IReadOnlyList<DoorProbes.Door> _doors = [];
 
     /// <summary>
-    /// The ways into the current relay the tunnel is NOT using - its entries, or the relay itself when the
-    /// tunnel came in through an entry. Empty until they are pinned, so a probe never takes a game route.
+    /// The ways into the relay of <paramref name="relay"/> - the way a tunnel is on - that it is NOT using: its
+    /// entries, or the relay itself when the tunnel came in through an entry. Empty until they are pinned, so a probe
+    /// never takes a game route.
     /// </summary>
     private IReadOnlyList<DoorProbes.Door> DoorsBeside(RelayEntry relay)
     {
         var profile = _profile;
-        var pinned = _doorsPinnedRelayId;
-        if (ReferenceEquals(relay, _doorsFor) && ReferenceEquals(profile, _doorsProfile) && pinned == _doorsPinnedFor)
+        var pinned = _doorsPinnedRelays;
+        if (ReferenceEquals(relay, _doorsFor) && ReferenceEquals(profile, _doorsProfile) && ReferenceEquals(pinned, _doorsPinnedFor))
         {
             return _doors;
         }
 
         var doors = new List<DoorProbes.Door>();
         var relayId = RelayPaths.RelayIdOf(relay);
-        if (profile is not null && string.Equals(pinned, relayId, StringComparison.OrdinalIgnoreCase))
+        if (profile is not null && pinned.Contains(relayId))
         {
             foreach (var door in RelayPaths.DoorsOf(profile.Relays, relayId))
             {
@@ -2137,64 +2161,109 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     }
 
     /// <summary>
-    /// Pins every way into the relay in use to the physical adapter - the one the tunnel uses is pinned
-    /// already - so a probe down another one can never follow a game route into the tunnel. Never fatal:
-    /// a failure here only means the other ways go unmeasured on this connection.
+    /// Pins every way into every relay a tunnel is on - home's and each other tunnel's - to the physical adapter, the
+    /// ones the tunnels use are pinned already, so a probe down another one can never follow a game route into the
+    /// tunnel. Called whenever the set of tunnels or the relay home is on changes. Never fatal: a failure here only
+    /// means the other ways go unmeasured, and nothing moves.
     /// </summary>
     private void PinDoors()
     {
         var routes = _routes;
         var relay = _relay;
         var profile = _profile;
-        _doorsPinnedRelayId = null;
-        if (routes is null || relay is null || profile is null) return;
+        var none = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (routes is null || relay is null || profile is null)
+        {
+            _doorsPinnedRelays = none;
+            return;
+        }
+
+        var tunnels = new List<(string RelayId, bool Home)> { (RelayPaths.RelayIdOf(relay), true) };
+        lock (_otherTunnels) tunnels.AddRange(_otherTunnels.Values.Select(o => (o.RelayId, false)));
+
+        var modes = new Dictionary<string, EntrySwitchingMode>(StringComparer.OrdinalIgnoreCase);
+        var pinned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var addresses = new HashSet<IPAddress>();
+        var lines = new List<string>();
+        foreach (var (relayId, isHome) in tunnels)
+        {
+            // Decided per relay: this machine's config.json if it says, else the relay's setting from the profile,
+            // else "record". A change made in /admin/relays reaches a player with the next profile the app fetches and
+            // takes effect on the next connect or tunnel opened - never mid-match.
+            var (mode, source) = EntrySwitching.Resolve(_config.EntrySwitching,
+                profile.Relays.FirstOrDefault(r => r.Id.Equals(relayId, StringComparison.OrdinalIgnoreCase))?.EntrySwitching);
+            modes[relayId] = mode;
+            if (isHome) _switching = mode;
+
+            var doors = mode != EntrySwitchingMode.Off ? RelayPaths.DoorsOf(profile.Relays, relayId) : [];
+            if (doors.Count < 2) continue;
+            foreach (var door in doors)
+            {
+                if (IPEndPoint.TryParse(door.Endpoint, out var address) &&
+                    address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                {
+                    addresses.Add(address.Address);
+                }
+            }
+            pinned.Add(relayId);
+            if (!_doorsAnnounced.Contains(relayId))
+            {
+                var name = profile.Relays.FirstOrDefault(r => r.Id.Equals(relayId, StringComparison.OrdinalIgnoreCase))?.Name ?? relayId;
+                lines.Add($"Entry switching ({(mode == EntrySwitchingMode.On ? "on" : "record only")}, from {source}): {name} " +
+                          $"{(isHome ? "" : "(a region's tunnel) ")}has {doors.Count} ways in ({string.Join(", ", doors.Select(d => d.Id))}); " +
+                          "the ones not in use are probed while a match is on it" + (isHome ? " or the game is in its lobby." : ", and between matches."));
+            }
+        }
+        _switchingByRelay = modes;
 
         try
         {
-            var relayId = RelayPaths.RelayIdOf(relay);
-
-            // Decided once per connection, here: this machine's config.json if it says, else the relay's
-            // setting from the profile, else "record". A change made in /admin/relays reaches a player with
-            // the next profile the app fetches and takes effect on the connect after it - never mid-match.
-            var (mode, source) = EntrySwitching.Resolve(_config.EntrySwitching,
-                profile.Relays.FirstOrDefault(r => r.Id.Equals(relayId, StringComparison.OrdinalIgnoreCase))?.EntrySwitching);
-            _switching = mode;
-
-            var doors = mode != EntrySwitchingMode.Off ? RelayPaths.DoorsOf(profile.Relays, relayId) : [];
-            if (doors.Count < 2)
-            {
-                routes.PinDoorRoutes([]);
-                return;
-            }
-
-            var addresses = doors
-                .Select(d => IPEndPoint.TryParse(d.Endpoint, out var endpoint) ? endpoint.Address : null)
-                .OfType<IPAddress>()
-                .Where(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
-                .Distinct()
-                .ToList();
             routes.PinDoorRoutes(addresses);
-            _doorsPinnedRelayId = relayId;
-
-            _log($"Entry switching ({(mode == EntrySwitchingMode.On ? "on" : "record only")}, from {source}): {relay.Name} has " +
-                 $"{doors.Count} ways in ({string.Join(", ", doors.Select(d => d.Id))}); the ones not in use are probed " +
-                 "while a game runs.");
+            // The same set object while nothing changed: the recorder rebuilds its probes - new sockets - whenever
+            // the list DoorsBeside hands it is a new one, and a tunnel opening elsewhere is no reason to.
+            if (!pinned.SetEquals(_doorsPinnedRelays)) _doorsPinnedRelays = pinned;
+            _doorsAnnounced = pinned;
+            foreach (var line in lines) _log(line);
         }
         catch (Exception ex)
         {
-            _log($"Entry switching: could not pin the ways into {relay.Name} ({ex.Message}) - they are not measured on this connection.");
+            _doorsPinnedRelays = none;
+            _doorsAnnounced = none;
+            _log($"Entry switching: could not pin the ways into the relays ({ex.Message}) - they are not measured until the tunnels change.");
         }
     }
 
     /// <summary>
     /// The recorder's switch policy asking for a move. Only noted here; the supervisor makes it on its next
     /// pass, the one place a tunnel is ever replaced or moved. False when it will not be made at all.
+    ///
+    /// Which tunnel is found from the way asked for: every way belongs to exactly one relay, and one relay has at most
+    /// one tunnel - home, or another relay's (G5).
     /// </summary>
     private bool RequestDoorMove(GamePingBooster.Core.Quality.DoorDecision decision)
     {
-        if (_switching != EntrySwitchingMode.On || _state != TunnelState.Connected) return false;
-        Volatile.Write(ref _pendingDoorMove, decision.To);
+        if (_state != TunnelState.Connected || _profile is not { } profile || _relay is not { } home) return false;
+        var door = RelayPaths.Find(profile.Relays, decision.To);
+        if (door is null) return false;
+        var relayId = RelayPaths.RelayIdOf(door);
+        var isHome = relayId.Equals(RelayPaths.RelayIdOf(home), StringComparison.OrdinalIgnoreCase);
+        if ((isHome ? _switching : SwitchingFor(relayId)) != EntrySwitchingMode.On) return false;
+        if (!isHome && OtherTunnelTo(relayId) is null) return false;
+        Volatile.Write(ref _pendingDoorMove, new DoorMove(relayId, decision.To));
         return true;
+    }
+
+    /// <summary>Makes a move the policy asked for, on whichever tunnel it is for. Supervisor only.</summary>
+    private void MakeDoorMove(TunnelClient home, DoorMove move)
+    {
+        if (_relay is { } relay && RelayPaths.RelayIdOf(relay).Equals(move.RelayId, StringComparison.OrdinalIgnoreCase))
+        {
+            MoveToDoor(home, move.DoorId, rollback: false);
+        }
+        else
+        {
+            MoveOtherToDoor(move.RelayId, move.DoorId, rollback: false, why: "the switch policy");
+        }
     }
 
     /// <summary>
@@ -2234,8 +2303,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
 
             // Remembered so a way that goes silent right after the move is left again before the supervisor
             // gives the whole tunnel up - see MovedBackAfterSilence. A move back is not itself undone.
-            _movedFromDoor = rollback ? null : current.Id;
-            _movedAtTick = Environment.TickCount64;
+            if (rollback) _movedFrom.Remove(relayId);
+            else _movedFrom[relayId] = (current.Id, Environment.TickCount64);
 
             _log($"Entry switching: moved from {current.Name} [{current.Id}] to {target.Name} [{target.Id}] - the same " +
                  "relay and session, so the game server sees no change.");
@@ -3184,6 +3253,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         var carrier = carrying.Tunnel;
         var carrierPath = PathFor(carrier);
         var others = OtherTunnelsNow();
+        // Between matches with region routing in force: the next match's figure, through the relay the plan gives its region.
+        var nextMatch = PlannedForNextMatch(carrying);
 
         // Both are worked out once and read three times below - the English sentence, its language
         // key and its arguments have to describe the same moment.
@@ -3236,9 +3307,10 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             // re-probing the datacentre. It is still an estimate against a stand-in host, which is
             // why the measurement wins whenever there is one. Null until something has answered,
             // which is right: a number built on no measurement is not better than showing nothing.
-            GamePingMs = direct ?? (carrierPath is { } p && carrier?.LastRttMs is { } live ? live + p.Offset : null),
-            GamePingDirect = direct is not null,
-            GameRegionName = carrierPath?.RegionName,
+            GamePingMs = nextMatch?.Ms ?? direct ?? (carrierPath is { } p && carrier?.LastRttMs is { } live ? live + p.Offset : null),
+            GamePingDirect = nextMatch is null && direct is not null,
+            GameRegionName = nextMatch?.RegionName ?? carrierPath?.RegionName,
+            GamePingRelayName = nextMatch?.RelayName,
             // The last minute, as relay comparisons read it (RelayLoss): since connect, an hour of clean play hid
             // loss that had just started, and loss that had stopped stayed on screen for the rest of the evening.
             LossRatio = carrier?.RecentLoss() is { Sent: >= 5 } recent ? recent.Share : null,

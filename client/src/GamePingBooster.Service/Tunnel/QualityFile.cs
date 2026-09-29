@@ -108,7 +108,13 @@ internal sealed class QualityFile(Action<string> log)
     private const int KeepDays = 14;
     private const long MaxBytesPerDay = 8L * 1024 * 1024;
 
-    internal static string DirectoryPath => Path.Combine(ServiceConfig.DefaultDirectory, "quality");
+    internal static string DirectoryPath => DirectoryOverride ?? Path.Combine(ServiceConfig.DefaultDirectory, "quality");
+
+    /// <summary>
+    /// For TunnelCheck only: a recorder scenario that runs a match past thirty seconds writes a real summary, and it
+    /// must go to a scratch folder - never into this PC's quality folder and its upload queue. Null in the service.
+    /// </summary>
+    internal static string? DirectoryOverride { get; set; }
 
     private bool _warned;
     private bool _warnedFull;

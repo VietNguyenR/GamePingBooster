@@ -24,15 +24,20 @@ namespace GamePingBooster.Service.Tunnel;
 ///     no region needs is closed once nothing is stuck to it - and <see cref="TearDownMultiTunnel"/> when the game
 ///     changes.
 ///
-/// What this phase does not do yet: the in-game ping, the spike recorder, entry switching and the status follow the
-/// home tunnel only (5.8), a region planned "direct" stays home, and the plan is made once per connection and home
-/// relay - there is no re-plan after a match. The log names every tunnel's traffic, so a match on another relay is
-/// visible there.
+/// The in-game ping, the spike recorder and the status follow the tunnel carrying the match (5.8), and since 2026-09-30
+/// so does entry switching - see TunnelEngine.OtherDoors.cs. A region planned "direct" stays home.
 /// </summary>
 internal sealed partial class TunnelEngine
 {
     /// <summary>A tunnel to a relay other than home. The dictionary holding these is guarded by itself.</summary>
-    private sealed record OtherTunnel(string RelayId, RelayEntry Way, TunnelClient Client);
+    private sealed record OtherTunnel(string RelayId, RelayEntry Way, TunnelClient Client)
+    {
+        /// <summary>
+        /// The relay's direct road, when the plan opened this tunnel on an entry because the entry measured faster: the
+        /// switch policy's way back, as ChooseDoorAsync's detour is for home. Null when it was opened on the road.
+        /// </summary>
+        public string? LeftDoor { get; init; }
+    }
 
     /// <summary>The dispatcher, or null while the connection is one tunnel. Supervisor and teardown only.</summary>
     private volatile PathDispatcher? _paths;
@@ -139,8 +144,12 @@ internal sealed partial class TunnelEngine
 
             try
             {
-                lock (_otherTunnels) _otherTunnels[relayId] = new OtherTunnel(relayId, way, client);
+                lock (_otherTunnels)
+                {
+                    _otherTunnels[relayId] = new OtherTunnel(relayId, way, client) { LeftDoor = way.ViaRelayId is null ? null : relayId };
+                }
                 PinOtherTunnels(routes);
+                PinDoors();
                 client.Dispatcher = paths;
                 client.StartPumping(adapter, ct);
                 _log($"  Opened a tunnel to {way.Name} [{way.Id}] for {string.Join(", ", plan.Where(d => d.Path.RelayId == relayId).Select(d => d.RegionId))} " +
@@ -162,6 +171,10 @@ internal sealed partial class TunnelEngine
             if (decision?.Path.Kind == PathKind.Relay) byRegion[i] = OtherTunnelTo(decision.Path.RelayId!);
         }
         paths.SetPlan(byRegion);
+        _plannedRegions = [.. plan
+            .Where(d => d.Path.Kind == PathKind.Relay && d.ChosenMs is not null && OtherTunnelTo(d.Path.RelayId!) is not null)
+            .Select(d => new PlannedRegion(d.RegionId, game.Regions.FirstOrDefault(r => r.Id == d.RegionId)?.Name ?? d.RegionId,
+                OtherTunnelTo(d.Path.RelayId!)!, d.ChosenMs!.Value))];
         _log("Region routing in force: " + string.Join(", ", Enumerable.Range(0, byRegion.Length)
             .Select(i => $"{paths.Table.RegionIdAt(i)} -> {(byRegion[i] is { } t ? NameOf(t) : "home")}")) +
             ". Servers already in use keep the tunnel they started on.");
@@ -209,7 +222,11 @@ internal sealed partial class TunnelEngine
                 changed = true;
             }
         }
-        if (changed && _routes is { } routes) PinOtherTunnels(routes);
+        if (changed && _routes is { } routes)
+        {
+            PinOtherTunnels(routes);
+            PinDoors();
+        }
 
         if (++_otherTunnelLogPass % 6 == 0)
         {
@@ -242,17 +259,23 @@ internal sealed partial class TunnelEngine
         _pump?.SetDispatcher(null);
         _paths = null;
         _otherPath = null;
+        _plannedRegions = [];
         foreach (var other in others)
         {
             paths?.Remove(other.Client);
             other.Client.Dispose();
+            _movedFrom.Remove(other.RelayId);
         }
 
         var home = _tunnel;
         if (home is not null) home.Dispatcher = null;
         try
         {
-            if (_routes is { } routes) routes.PinPathRoutes([]);
+            if (_routes is { } routes)
+            {
+                routes.PinPathRoutes([]);
+                PinDoors();
+            }
             if (readdress && paths is not null && home is not null && home.InnerIp != paths.AdapterIp &&
                 _adapter is { } adapter && _routes is { } r)
             {
@@ -274,6 +297,7 @@ internal sealed partial class TunnelEngine
             if (_otherTunnels.TryGetValue(other.RelayId, out var current) && ReferenceEquals(current, other)) _otherTunnels.Remove(other.RelayId);
         }
         if (_otherPath is { } path && ReferenceEquals(path.Tunnel, other.Client)) _otherPath = null;
+        _movedFrom.Remove(other.RelayId);
         if (announce) other.Client.Dispose();
         else Abandon(other.Client);
     }
@@ -373,6 +397,78 @@ internal sealed partial class TunnelEngine
         ReferenceEquals(tunnel, _tunnel)
             ? _relay is { } r ? $"{r.Name} [{r.Id}] (home)" : "home"
             : NameOf(tunnel);
+
+    /// <summary>
+    /// What the plan in force measured for each region it sends to another relay - for the headline between matches,
+    /// see <see cref="PlannedForNextMatch"/>. Replaced whole by <see cref="ApplyPlanAsync"/>, emptied with the paths.
+    /// </summary>
+    private volatile IReadOnlyList<PlannedRegion> _plannedRegions = [];
+
+    /// <summary>
+    /// One region the plan sends to another tunnel, and its estimate there: the tunnel's live first leg plus the second
+    /// leg the plan measured, the same split as home's <see cref="PathMeasurement"/>. The second leg is the plan's
+    /// end-to-end median less the first leg at the first reading of it - a tunnel the plan has just opened has none
+    /// yet, and until it does the plan's number is shown as it was measured. The relay's own road to the region does not
+    /// change with the way into it, so a move to another entry keeps the second leg and the first follows the move.
+    /// </summary>
+    private sealed class PlannedRegion
+    {
+        private readonly double _chosenMs;
+        private double _secondLegMs = -1;
+
+        public PlannedRegion(string regionId, string regionName, TunnelClient tunnel, double chosenMs)
+        {
+            RegionId = regionId;
+            RegionName = regionName;
+            Tunnel = tunnel;
+            _chosenMs = chosenMs;
+            if (tunnel.LastRttMs is { } legOne) _secondLegMs = Math.Max(0, chosenMs - legOne);
+        }
+
+        public string RegionId { get; }
+        public string RegionName { get; }
+        public TunnelClient Tunnel { get; }
+
+        public double EstimateMs()
+        {
+            if (Tunnel.LastRttMs is not { } legOne) return _chosenMs;
+            var second = Volatile.Read(ref _secondLegMs);
+            if (second < 0)
+            {
+                second = Math.Max(0, _chosenMs - legOne);
+                Volatile.Write(ref _secondLegMs, second);
+            }
+            return legOne + second;
+        }
+    }
+
+    /// <summary>
+    /// The headline between matches while region routing is in force: the estimate for the region the game is expected
+    /// to use, through the relay the plan sends that region to - or null, and the headline is home's as always.
+    ///
+    /// Home's figure is for the region home was measured against, and in the lobby that is the figure on screen. When the
+    /// plan sends that region elsewhere it is the road a match there will NOT take: on 2026-09-30 a Naraka player on a Ha
+    /// Noi home saw "64 ms to Singapore" in the lobby, while the plan had Singapore on Singapore #1 at about 44.
+    ///
+    /// Only while home is carrying no match - one on home in the last minute, a stall included, keeps home's own figure -
+    /// and only while the tunnel is still the one the plan gives the region.
+    /// </summary>
+    private (double Ms, string RegionName, string RelayName)? PlannedForNextMatch(Carrying carrying)
+    {
+        if (!carrying.IsHome || carrying.Tunnel is not { } home || _paths is not { } paths || _path is not { } expected) return null;
+        if (_carrier.CarriedMatchWithin(home, Environment.TickCount64, MatchCarrier<TunnelClient>.HomeAfter)) return null;
+
+        var planned = _plannedRegions.FirstOrDefault(p => p.RegionName == expected.RegionName);
+        if (planned is null || OtherTunnelOf(planned.Tunnel) is not { } other) return null;
+
+        var plan = paths.Plan;
+        for (var i = 0; i < plan.Length && i < paths.Table.RegionCount; i++)
+        {
+            if (paths.Table.RegionIdAt(i) != planned.RegionId) continue;
+            return ReferenceEquals(plan[i], planned.Tunnel) ? (planned.EstimateMs(), planned.RegionName, other.Way.Name) : null;
+        }
+        return null;
+    }
 
     /// <summary>
     /// Each region that leaves by another relay, and that relay, for the app - nothing while region routing is not

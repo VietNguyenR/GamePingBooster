@@ -921,14 +921,51 @@ internal sealed class TunnelClient : IDisposable
     private void DownlinkLoop(CancellationToken ct)
     {
         var buffer = new byte[GpbProtocol.MaxPacketLen];
+        var ready = new List<Socket>(2);
 
         while (!ct.IsCancellationRequested)
         {
             Socket? current = null;
+            Socket? from = null;
             try
             {
                 current = _socket;
-                var n = current!.Receive(buffer, SocketFlags.None);
+                from = current!;
+
+                // After a move, the socket of the way left is read too, for a second, so what was already on its way
+                // back down it still reaches the game - see MoveTo. Whichever is readable first; the old one first when
+                // both are, its packets being the older.
+                if (Volatile.Read(ref _draining) is { } draining)
+                {
+                    if (_clock.ElapsedTicks >= draining.UntilTicks)
+                    {
+                        RetireDrain(draining);
+                        continue;
+                    }
+                    ready.Clear();
+                    ready.Add(draining.Socket);
+                    ready.Add(current);
+                    try
+                    {
+                        Socket.Select(ready, null, null, DrainPollMicroseconds);
+                    }
+                    catch (Exception ex) when (ex is ObjectDisposedException or SocketException)
+                    {
+                        // One of the two was closed under the Select - a second move, or Dispose. The next pass sorts it out.
+                        RetireDrain(draining);
+                        continue;
+                    }
+                    if (ready.Count == 0) continue;
+                    from = ready[0];
+                }
+                // Not a Receive that blocks for as long as the socket is quiet: a move retires this socket without closing
+                // it, and the new one must be read within a moment even when nothing more comes down the old way.
+                else if (!current.Poll(DrainPollMicroseconds, SelectMode.SelectRead))
+                {
+                    continue;
+                }
+
+                var n = from.Receive(buffer, SocketFlags.None);
                 if (n < 1) continue;
 
                 var (version, type) = GpbProtocol.ParseHeader(buffer[0]);
@@ -1011,6 +1048,12 @@ internal sealed class TunnelClient : IDisposable
                         }
                         break;
                 }
+            }
+            catch (Exception ex) when (from is not null && !ReferenceEquals(from, current) &&
+                                       ex is SocketException or ObjectDisposedException)
+            {
+                // The retired socket, not the tunnel's: whatever went wrong with it, the drain is over.
+                if (Volatile.Read(ref _draining) is { } draining && ReferenceEquals(draining.Socket, from)) RetireDrain(draining);
             }
             catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionReset)
             {
@@ -1201,10 +1244,13 @@ internal sealed class TunnelClient : IDisposable
     ///
     /// The order is what keeps it clean. The new socket goes into <see cref="_socket"/> first, so the very
     /// next game packet leaves by the new way and turns the relay's return path round with it; the old
-    /// socket is then closed - WITHOUT a Disconnect, which would end the session it shares - and the
-    /// downlink thread, woken out of its Receive, carries on reading the new one. The ping after it turns
-    /// the return path round even in a quarter second the game sends nothing. Whatever was already on its
-    /// way back down the old way is lost: a round trip's worth of packets, against minutes on a bad road.
+    /// socket is then retired - WITHOUT a Disconnect, which would end the session it shares - and the
+    /// downlink thread reads both for <see cref="DrainFor"/>, then closes the old one. The ping after it turns
+    /// the return path round even in a quarter second the game sends nothing.
+    ///
+    /// Until 2026-09-30 the old socket was closed at once, and whatever was already on its way back down the old
+    /// way was lost: on the rig, three of a match's packets at every move off a road 80 ms slow - a round trip's
+    /// worth. Read for a second longer, it arrives.
     ///
     /// The caller pins the new address to the physical adapter first. See RouteManager.PinDoorRoutes.
     /// </summary>
@@ -1226,7 +1272,14 @@ internal sealed class TunnelClient : IDisposable
         var old = _socket;
         _socket = fresh;
         _relayEndpoint = endpoint;
-        old?.Dispose();
+        if (old is not null)
+        {
+            // A move within a second of the last one: the way before that has drained enough.
+            if (Interlocked.Exchange(ref _draining, new Draining(old, _clock.ElapsedTicks + (long)(DrainFor.TotalSeconds * Stopwatch.Frequency))) is { } earlier)
+            {
+                earlier.Socket.Dispose();
+            }
+        }
 
         // Disposed while this ran - a disconnect racing a move. The pumps are already gone; leave no socket behind them.
         if (_disposing)
@@ -1244,6 +1297,29 @@ internal sealed class TunnelClient : IDisposable
         {
             // The next game packet or keepalive turns the return path round instead.
         }
+    }
+
+    /// <summary>A socket a move retired, read until <see cref="UntilTicks"/> (on <see cref="_clock"/>) and then closed.</summary>
+    private sealed class Draining(Socket socket, long untilTicks)
+    {
+        public Socket Socket { get; } = socket;
+        public long UntilTicks { get; } = untilTicks;
+    }
+
+    private Draining? _draining;
+
+    /// <summary>How long the way left is read after a move: longer than any round trip worth staying on.</summary>
+    internal static readonly TimeSpan DrainFor = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// The longest the downlink waits on its sockets before looking again for a move: a move away from a way that has
+    /// gone silent must not leave the new way unread for longer. A packet arriving ends the wait at once.
+    /// </summary>
+    private const int DrainPollMicroseconds = 50_000;
+
+    private void RetireDrain(Draining draining)
+    {
+        if (Interlocked.CompareExchange(ref _draining, null, draining) == draining) draining.Socket.Dispose();
     }
 
     private static Socket NewSocket() => new(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp)
@@ -1291,6 +1367,7 @@ internal sealed class TunnelClient : IDisposable
 
         _cts?.Cancel();
         _socket?.Dispose();
+        if (Interlocked.Exchange(ref _draining, null) is { } draining) draining.Socket.Dispose();
 
         // The downlink must be gone before the caller ends the adapter's session: it calls into the
         // session on every packet, and WintunEndSession while it is still running is a use-after-free
