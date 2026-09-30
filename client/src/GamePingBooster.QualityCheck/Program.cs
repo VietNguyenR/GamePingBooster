@@ -70,6 +70,7 @@ internal static partial class Program
         OnlyAClearDifferenceMoves();
         NothingMovesAgainForFiveMinutes();
         ADifferentWayInStartsTheWindowAgain();
+        ADifferentLaneStartsTheWindowAgain();
         TheBetterOfTwoWaysIsChosen();
         TheWayLeftIsReturnedToOnceItRecovers();
         AWayLeftThatStillLosesProbesIsNotReturnedTo();
@@ -92,6 +93,10 @@ internal static partial class Program
         Console.WriteLine();
         Console.WriteLine("A region's tunnel, between matches (WayCheck):");
         WayCheckChecks();
+
+        Console.WriteLine();
+        Console.WriteLine("Which lane - source port - into the way in use (LanePick):");
+        LanePickChecks();
 
         Console.WriteLine();
         if (_failures == 0)
@@ -602,6 +607,21 @@ internal static partial class Program
         Check("  ...and then they do", w.Decisions.Count == 1 && w.Decisions[0].From == "sg-2-vn", $"{w.Decisions.Count} decision(s)");
     }
 
+    /// <summary>
+    /// 2026-09-30, the owner's line through vn-1-sg4: a lane hunt moved the tunnel off a 54 ms lane that lost Probes onto
+    /// a 45 ms one, and twenty seconds later the policy left the entry on a window still two-thirds the old lane's.
+    /// </summary>
+    private static void ADifferentLaneStartsTheWindowAgain()
+    {
+        var w = new Ways { Current = "vn-1-sg4", Others = ["sg-4"], Lane = 50001 };
+        w.Run(100, 84, 46);
+        w.Lane = 50002;
+        w.Run(119, 84, 46);
+        Check("thirty seconds on a way count only from when the tunnel took its lane", w.Decisions.Count == 0, $"{w.Decisions.Count} decision(s)");
+        w.Run(1, 84, 46);
+        Check("  ...and then they do", w.Decisions.Count == 1, $"{w.Decisions.Count} decision(s)");
+    }
+
     private static void TheBetterOfTwoWaysIsChosen()
     {
         var w = new Ways { Others = ["sg-2-vn", "sg-2-vn2"] };
@@ -851,6 +871,7 @@ internal static partial class Program
         public DoorSwitchPolicy Policy { get; } = new();
         public List<DoorDecision> Decisions { get; } = [];
         public string Current { get; set; } = "sg-2";
+        public int Lane { get; set; }
         public string[] Others { get; set; } = ["sg-2-vn"];
         public TickMode Mode { get; set; } = TickMode.Match;
 
@@ -869,6 +890,7 @@ internal static partial class Program
                     RelayProcessSent = true,
                     RelayProcessMs = current(i) is { } c ? c + Noise() : null,
                     CurrentDoor = Current,
+                    CurrentLane = Lane,
                     DoorIds = Others,
                     DoorSent = Enumerable.Repeat(true, Others.Length).ToArray(),
                     DoorMs = others.Select(o => o(i) is { } v ? v + Noise() : (double?)null).ToArray(),

@@ -20,7 +20,7 @@
 #                                the mode comes from gpb.conf; --psk or --token asserts it
 #   ./gpb relay logs [name]      follow journalctl on a relay             (any OS)
 #   ./gpb relay setup            first-time setup, explained              (any OS)
-#   ./gpb entry deploy [name]    make a VPS forward to the nearest relay  (any OS)
+#   ./gpb entry deploy [name]    make a VPS forward to its relay          (any OS)
 #   ./gpb entry list             show the entries gpb.conf declares       (any OS)
 #   ./gpb entry setup            first-time setup, explained              (any OS)
 #   ./gpb test                   everything: Go, plus C# if the SDK is here
@@ -80,16 +80,20 @@ load_conf() {
         [ "$key" != "$line" ] || continue
         val=${line#*=}
 
-        key=$(printf '%s' "$key" | tr -d ' \t')
+        # Parameter expansion only, no $(... | sed) - on Windows every subshell and pipe is a
+        # process, and three per line made every ./gpb command spend a minute reading this file.
+        key=${key#"${key%%[![:space:]]*}"}
+        key=${key%"${key##*[![:space:]]}"}
         case "$key" in RELAY_* | ENTRY_*) ;; *) continue ;; esac
         # Anything that is not a shell name character means a malformed line, not a setting.
         # Skipping it is safer than handing it to eval below.
-        [ -z "$(printf '%s' "$key" | sed 's/[A-Za-z0-9_]//g')" ] || continue
+        case "$key" in *[!A-Za-z0-9_]*) continue ;; esac
 
         # CRLF is likely here. gpb.conf is written by hand on Windows and is untracked, so
         # .gitattributes never sees it, and a trailing CR in a host name produces an ssh error
         # that names the wrong thing entirely. [[:space:]] covers CR.
-        val=$(printf '%s' "$val" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+        val=${val#"${val%%[![:space:]]*}"}
+        val=${val%"${val##*[![:space:]]}"}
 
         # Only key paths get ~ expanded. Doing it to every value would corrupt a password that
         # happened to start with one.
@@ -395,8 +399,8 @@ pick_relay() {
 # An entry is a VPS - normally in the players' own country - that forwards UDP, untouched, to one of
 # the relays, for players whose ISP reaches the relays the long way round. Nothing is built for it
 # and nothing is installed but a few forwarding rules: relay/deploy/setup-entry.sh is uploaded and
-# run, pings every relay declared here FROM the entry, and forwards to the nearest. Its header
-# explains why that choice is then kept from one deploy to the next.
+# run, and forwards to the relay ENTRY_<NAME>_RELAY names. Nothing is measured from the entry - its
+# header explains why a ping from there picks the wrong relay as often as the right one.
 #
 # The variables below are prefixed e- because the relay helpers called in between (relay_field,
 # relay_endpoint) set plain globals such as host, listen and n, and POSIX sh has no locals.
@@ -437,22 +441,6 @@ entry_ssh() {
     set -- -o StrictHostKeyChecking=accept-new "$@"
     [ -z "$ssh_tty_flag" ] || set -- "$ssh_tty_flag" "$@"
     ssh "$@"
-}
-
-# Every declared relay as NAME=IP:PORT - the list the entry measures and chooses from. A relay
-# declared by hostname is left out, and said to be: a forwarding rule takes an address, and
-# resolving the name on the entry would let one DNS answer quietly move every player behind it.
-entry_candidates() {
-    eclist=
-    for ecr in $(relay_names); do
-        echost=$(relay_field "$ecr" HOST)
-        if is_ipv4 "$echost"; then
-            eclist="$eclist $ecr=$(relay_endpoint "$ecr")"
-        else
-            warn "relay $ecr is declared by name ($echost), not by address - left out. An entry forwards to an IPv4 address."
-        fi
-    done
-    printf '%s' "${eclist# }"
 }
 
 # What runs on the entry, on the connection whose stdin is setup-entry.sh itself. The same three
@@ -498,32 +486,22 @@ entry_deploy() {
     ewan=$(entry_field "$ename" WAN)
     case "$ewan" in *[!A-Za-z0-9._-]*) die "ENTRY_${eslug}_WAN is '$ewan', which is not an interface name." ;; esac
     epin=$(entry_field "$ename" RELAY | tr '[:upper:]' '[:lower:]')
-    if [ -n "$epin" ] && ! relay_names | grep -qx "$epin"; then
+    [ -n "$epin" ] || die "gpb.conf has no ENTRY_${eslug}_RELAY. Name the relay this entry forwards to, one of: $(relay_names | tr '\n' ' ')"
+    if ! relay_names | grep -qx "$epin"; then
         die "ENTRY_${eslug}_RELAY is '$epin', but gpb.conf declares no relay by that name. Declared: $(relay_names | tr '\n' ' ')"
     fi
 
-    ecandidates=$(entry_candidates)
-    [ -n "$ecandidates" ] || die "gpb.conf declares no relay by IPv4 address, so there is nothing for an entry to forward to."
-    if [ -n "$epin" ]; then
-        case " $ecandidates " in
-            *" $epin="*) ;;
-            *) die "ENTRY_${eslug}_RELAY is '$epin', but that relay is declared by name, not by address." ;;
-        esac
-    fi
+    is_ipv4 "$(relay_field "$epin" HOST)" ||
+        die "ENTRY_${eslug}_RELAY is '$epin', but that relay is declared by name, not by address. An entry forwards to an IPv4 address."
 
-    eargs="--listen $elisten"
-    [ -z "$epin" ] || eargs="$eargs --relay $epin"
+    eargs="--listen $elisten --relay $epin"
     [ -z "$ewan" ] || eargs="$eargs --wan $ewan"
-    eargs="$eargs $ecandidates"
+    eargs="$eargs $epin=$(relay_endpoint "$epin")"
 
     need ssh "Install OpenSSH."
     arm_askpass "$(entry_field "$ename" PASSWORD)"
 
-    if [ -n "$epin" ]; then
-        say "Deploying entry $ename at $ehost: UDP $elisten forwarded to $epin, as pinned"
-    else
-        say "Deploying entry $ename at $ehost: UDP $elisten forwarded to the nearest of $(printf '%s' "$ecandidates" | sed 's/=[^ ]*//g')"
-    fi
+    say "Deploying entry $ename at $ehost: UDP $elisten forwarded to $epin"
 
     # The output is shown as it arrives AND kept, because its last line says which relay was chosen.
     # The exit status travels in a file: a pipeline reports only its last command's, and that is tee.
@@ -554,7 +532,7 @@ entry_deploy() {
     case "$estatus" in
         0) ;;
         91) rm -f "$elog"; die "the account on $ename is not root and has no sudo. Deploy as root, or install sudo there." ;;
-        2)  rm -f "$elog"; die "no relay answered from $ename - nothing was changed. See the measurements above." ;;
+        3)  rm -f "$elog"; die "the entry refused the relay it was given - nothing was changed. See the output above." ;;
         *)  rm -f "$elog"; die "entry deploy failed - see the output above" ;;
     esac
 
@@ -610,7 +588,7 @@ entry_list() {
         ell=$(entry_field "$e" LISTEN)
         [ -n "$ell" ] || ell=51820
         elr=$(entry_field "$e" RELAY | tr '[:upper:]' '[:lower:]')
-        [ -n "$elr" ] || elr='the nearest relay, kept once chosen'
+        [ -n "$elr" ] || elr="(ENTRY_$(entry_slug "$e")_RELAY missing)"
         printf '%-10s %-30s %-8s %-12s %s\n' "$e" "$elu@$(entry_field "$e" HOST):$elp" "$ell" "$ela" "$elr"
     done
 }
@@ -628,6 +606,7 @@ Setting up an entry, start to finish.
     ENTRY_VN1_HOST=198.51.100.30
     ENTRY_VN1_USER=root
     ENTRY_VN1_KEY=~/.ssh/id_ed25519
+    ENTRY_VN1_RELAY=sg              the relay it forwards to - required
 
    Check what got read:
 
@@ -637,13 +616,13 @@ Setting up an entry, start to finish.
 
     ./gpb entry deploy vn1
 
-   It uploads relay/deploy/setup-entry.sh, pings every relay gpb.conf declares FROM the entry,
-   forwards to the nearest, and installs iptables-persistent on Debian/Ubuntu so the rules survive
-   a reboot. The relay chosen is kept from then on; a later deploy only reports a nearer one.
-   ENTRY_VN1_RELAY=<relay name> picks one yourself.
+   It uploads relay/deploy/setup-entry.sh, forwards to ENTRY_VN1_RELAY, and installs
+   iptables-persistent on Debian/Ubuntu so the rules survive a reboot (the first deploy to a box
+   only). Nothing is measured from the entry: choose the relay by UDP, over many source ports, not
+   by ping - one ping sees one of several ECMP lanes and can be 20 ms off.
 
 4. Enter it on the licence server, as the deploy prints at the end: /admin/relays, the relay it
-   chose, Entries > Add entry. From their next profile fetch every client knows it, and uses it
+   it forwards to, Entries > Add entry. From their next profile fetch every client knows it, and uses it
    only when no relay beats that player's own connection to the game.
 
 EOF
@@ -1231,8 +1210,8 @@ case "$verb" in
             list)   entry_list ;;
             setup)  entry_setup ;;
             *)
-                printf '  entry deploy [name]    upload setup-entry.sh; the entry pings every relay\n'
-                printf '                         in gpb.conf and forwards to the nearest\n'
+                printf '  entry deploy [name]    upload setup-entry.sh; the entry forwards to the\n'
+                printf '                         relay ENTRY_<NAME>_RELAY names\n'
                 printf '  entry list             show the entries gpb.conf declares\n'
                 printf '  entry setup            first-time setup, explained\n'
                 ;;

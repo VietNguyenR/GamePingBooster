@@ -383,6 +383,7 @@ internal sealed class SpikeRecorder : IQualitySink
             if ((active || lobby) && _doors is { } doors)
             {
                 tick.CurrentDoor = context.EntryId ?? context.RelayId;
+                tick.CurrentLane = context.Tunnel?.LocalPort ?? 0;
                 tick.DoorRelayId = context.RelayId;
                 tick.DoorIds = doors.Ids;
                 tick.DoorSent = new bool[doors.Ids.Length];
@@ -853,6 +854,9 @@ internal sealed class SpikeRecorder : IQualitySink
 
     /// <summary>A move to another relay between matches, once its follow-up is over. See QualityFile.WriteRelayMove.</summary>
     public void WriteRelayMove(RelayMoveRecord move, QualityMeta meta) => _file.WriteRelayMove(move, meta);
+
+    /// <summary>A faster lane found by a lane hunt, and whether it was taken. See QualityFile.WriteLaneMove.</summary>
+    public void WriteLaneMove(LaneMoveRecord move, QualityMeta meta) => _file.WriteLaneMove(move, meta);
 
     /// <summary>One pass of the region planner. See QualityFile.WriteRegionPlan.</summary>
     public void WriteRegionPlan(RegionPlanRecord plan, QualityMeta meta) => _file.WriteRegionPlan(plan, meta);

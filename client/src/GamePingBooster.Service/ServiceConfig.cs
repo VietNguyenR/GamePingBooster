@@ -163,6 +163,18 @@ public sealed class ServiceConfig
     public string? EntrySwitching { get; set; }
 
     /// <summary>
+    /// Lane hunting for this machine: "off", "record" or "on" - trying other source ports into the way in use and moving
+    /// the tunnel to a clearly faster one (LanePick, TunnelEngine.HuntLaneIfDueAsync). An override: unset, it follows the
+    /// relay's entry switching setting from the profile, the same kind of move - a lane is changed only on a relay set
+    /// to "on" in /admin/relays. Anything unrecognised reads as "record".
+    ///
+    /// UNSET BY DEFAULT and never written back while unset, for the reason EntrySwitching gives.
+    /// </summary>
+    [JsonPropertyName("laneHunting")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? LaneHunting { get; set; }
+
+    /// <summary>
     /// Multi-tunnel for this machine: "off", "record" or "on" - see Core's RegionRouting and
     /// docs/MULTI-TUNNEL.md. An override: unset, the game's own setting from the profile decides, and without
     /// one, "off". Anything unrecognised reads as "record". A game whose landmarks are routed (CS2) is off

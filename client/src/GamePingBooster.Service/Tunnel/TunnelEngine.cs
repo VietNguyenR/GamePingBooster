@@ -1803,6 +1803,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         _moveFollow = null;
         _moveOffForGame = false;
         ResetRegionPlanning();
+        ResetLaneHunting();
 
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
         try
@@ -1853,6 +1854,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     // After the rescan, never beside it: both handshake other relays, and two handshakes to one
                     // relay fight over its session. Picks up whichever tunnel the rescan left.
                     if (_tunnel is { } current) await PlanRegionsIfDueAsync(current, ct).ConfigureAwait(false);
+                    // Last of the moves, on whichever tunnel and way in the ones above left.
+                    if (_tunnel is { } laned) await HuntLaneIfDueAsync(laned, ct).ConfigureAwait(false);
                     SuperviseOtherTunnels();
                     if (_tunnel is { } carrying) AnnounceMatchServer(carrying);
                     continue;

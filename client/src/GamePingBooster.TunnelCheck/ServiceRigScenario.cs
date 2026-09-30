@@ -296,6 +296,9 @@ internal static partial class Program
         pins = PinnedVia(wsl);
         Check($"Pinned with B's tunnel open: A, F, B and E ({string.Join(", ", pins)})",
             new[] { _a, _f, _b, _e }.All(x => pins.Contains(x.Address.ToString())));
+        var laneFirst = await run.WaitFor(@"Lane hunting on Rig A[^\n]*\[a\]: the lane in use [^\n]*", 45_000);
+        Check($"Lane hunting ran on home's way in after connect: {laneFirst?.Value.Trim()}",
+            laneFirst is not null && Regex.IsMatch(run.Seen, @"Lane hunting \(on, from the relay's entry switching\)"), Tail(run));
 
         // ------------------------------------------------ a match on kr, B's direct road goes bad
         Console.WriteLine();
@@ -354,6 +357,27 @@ internal static partial class Program
         var sgAfter = GameStats(stats, "sg");
         Check($"  sg lost nothing across home's move ({sgAfter.Sent - sgBefore.Sent} sent, {sgAfter.Lost - sgBefore.Lost} lost)",
             sgAfter.Lost == sgBefore.Lost && sgAfter.Sent > sgBefore.Sent, $"{sgAfter}");
+
+        // ------------------------------------------------ lanes on the entry home just moved onto
+        Console.WriteLine();
+        Console.WriteLine("Lanes on f (3 ports in 4 held 20 ms), home just moved onto it:");
+        RigShell("lanes f 20");
+        var laneHunt = await run.WaitFor(@"Lane hunting on [^\n]*\[f\]: the lane in use (\d+) ms[^\n]*", 45_000);
+        Check($"The service hunted f's lanes once home settled on it: {laneHunt?.Value.Trim()}", laneHunt is not null, Tail(run));
+        if (laneHunt is not null && int.Parse(laneHunt.Groups[1].Value) > 15)
+        {
+            var laneMoved = await run.WaitFor(@"Lane hunting: moved to the faster lane on [^\n]*\[f\] - (\d+) ms on it now", 15_000);
+            Check($"  it was on a slow lane, and moved to a fast one: {laneMoved?.Value.Trim()}",
+                laneMoved is not null && int.Parse(laneMoved.Groups[1].Value) < 10, Tail(run));
+        }
+        else if (laneHunt is not null)
+        {
+            Check("  it was already on the fast lane (one port in four) and stayed", Regex.IsMatch(laneHunt.Value, "staying"), laneHunt.Value);
+        }
+        await Task.Delay(4_000);
+        var sgLanes = GameStats(stats, "sg");
+        Check($"  sg lost nothing across the hunt and the move ({sgLanes.Sent - sgAfter.Sent} sent, {sgLanes.Lost - sgAfter.Lost} lost)",
+            sgLanes.Lost == sgAfter.Lost && sgLanes.Sent > sgAfter.Sent, $"{sgLanes}");
 
         // ------------------------------------------------ disconnect: every pin goes
         Console.WriteLine();

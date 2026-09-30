@@ -224,6 +224,20 @@ function Set-GpbVersion {
 function Stop-Everything {
     $stopped = @()
     $stubborn = @()
+
+    # An INSTALLED service is stopped through the Service Control Manager, never killed. The installer sets it to
+    # restart after a failure, so a killed one came back a minute later - and, with the dev build holding the pipe
+    # and port 53, died again, every minute, for as long as the dev build ran: 16 times in 15 minutes on 2026-09-30,
+    # each start removing the dev build's NRPT rules. Stopped this way it stays stopped until started or rebooted.
+    $installed = Get-Service -Name 'GamePingBooster' -ErrorAction SilentlyContinue
+    if ($installed -and $installed.Status -ne 'Stopped') {
+        try {
+            Stop-Service -Name 'GamePingBooster' -Force -ErrorAction Stop
+            $stopped += 'the installed GamePingBooster service'
+        }
+        catch { $stubborn += 'the installed GamePingBooster service' }
+    }
+
     foreach ($name in 'GamePingBooster', 'gpb-service') {
         $procs = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
         foreach ($p in $procs) {

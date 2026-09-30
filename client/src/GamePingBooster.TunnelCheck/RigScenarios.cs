@@ -68,6 +68,7 @@ internal static partial class Program
             ("Real relayd: a region's tunnel leaves a slow road mid-match", RigRegionTunnelLeavesASlowRoad),
             ("Real relayd: a region's tunnel leaves a lossy road mid-match", RigRegionTunnelLeavesALossyRoad),
             ("Real relayd: home still leaves its own slow road", RigHomeLeavesItsSlowRoad),
+            ("Real relayd: lane hunting through an entry, beside entry-switching probes", RigLaneHuntThroughAnEntry),
         };
         try
         {
@@ -422,5 +423,99 @@ internal static partial class Program
             string.Join("; ", decisions.Select(d => $"{d.From}->{d.To}")));
         var missing = Enumerable.Range(40, Math.Max(0, sent - 80)).Count(i => !back.ContainsKey(i));
         Check("  not one reply missing, across the move and the ones in flight at it", missing == 0, $"{missing} missing");
+    }
+
+    /// <summary>
+    /// Lane hunting against real relayd through a real DNAT entry: F's replies are held 20 ms unless the PC's port is a
+    /// multiple of four (rig.sh lanes). Home starts on a slow port; the hunt runs while the game sends and while entry
+    /// switching probes the other way in four times a second - relayd answers 20 Probes a second per session, and the
+    /// hunt must stay under that beside them. Then the move onto the socket measured, under the game's traffic.
+    /// </summary>
+    private static async Task RigLaneHuntThroughAnEntry()
+    {
+        using var rig = new Rig();
+        var home = await RigOpenAsync(rig, _f, 350);
+        home.StartPumping(rig.Device, rig.Cts.Token);
+        rig.Pump.SetHome(home);
+        RigShell("lanes f 20");
+        await Task.Delay(300);
+
+        // On a slow lane to begin with, whatever port Windows drew.
+        LaneSample? start = null;
+        for (var i = 0; i < 12; i++)
+        {
+            using var probe = await home.HuntLanesAsync(0, LanePick.Rounds, LanePick.MaxProbesPerSecond, rig.Cts.Token);
+            start = probe?.Current;
+            if (start?.MedianMs is > 15) break;
+            home.MoveTo(_f);
+            await Task.Delay(200);
+        }
+        Check($"Home through entry F starts on a slow lane: {start}", start?.MedianMs is > 15, $"{start}");
+        var connectsBefore = System.Text.RegularExpressions.Regex.Matches(RigShell("logs 100000"), @"client connected").Count;
+
+        var sent = 0;
+        var back = new ConcurrentDictionary<int, bool>();
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(rig.Cts.Token);
+        var sending = Task.Run(async () =>
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                rig.Device.FromWindows(RigPacket(home.InnerIp, RigSg, sent++));
+                while (rig.Device.ToWindows.TryDequeue(out var p)) if (p.Packet.Length >= 32 && Src(p.Packet) == RigSg) back.TryAdd(SequenceOf(p.Packet), true);
+                await Task.Delay(25);
+            }
+        });
+
+        // Entry switching's probes of the other way in (A direct), four a second, as the recorder sends them.
+        var doorAnswers = 0;
+        var doorSent = 0;
+        using var doors = new DoorProbes(home.SessionId, [new DoorProbes.Door("a", _a)], (_, _, _, _) => Interlocked.Increment(ref doorAnswers));
+        var probing = Task.Run(async () =>
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                doors.Send(0);
+                doorSent++;
+                await Task.Delay(250);
+            }
+        });
+
+        await Task.Delay(1000);
+        var rate = LanePick.ProbesPerSecond(1);
+        using var hunt = await home.HuntLanesAsync(LanePick.Candidates, LanePick.Rounds, rate, rig.Cts.Token);
+        var pick = hunt is null ? null : LanePick.Choose(hunt.Current, hunt.Candidates);
+        Check($"The hunt at {rate}/s sees both lanes: in use {hunt?.Current}, others " +
+              $"{string.Join(" ", hunt?.Candidates.Select(c => c.MedianMs is { } m ? m.ToString("F0") : "-") ?? [])}",
+            hunt is not null && hunt.Current.MedianMs is > 15 && hunt.Candidates.Any(c => c.MedianMs is < 10), pick?.Reason ?? "no hunt");
+        Check("  and relayd answered every Probe of it, beside entry switching's four a second",
+            hunt is not null && hunt.Current.Loss.Lost == 0 && hunt.Candidates.All(c => c.Loss.Lost == 0),
+            hunt is null ? "no hunt" : $"lost {hunt.Current.Loss.Lost} + {hunt.Candidates.Sum(c => c.Loss.Lost)}");
+
+        var fromMove = sent;
+        if (pick?.Slot is { } slot && hunt!.Take(slot) is { } socket)
+        {
+            var port = ((IPEndPoint)socket.LocalEndPoint!).Port;
+            home.MoveToLane(socket);
+            await Task.Delay(3000);
+            using var after = await home.HuntLanesAsync(0, LanePick.Rounds, rate, rig.Cts.Token);
+            Check($"Moved onto the socket measured (port {port}): the lane in use now {after?.Current}",
+                home.LocalPort == port && after?.Current.MedianMs is < 10 && after.Current.Loss.Lost == 0, $"{after?.Current}");
+        }
+        else
+        {
+            Check("A faster lane was picked", false, pick?.Reason ?? "no hunt");
+        }
+
+        await Task.Delay(1500);
+        stop.Cancel();
+        await Task.WhenAll(sending, probing);
+        await Task.Delay(300);
+        while (rig.Device.ToWindows.TryDequeue(out var p)) if (p.Packet.Length >= 32 && Src(p.Packet) == RigSg) back.TryAdd(SequenceOf(p.Packet), true);
+
+        var missing = Enumerable.Range(40, Math.Max(0, sent - 80)).Count(i => !back.ContainsKey(i));
+        Check($"  the game lost no reply across the hunt and the move ({sent} sent, {sent - fromMove} after the move)", missing == 0, $"{missing} missing");
+        var connectsAfter = System.Text.RegularExpressions.Regex.Matches(RigShell("logs 100000"), @"client connected").Count;
+        Check("  one session throughout: relayd saw no new connection", connectsAfter == connectsBefore, $"{connectsAfter - connectsBefore} new");
+        Check($"  entry switching's probes were answered throughout ({doorAnswers} of {doorSent})", doorAnswers >= doorSent - 2, $"{doorAnswers} of {doorSent}");
     }
 }

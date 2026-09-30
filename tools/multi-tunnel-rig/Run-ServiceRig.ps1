@@ -42,8 +42,21 @@ Note "started as $([Security.Principal.WindowsIdentity]::GetCurrent().Name)"
 
 $routeAdded = $false
 $moved = $false
+$restartInstalled = $false
 try {
     if (Test-Path $backup) { throw "$backup already exists - a previous rig run did not restore. Restore it by hand first." }
+
+    # An installed service is stopped through the Service Control Manager, never killed: the installer sets it to
+    # restart 5 s after a failure, and a killed one came back within seconds, took the pipe and read the rig's config -
+    # so the driver tested the INSTALLED build, not -ServiceExe (found 2026-09-30: no line of the change under test in
+    # the log, and the log opened before the rig's service had even been started). Started again at the end.
+    $installed = Get-Service -Name 'GamePingBooster' -ErrorAction SilentlyContinue
+    if ($installed -and $installed.Status -ne 'Stopped') {
+        Stop-Service -Name 'GamePingBooster' -Force
+        $installed.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+        $restartInstalled = $true
+        Note "stopped the installed GamePingBooster service through the SCM; it is started again at the end"
+    }
 
     Get-Process gpb-service -ErrorAction SilentlyContinue | ForEach-Object {
         Note "stopping the running service (pid $($_.Id), $($_.Path))"
@@ -94,6 +107,10 @@ finally {
         Remove-Item $data -Recurse -Force -ErrorAction SilentlyContinue
         Rename-Item -Path $backup -NewName (Split-Path $data -Leaf)
         Note "restored $data"
+    }
+    if ($restartInstalled) {
+        try { Start-Service -Name 'GamePingBooster' -ErrorAction Stop; Note 'started the installed service again' }
+        catch { Note "could not start the installed service again: $_" }
     }
     Note 'done'
 }

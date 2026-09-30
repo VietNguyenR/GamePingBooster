@@ -182,7 +182,7 @@ public sealed class DoorSwitchPolicy
     }
 
     private static bool SamePath(QualityTick a, QualityTick b) =>
-        string.Equals(a.CurrentDoor, b.CurrentDoor, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(a.CurrentDoor, b.CurrentDoor, StringComparison.OrdinalIgnoreCase) && a.CurrentLane == b.CurrentLane &&
         (ReferenceEquals(a.DoorIds, b.DoorIds) ||
          (a.DoorIds is not null && b.DoorIds is not null && a.DoorIds.SequenceEqual(b.DoorIds)));
 

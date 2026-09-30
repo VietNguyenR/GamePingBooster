@@ -58,6 +58,12 @@ internal sealed class FakeRelay : IDisposable
     /// </summary>
     public double[] DoorDelayMs { get; }
 
+    /// <summary>
+    /// Extra time before a Pong or a Probe reply, by the port the client sent FROM: an ISP spreading flows over
+    /// parallel links by a hash of the ports, each link its own round trip (LanePick, measured 2026-09-30). Null adds none.
+    /// </summary>
+    public volatile Func<int, double>? LaneDelayMs;
+
     public long Probes;
     public long Disconnects;
     public long Handshakes;
@@ -307,7 +313,7 @@ internal sealed class FakeRelay : IDisposable
         var reply = (byte[])pkt.Clone();
         reply[0] = (byte)((GpbProtocol.Version << 4) | replyType);
         var door = _sockets.IndexOf(socket);
-        var delay = door >= 0 ? Volatile.Read(ref DoorDelayMs[door]) : 0;
+        var delay = (door >= 0 ? Volatile.Read(ref DoorDelayMs[door]) : 0) + (LaneDelayMs?.Invoke(from.Port) ?? 0);
         if (delay <= 0)
         {
             socket.Send(reply, reply.Length, from);

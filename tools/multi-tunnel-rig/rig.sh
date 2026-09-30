@@ -4,6 +4,7 @@
 #
 #   wsl -d Ubuntu -u root -- bash tools/multi-tunnel-rig/rig.sh up        start everything, print the addresses
 #   wsl -d Ubuntu -u root -- bash tools/multi-tunnel-rig/rig.sh degrade <way> <delay-ms> [loss-%]
+#   wsl -d Ubuntu -u root -- bash tools/multi-tunnel-rig/rig.sh lanes <way> <delay-ms>   ECMP lanes on one way
 #   wsl -d Ubuntu -u root -- bash tools/multi-tunnel-rig/rig.sh heal       every way back to normal
 #   wsl -d Ubuntu -u root -- bash tools/multi-tunnel-rig/rig.sh status
 #   wsl -d Ubuntu -u root -- bash tools/multi-tunnel-rig/rig.sh down
@@ -130,6 +131,29 @@ degrade() {
     echo "way $way: +${delay} ms, ${loss}% lost (shaped: ${ways[*]})"
 }
 
+# ECMP lanes on one way, as a VN datacentre's uplink has them (LanePick, measured 2026-09-30): replies down the way
+# are held <delay-ms> when the PC's port - their destination port - is not a multiple of four, so one port in four
+# is the fast link. Filtered on the way's source address AND the destination port's low two bits. Replaces all
+# other shaping; `heal` removes it.
+lanes() {
+    addresses
+    local way="$1" delay="${2:-20}" src
+    case "$way" in
+        a) src="$A" ;; b) src="$B" ;; e) src="$E" ;; f) src="$F" ;;
+        *) echo "way must be a, b, e or f" >&2; exit 2 ;;
+    esac
+    rm -f "$state"/shaped-*
+    tc qdisc del dev "$dev" root 2>/dev/null || true
+    tc qdisc add dev "$dev" root handle 1: prio bands 4 priomap 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+    tc qdisc add dev "$dev" parent 1:4 handle 40: netem delay "${delay}ms"
+    local bits
+    for bits in 1 2 3; do
+        # u16 at 22: the UDP destination port, behind a 20-byte IPv4 header.
+        tc filter add dev "$dev" protocol ip parent 1:0 prio 1 u32             match ip src "$src/32" match ip protocol 17 0xff match u16 "$bits" 0x0003 at 22 flowid 1:4
+    done
+    echo "way $way: lanes - ports with (port & 3) != 0 held ${delay} ms, the rest at once"
+}
+
 status() {
     addresses
     echo "A=$A:51820 (home relay)  F=$F:51820 (entry -> A)"
@@ -158,8 +182,9 @@ case "${1:-status}" in
     down) down ;;
     heal) heal ;;
     degrade) shift; degrade "$@" ;;
+    lanes) shift; lanes "$@" ;;
     status) status ;;
     logs) shift; logs "$@" ;;
     ip) echo "$dev $(base_ip | cut -d/ -f1)" ;;
-    *) echo "usage: rig.sh up|down|heal|degrade <a|b|e|f> <delay-ms> [loss-%]|status|logs [n]" >&2; exit 2 ;;
+    *) echo "usage: rig.sh up|down|heal|degrade <a|b|e|f> <delay-ms> [loss-%]|lanes <a|b|e|f> <delay-ms>|status|logs [n]" >&2; exit 2 ;;
 esac

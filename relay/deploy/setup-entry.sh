@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
 # Make this VPS an ENTRY: UDP arriving on one port is forwarded, untouched, to a relay.
 #
-# Normally run by `./gpb entry deploy <name>`, which uploads this file and passes every relay
-# gpb.conf declares. Given several relays it pings each one FROM HERE and forwards to the nearest -
-# the second half of every path through this entry is exactly that hop. By hand, as root:
+# Normally run by `./gpb entry deploy <name>`, which uploads this file and passes the relay
+# ENTRY_<NAME>_RELAY names in gpb.conf. By hand, as root:
 #
-#   setup-entry.sh [--listen PORT] [--relay NAME] [--wan IFACE] NAME=IP:PORT [NAME=IP:PORT ...]
+#   setup-entry.sh [--listen PORT] --relay NAME [--wan IFACE] NAME=IP:PORT [NAME=IP:PORT ...]
+#
+# The relay is always named, never measured from here. A ping from the entry picks one ECMP lane of
+# the several a VN datacentre's uplink spreads UDP over - 24, 33 or 41 ms from the same box to the
+# same relay, fixed per source port - so it could be off by 20 ms either way, and it cost ~40 s a
+# deploy. The client measures every entry end to end, on its own flow, and that is what decides.
 #
 # No relayd runs here, and nothing is decrypted, rewritten or re-signed. The client handshakes
 # THROUGH this machine with the relay behind it and checks that relay's own signature, so a
 # forwarder pointed at the wrong place produces a failed handshake - never a trusted wrong relay.
 #
-# THE CHOICE IS STICKY. The licence server lists this entry under ONE relay, and a client checks
-# that relay's signature through it: forward somewhere else and every handshake through the entry
-# fails until the entry is moved in /admin/relays as well. So the relay chosen is remembered, in
-# /etc/gpb/entry-<port>.relay, and a later run only REPORTS a nearer one. It moves by itself only
-# when its relay has stopped answering or is no longer declared - an entry pointing at nothing is
-# no better off - and it then says so in a way that is hard to miss. --relay forces one.
+# The licence server lists this entry under ONE relay, and a client checks that relay's signature
+# through it: forward somewhere else and every handshake through the entry fails until the entry is
+# moved in /admin/relays as well. So the relay is remembered in /etc/gpb/entry-<port>.relay, and a
+# run that changes it says so, in a way that is hard to miss.
 #
 # Why an entry exists at all: a line that leaves the country the long way round can still reach a
 # datacentre at home in a few milliseconds, and that datacentre can reach the relay by a cable the
@@ -24,28 +26,12 @@
 # until it is added as an entry of its relay on the licence server; from then on every client is
 # told about it, and measures it only when no relay beats that player's own connection.
 #
-# Exit status: 0 done, 1 bad input or setup failure, 2 no relay answered (nothing was changed),
-# 3 --relay names a relay that was not given. Never 90 or 91 - ./gpb reserves those for sudo.
+# Exit status: 0 done, 1 bad input or setup failure, 3 --relay missing or names a relay that was
+# not given (nothing was changed). Never 90 or 91 - ./gpb reserves those for sudo.
 
 set -euo pipefail
 
-PINGS=20
-
 die() { echo "$*" >&2; exit 1; }
-
-# "avg loss" from ping's summary, avg "-" when nothing came back. Both the iputils and the busybox
-# wording, since a small VPS image can carry either.
-parse_ping() {
-  local out loss avg
-  out=$(cat)
-  loss=$(printf '%s\n' "$out" | sed -n 's/.* \([0-9.]*\)% packet loss.*/\1/p' | head -1)
-  avg=$(printf '%s\n' "$out" | sed -n 's#^\(rtt\|round-trip\) [^=]*= [0-9.]*/\([0-9.]*\)/.*#\2#p' | head -1)
-  printf '%s %s\n' "${avg:--}" "${loss:-100}"
-}
-
-measure() {
-  ping -n -c "$PINGS" -i 0.2 -W 1 -q "$1" 2>/dev/null | parse_ping || true
-}
 
 # Quiet, non-interactive, with one retry after refreshing the package lists - a fresh VPS image
 # often has none. Returns non-zero on a system without apt.
@@ -56,44 +42,15 @@ apt_install() {
   DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$@" >/dev/null 2>&1
 }
 
-# Which relay to forward to.
+# The endpoint of the relay named, from the NAME=IP:PORT list. Prints nothing when it is not there.
 #
-#   choose_relay <table> <pinned name> <current endpoint>
-#
-# The table is one "name endpoint avg loss" per line, avg "-" for no reply. A relay counts as
-# answering when it replied at all and lost less than half. Prints "name endpoint why", why being
-# pinned | kept | first | moved-unreachable | moved-undeclared, and a second line
-# "nearer name avg" when the relay kept is clearly further than the nearest - by max(5 ms, 10%),
-# the same margin the client uses to decide a path is worth switching to. Returns 2 when nothing
-# answers and 3 when the pinned relay is not in the table.
-choose_relay() {
-  printf '%s\n' "$1" | awk -v pinned="$2" -v current="$3" '
-    NF < 4 { next }
-    {
-      name[NR] = $1; ep[NR] = $2; avg[NR] = $3
-      ok[NR] = ($3 != "-" && $4 + 0 < 50)
-      if (ok[NR] && (best == "" || $3 + 0 < avg[best] + 0)) best = NR
-      if ($1 == pinned) pin = NR
-      if ($2 == current) cur = NR
-    }
-    END {
-      if (pinned != "") {
-        if (pin == "") exit 3
-        print name[pin], ep[pin], "pinned"
-        exit 0
-      }
-      if (current != "" && cur != "" && ok[cur]) {
-        print name[cur], ep[cur], "kept"
-        margin = avg[cur] * 0.1
-        if (margin < 5) margin = 5
-        if (best != cur && avg[best] + 0 < avg[cur] - margin) print "nearer", name[best], avg[best]
-        exit 0
-      }
-      if (best == "") exit 2
-      why = "first"
-      if (current != "") why = (cur == "" ? "moved-undeclared" : "moved-unreachable")
-      print name[best], ep[best], why
-    }'
+#   relay_endpoint_of <name> NAME=IP:PORT [...]
+relay_endpoint_of() {
+  local want=$1 c
+  shift
+  for c in "$@"; do
+    if [[ "${c%%=*}" == "$want" ]]; then printf '%s\n' "${c#*=}"; return 0; fi
+  done
 }
 
 # ------------------------------------------------------------------------------------ forwarding
@@ -224,7 +181,7 @@ main() {
 
   [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )) || die "--listen must be a port, got '$port'."
   [[ ${#candidates[@]} -gt 0 ]] ||
-    die "Usage: setup-entry.sh [--listen PORT] [--relay NAME] [--wan IFACE] NAME=IP:PORT [NAME=IP:PORT ...]"
+    die "Usage: setup-entry.sh [--listen PORT] --relay NAME [--wan IFACE] NAME=IP:PORT [NAME=IP:PORT ...]"
   local c
   for c in "${candidates[@]}"; do
     [[ "$c" =~ ^[a-z0-9_-]+=([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+$ ]] || die "'$c' is not NAME=IPv4:PORT."
@@ -237,49 +194,18 @@ main() {
   local state="/etc/gpb/entry-${port}.relay" previous_name="" previous_ep=""
   if [[ -f "$state" ]]; then read -r previous_name previous_ep < "$state" || true; fi
 
-  echo "==> From this machine to each relay ($PINGS pings each)"
-  local table="" name ep avg loss
-  for c in "${candidates[@]}"; do
-    name=${c%%=*}
-    ep=${c#*=}
-    read -r avg loss < <(measure "${ep%:*}")
-    table+="$name $ep $avg $loss"$'\n'
-    if [[ "$avg" == "-" ]]; then
-      printf '    %-12s %-22s no reply\n' "$name" "$ep"
-    else
-      printf '    %-12s %-22s %6s ms  %s%% loss\n' "$name" "$ep" "$avg" "$loss"
-    fi
-  done
-
-  local result rc=0
-  result=$(choose_relay "$table" "$pinned" "$previous_ep") || rc=$?
-  case "$rc" in
-    0) ;;
-    2) echo "!! No relay answered from here. Nothing was changed." >&2; exit 2 ;;
-    3) echo "!! --relay $pinned is not one of the relays given. Nothing was changed." >&2; exit 3 ;;
-    *) die "choosing a relay failed ($rc)" ;;
-  esac
-
-  local why nearer
-  read -r name ep why <<< "$(printf '%s\n' "$result" | head -1)"
-  nearer=$(printf '%s\n' "$result" | sed -n 's/^nearer //p')
+  [[ -n "$pinned" ]] || { echo "!! --relay NAME is required: an entry forwards to the relay it is told to." >&2; exit 3; }
+  local name=$pinned ep why=pinned
+  ep=$(relay_endpoint_of "$pinned" "${candidates[@]}")
+  [[ -n "$ep" ]] || { echo "!! --relay $pinned is not one of the relays given. Nothing was changed." >&2; exit 3; }
 
   local changed=0
   [[ -n "$previous_ep" && "$previous_ep" != "$ep" ]] && changed=1
 
-  echo
-  case "$why" in
-    first) echo "==> Forwarding to $name, the nearest from here." ;;
-    pinned) echo "==> Forwarding to $name, as pinned." ;;
-    kept) echo "==> Keeping $name, which this entry already forwards to." ;;
-    moved-unreachable) echo "!! $previous_name stopped answering from here, so this entry now forwards to $name." ;;
-    moved-undeclared) echo "!! $previous_name is no longer declared, so this entry now forwards to $name." ;;
-  esac
-  if [[ -n "$nearer" ]]; then
-    read -r n_name n_avg <<< "$nearer"
-    echo "    $n_name is nearer from here ($n_avg ms). Not moved by itself: the licence server lists this"
-    echo "    entry under $name. To move it, pin ENTRY_<NAME>_RELAY=$n_name in gpb.conf, deploy again,"
-    echo "    and move the entry under $n_name in /admin/relays at the same time."
+  if [[ "$changed" == 1 ]]; then
+    echo "!! This entry forwarded to ${previous_name:-$previous_ep}; it now forwards to $name ($ep)."
+  else
+    echo "==> Forwarding UDP $port to $name ($ep)."
   fi
   echo
 
@@ -299,7 +225,7 @@ main() {
   echo "GPB_ENTRY_RESULT relay=$name endpoint=$ep listen=$port why=$why previous=${previous_name:--}"
 }
 
-# Sourced by tools/test-entry-deploy.sh with GPB_ENTRY_LIB=1, to test the choice without a VPS.
+# Sourced by tools/test-entry-deploy.sh with GPB_ENTRY_LIB=1, to test it without a VPS.
 if [[ "${GPB_ENTRY_LIB:-}" != 1 ]]; then
   main "$@"
 fi

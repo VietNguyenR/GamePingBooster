@@ -38,6 +38,24 @@ internal sealed record RelayMoveRecord(
     string FollowEnded);
 
 /// <summary>
+/// A lane hunt that found a faster lane into the relay, for <see cref="QualityFile.WriteLaneMove"/> - see LanePick.
+/// <paramref name="Door"/> is the way in, the relay's id or an entry's; the lanes are all through it. <paramref name="After"/>
+/// is the lane taken, measured again right after the move - null when no move was made.
+/// </summary>
+internal sealed record LaneMoveRecord(
+    DateTimeOffset AtUtc,
+    string Door,
+    bool MovesEnabled,
+    bool Moved,
+    string Reason,
+    double MeasureSeconds,
+    int ProbesPerSecond,
+    DoorStats Current,
+    DoorStats Best,
+    DoorStats? After,
+    IReadOnlyList<double?> LaneMedians);
+
+/// <summary>
 /// One pass of the region planner, for <see cref="QualityFile.WriteRegionPlan"/>. <paramref name="Mode"/> is the
 /// resolved mode ("record" or "on") and <paramref name="Acted"/> whether the plan was applied - false for every
 /// record until multi-tunnel is wired. <paramref name="Stopped"/> says why a pass is incomplete, null when complete.
@@ -330,6 +348,57 @@ internal sealed class QualityFile(Action<string> log)
         else w.WriteNull("stillSendingAfter90s");
         w.WriteString("followEnded", move.FollowEnded);
         w.WriteEndObject();
+
+        w.WriteEndObject();
+    });
+
+    /// <summary>
+    /// A faster lane into the relay, found by a lane hunt (LanePick), and whether the tunnel took it. Written as a
+    /// <c>"switch"</c> with <c>"reason":"lane"</c> so it lands on the admin page beside entry switching's moves with no
+    /// change there: <c>from</c> is the way in, <c>to</c> the same way with <c>:lane</c> after it - the licence server
+    /// refuses a switch whose two codes are equal, and a lane is not a way. <c>before.from</c> is the lane the tunnel was
+    /// on, <c>before.to</c> the lane found, <c>after.to</c> the lane taken measured again once the tunnel was on it.
+    /// <c>lanes</c> is every lane's median, the one in use first, null where nothing answered.
+    /// </summary>
+    public void WriteLaneMove(LaneMoveRecord move, QualityMeta meta) => Append((w, id) =>
+    {
+        w.WriteStartObject();
+        w.WriteString("id", id);
+        w.WriteString("type", "switch");
+        w.WriteNumber("schema", Schema);
+        w.WriteString("utc", move.AtUtc);
+        WriteMeta(w, meta);
+
+        w.WriteString("mode", move.MovesEnabled ? "on" : "record");
+        w.WriteBoolean("requested", move.MovesEnabled);
+        w.WriteBoolean("moved", move.Moved);
+        w.WriteString("from", move.Door);
+        w.WriteString("to", move.Door + ":lane");
+        w.WriteString("reason", "lane");
+        w.WriteString("why", move.Reason);
+        w.WriteNumber("windowSeconds", Round(move.MeasureSeconds));
+        w.WriteNumber("worseShare", 0);
+        w.WriteNumber("probesPerSecond", move.ProbesPerSecond);
+
+        w.WriteStartObject("before");
+        DoorFigures(w, "from", move.Current);
+        DoorFigures(w, "to", move.Best);
+        w.WriteEndObject();
+
+        if (move.After is { } after)
+        {
+            w.WriteStartObject("after");
+            DoorFigures(w, "to", after);
+            w.WriteEndObject();
+        }
+
+        w.WriteStartArray("lanes");
+        foreach (var ms in move.LaneMedians)
+        {
+            if (ms is { } v) w.WriteNumberValue(Math.Round(v, 1));
+            else w.WriteNullValue();
+        }
+        w.WriteEndArray();
 
         w.WriteEndObject();
     });

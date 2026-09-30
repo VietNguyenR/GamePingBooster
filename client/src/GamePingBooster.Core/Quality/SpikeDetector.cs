@@ -87,6 +87,14 @@ public sealed class QualityTick(long index, DateTimeOffset startUtc)
     public string? CurrentDoor { get; set; }
 
     /// <summary>
+    /// The lane of that way - the source port the tunnel sent from (LanePick) - or 0 when not known. A lane hunt moves
+    /// the tunnel to another port on the SAME way, and the ISP carries each port by a link of its own, so what the
+    /// switch policy held about the old lane is no evidence about the new one: a different lane starts its window again,
+    /// exactly as a different way does.
+    /// </summary>
+    public int CurrentLane { get; set; }
+
+    /// <summary>
     /// The relay those ways lead to, set with <see cref="CurrentDoor"/>. Home's relay, or - with region routing in force
     /// - the other relay the match is on: each relay's ways are judged by a switch policy of their own, so a decision
     /// about one tunnel's road never waits on, or is undone by, another's (2026-09-30).

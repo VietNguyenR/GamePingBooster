@@ -56,6 +56,8 @@ internal static partial class Program
             ("Region plan echoes, every region at once", PlanEchoesAtOnce),
             ("Relay loss", RelayLossIsMeasured),
             ("A region's tunnel moves its way in, like home", ARegionsTunnelMovesItsWayInLikeHome),
+            ("Lanes: the fast port is found and taken under load", ALaneHuntFindsTheFastPortAndMovesOntoIt),
+            ("Lanes: a line without lanes is left alone", ALineWithoutLanesIsLeftAlone),
         };
 
         foreach (var (title, run) in scenarios)

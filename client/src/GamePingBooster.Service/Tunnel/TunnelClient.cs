@@ -18,7 +18,7 @@ namespace GamePingBooster.Service.Tunnel;
 /// packets are latency sensitive, and the thread pool can add milliseconds of delay when the machine
 /// is under load - which is exactly when someone is playing a game.
 /// </summary>
-internal sealed class TunnelClient : IDisposable
+internal sealed partial class TunnelClient : IDisposable
 {
     /// <summary>Where the tunnel sends: the relay, or an entry in front of it. Changes only in <see cref="MoveTo"/>.</summary>
     private IPEndPoint _relayEndpoint;
@@ -1047,6 +1047,16 @@ internal sealed class TunnelClient : IDisposable
                             _qualitySink?.OnPong(_lastRttMs, Stopwatch.GetTimestamp());
                         }
                         break;
+
+                    case GpbProtocol.TypeProbeReply:
+                        // Only a lane hunt sends Probes down the tunnel's own socket - see HuntLanesAsync. Stamped here,
+                        // on this thread, as the pongs are: the lane in use is timed the way the game's packets travel.
+                        if (_laneReplies is { } lane &&
+                            GpbProtocol.TryReadProbeReply(buffer.AsSpan(0, n), out var rsid, out var rstamp) && rsid == _sessionId)
+                        {
+                            lane.Enqueue(((long)rstamp, Stopwatch.GetTimestamp()));
+                        }
+                        break;
                 }
             }
             catch (Exception ex) when (from is not null && !ReferenceEquals(from, current) &&
@@ -1269,6 +1279,42 @@ internal sealed class TunnelClient : IDisposable
             throw;
         }
 
+        Swap(fresh, endpoint);
+    }
+
+    /// <summary>
+    /// Moves this tunnel onto <paramref name="socket"/>, one of a lane hunt's sockets - the same address as now, another
+    /// source port, and so another of the ISP's parallel links (see LanePick). Everything <see cref="MoveTo"/> says holds:
+    /// same session, same relay, the old socket drained for a second, a Ping at once to turn the return path round.
+    ///
+    /// The point is that it is THIS socket, the one measured, and not a fresh one: a fresh socket is a fresh port, and a
+    /// fresh port is a fresh draw of the link. MoveTo draws again on every move between ways in - which is why a lane hunt
+    /// follows every one of those too.
+    /// </summary>
+    internal void MoveToLane(Socket socket)
+    {
+        if (_sessionId == 0) throw new InvalidOperationException("The tunnel has no session to move.");
+        Swap(socket, _relayEndpoint);
+    }
+
+    /// <summary>The local port the tunnel sends from right now - its lane. 0 before the handshake.</summary>
+    internal int LocalPort
+    {
+        get
+        {
+            try
+            {
+                return (_socket?.LocalEndPoint as IPEndPoint)?.Port ?? 0;
+            }
+            catch (ObjectDisposedException)
+            {
+                return 0;
+            }
+        }
+    }
+
+    private void Swap(Socket fresh, IPEndPoint endpoint)
+    {
         var old = _socket;
         _socket = fresh;
         _relayEndpoint = endpoint;
