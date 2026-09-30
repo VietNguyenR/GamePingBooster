@@ -8,9 +8,15 @@ using GamePingBooster.Core.Net;
 namespace GamePingBooster.App.Services;
 
 /// <summary>
-/// Looks for a newer release on GitHub now and then, and says so. It never downloads or installs
-/// anything itself: finding one puts a line in the main window's footer, and UpdateInstaller does
-/// the rest only when the person presses it.
+/// Looks for a newer release on GitHub the moment the app opens and every six hours after, and says
+/// so. It never downloads or installs anything itself: finding one puts a line in the main window's
+/// footer, and the check made at start-up also opens the update window (MainWindow.OfferUpdate) -
+/// every time the app is opened until it is updated. UpdateInstaller does the rest only when the
+/// person presses Update.
+///
+/// Until 2026-09-30 a new release was announced only by that footer line, grey and 11 px, and after
+/// a week 20-30% of players were still on the old version (0.3.3-0.3.5, from the match records);
+/// only the releases the licence server made compulsory reached everybody.
 ///
 /// Why GitHub's API rather than something on the licence server: the release page IS where the
 /// installer lives - ./gpb release publishes it there - so asking anything else would be a second
@@ -33,17 +39,24 @@ public sealed class UpdateChecker : IAsyncDisposable
     /// </summary>
     public static readonly TimeSpan Interval = TimeSpan.FromHours(6);
 
-    /// <summary>After start-up has settled, so the check never competes with the first connect.</summary>
-    public static readonly TimeSpan FirstDelay = TimeSpan.FromSeconds(20);
+    /// <summary>
+    /// None: the update window is offered as the app opens, while the person is looking at it. It
+    /// used to wait twenty seconds so as not to compete with the first connect, but connecting waits
+    /// for a button press, and one small request does not slow it.
+    /// </summary>
+    public static readonly TimeSpan FirstDelay = TimeSpan.Zero;
 
     private static readonly string ReleasesPage = $"https://github.com/{Repository}/releases/latest";
 
-    private readonly Action<AvailableUpdate> _onUpdate;
+    private readonly Action<AvailableUpdate, bool> _onUpdate;
     private readonly CancellationTokenSource _cts = new();
     private Task? _loop;
 
-    /// <param name="onUpdate">Called from a background thread when a newer release is found.</param>
-    public UpdateChecker(Action<AvailableUpdate> onUpdate) => _onUpdate = onUpdate;
+    /// <param name="onUpdate">
+    /// Called from a background thread when a newer release is found, with true when it was found by the
+    /// check made as the app opened - the one that may open the update window by itself.
+    /// </param>
+    public UpdateChecker(Action<AvailableUpdate, bool> onUpdate) => _onUpdate = onUpdate;
 
     public void Start() => _loop ??= Task.Run(() => LoopAsync(_cts.Token));
 
@@ -56,7 +69,7 @@ public sealed class UpdateChecker : IAsyncDisposable
         try
         {
             var update = await CheckAsync(CurrentVersion(), _cts.Token).ConfigureAwait(false);
-            if (update is not null) _onUpdate(update);
+            if (update is not null) _onUpdate(update, false);
         }
         catch (Exception)
         {
@@ -69,12 +82,13 @@ public sealed class UpdateChecker : IAsyncDisposable
         try
         {
             await Task.Delay(FirstDelay, ct).ConfigureAwait(false);
+            var atStart = true;
             while (!ct.IsCancellationRequested)
             {
                 try
                 {
                     var update = await CheckAsync(CurrentVersion(), ct).ConfigureAwait(false);
-                    if (update is not null) _onUpdate(update);
+                    if (update is not null) _onUpdate(update, atStart);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
@@ -84,6 +98,7 @@ public sealed class UpdateChecker : IAsyncDisposable
                 {
                     // See the class summary: no update to announce, and nothing worth saying.
                 }
+                atStart = false;
 
                 await Task.Delay(Interval, ct).ConfigureAwait(false);
             }
@@ -97,6 +112,16 @@ public sealed class UpdateChecker : IAsyncDisposable
     /// <summary>
     /// The newest published release when it is newer than <paramref name="currentVersion"/>,
     /// otherwise null. Throws on network failure; the loop is what makes that quiet.
+    ///
+    /// Two requests, of which the everyday one costs nothing. GitHub's API answers 60 unauthenticated
+    /// calls an hour per address - an internet cafe is one address - and counts a conditional 304 as a
+    /// call (measured 2026-09-30: remaining 59, 58, 57 for three of them). The release PAGE is not the
+    /// API and is not counted: github.com/.../releases/latest redirects to the latest release's tag, and
+    /// that redirect alone says whether there is anything newer. So every opening of the app reads the
+    /// redirect, and only a version newer than this one is looked up in the API - for its setup .exe and
+    /// the SHA-256 GitHub computed for it - once per release per machine, kept in <see cref="CachePath"/>.
+    /// With the API refusing (the cafe on release day), the update is still offered, without an
+    /// installer: Update then opens the release page, and the next opening tries the API again.
     /// </summary>
     public static async Task<AvailableUpdate?> CheckAsync(string? currentVersion, CancellationToken ct)
     {
@@ -109,34 +134,99 @@ public sealed class UpdateChecker : IAsyncDisposable
             return null;
         }
 
-        using var http = new HttpClient(new SocketsHttpHandler { ConnectCallback = HappyEyeballs.ConnectCallback },
+        using var http = new HttpClient(
+            new SocketsHttpHandler { ConnectCallback = HappyEyeballs.ConnectCallback, AllowAutoRedirect = false },
             disposeHandler: true)
         {
             Timeout = TimeSpan.FromSeconds(15),
         };
-        // GitHub's API refuses requests without a User-Agent.
+        // GitHub refuses requests without a User-Agent.
         http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("GamePingBooster", currentVersion));
-        http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
 
-        using var response = await http
-            .GetAsync($"https://api.github.com/repos/{Repository}/releases/latest", ct)
-            .ConfigureAwait(false);
+        var cached = ReadCache();
+        var latest = await LatestTagAsync(http, ct).ConfigureAwait(false) ?? TagOf(cached);
+        if (latest is null || !IsNewer(latest, currentVersion!)) return null;
 
-        // 404 is "no release published yet", which is not a failure.
-        if (!response.IsSuccessStatusCode) return null;
+        // Newer. Its installer and digest: kept from an earlier look at this same release, or asked for now.
+        var release = TagOf(cached) == latest ? Parse(cached?.Body) : null;
+        if (release is null)
+        {
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/repos/{Repository}/releases/latest");
+                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+                using var response = await http.SendAsync(request, ct).ConfigureAwait(false);
+                if (response.IsSuccessStatusCode)
+                {
+                    var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                    release = Parse(body);
+                    if (release is not null) WriteCache(new UpdateCache { Body = body });
+                }
+            }
+            catch (HttpRequestException)
+            {
+                // As for a refusal: offered without an installer this time.
+            }
+        }
 
-        var release = await response.Content
-            .ReadFromJsonAsync(UpdateJsonContext.Default.GitHubRelease, ct)
-            .ConfigureAwait(false);
-        if (release is null || release.Draft || release.Prerelease) return null;
-
-        var latest = (release.TagName ?? "").Trim().TrimStart('v', 'V');
-        if (!IsNewer(latest, currentVersion!)) return null;
-
-        var installer = FindInstaller(release, latest);
-        return new AvailableUpdate(latest, SafeReleaseUrl(release.HtmlUrl),
-            installer?.Url, installer?.Sha256, installer?.Size);
+        if (release is not null && (release.Draft || release.Prerelease)) return null;
+        if (release is not null && Clean(release.TagName) == latest)
+        {
+            var installer = FindInstaller(release, latest);
+            return new AvailableUpdate(latest, SafeReleaseUrl(release.HtmlUrl), installer?.Url, installer?.Sha256, installer?.Size);
+        }
+        return new AvailableUpdate(latest, $"https://github.com/{Repository}/releases/tag/v{latest}");
     }
+
+    /// <summary>
+    /// The latest release's version, from where github.com/.../releases/latest redirects - the page GitHub
+    /// itself sends people to, which skips drafts and pre-releases as the API does. Null when it cannot be
+    /// read: no answer, no release yet, or a redirect somewhere other than one of this repository's tags.
+    /// </summary>
+    private static async Task<string?> LatestTagAsync(HttpClient http, CancellationToken ct)
+    {
+        try
+        {
+            using var response = await http.GetAsync(ReleasesPage, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            return TagFromLocation(response.Headers.Location);
+        }
+        catch (HttpRequestException)
+        {
+            return null;
+        }
+        catch (TaskCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return null; // Timed out.
+        }
+    }
+
+    /// <summary>The version in a redirect to this repository's release tag, e.g. .../releases/tag/v0.3.7 -> 0.3.7.</summary>
+    internal static string? TagFromLocation(Uri? location)
+    {
+        if (location is null) return null;
+        var text = location.IsAbsoluteUri ? location.AbsoluteUri : "https://github.com" + location.OriginalString;
+        var prefix = $"https://github.com/{Repository}/releases/tag/";
+        if (!text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return null;
+        var tag = Clean(Uri.UnescapeDataString(text[prefix.Length..]));
+        return TryParseVersion(tag, out _) ? tag : null;
+    }
+
+    private static string Clean(string? tag) => (tag ?? "").Trim().TrimStart('v', 'V');
+
+    private static GitHubRelease? Parse(string? body)
+    {
+        if (body is null) return null;
+        try
+        {
+            return System.Text.Json.JsonSerializer.Deserialize(body, UpdateJsonContext.Default.GitHubRelease);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static string? TagOf(UpdateCache? cache) => Parse(cache?.Body) is { } release ? Clean(release.TagName) : null;
 
     /// <summary>
     /// The setup .exe of this release and its SHA-256, or null when either is missing or not what
@@ -178,6 +268,37 @@ public sealed class UpdateChecker : IAsyncDisposable
         return htmlUrl is not null && htmlUrl.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
             ? htmlUrl
             : ReleasesPage;
+    }
+
+    /// <summary>Where the last answer from GitHub is kept, per Windows user.</summary>
+    internal static string CachePath =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GamePingBooster", "update-check.json");
+
+    private static UpdateCache? ReadCache()
+    {
+        try
+        {
+            return File.Exists(CachePath)
+                ? System.Text.Json.JsonSerializer.Deserialize(File.ReadAllText(CachePath), UpdateJsonContext.Default.UpdateCache)
+                : null;
+        }
+        catch (Exception)
+        {
+            return null; // Unreadable or damaged: asked for afresh, and rewritten.
+        }
+    }
+
+    private static void WriteCache(UpdateCache cache)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(CachePath)!);
+            File.WriteAllText(CachePath, System.Text.Json.JsonSerializer.Serialize(cache, UpdateJsonContext.Default.UpdateCache));
+        }
+        catch (Exception)
+        {
+            // Only a cache: the next newer version is asked for again.
+        }
     }
 
     /// <summary>What this build is, as Directory.Build.props stamped it from VERSION.</summary>
@@ -281,6 +402,13 @@ public sealed class GitHubAsset
     [JsonPropertyName("digest")] public string? Digest { get; set; }
 }
 
+/// <summary>The API's answer for the last newer release looked up, as it came. See UpdateChecker.CheckAsync.</summary>
+public sealed class UpdateCache
+{
+    [JsonPropertyName("body")] public string? Body { get; set; }
+}
+
 /// <summary>Source-generated, because reflection-based JSON is what Native AOT trims away.</summary>
 [JsonSerializable(typeof(GitHubRelease))]
+[JsonSerializable(typeof(UpdateCache))]
 internal partial class UpdateJsonContext : JsonSerializerContext;

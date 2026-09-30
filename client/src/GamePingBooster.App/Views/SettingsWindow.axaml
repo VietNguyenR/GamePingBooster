@@ -100,6 +100,21 @@
       <TextBlock Classes="hint" Text="{DynamicResource settings.language.hint}" />
     </StackPanel>
 
+    <StackPanel>
+      <TextBlock Classes="label" Text="{DynamicResource settings.close}" />
+      <ComboBox HorizontalAlignment="Stretch"
+                ItemsSource="{Binding CloseOptions}"
+                SelectedItem="{Binding SelectedCloseOption}"
+                Background="#242424" Foreground="#ababab" BorderThickness="0" CornerRadius="8">
+        <ComboBox.ItemTemplate>
+          <DataTemplate x:DataType="vm:CloseChoiceOption">
+            <TextBlock Text="{Binding Label}" />
+          </DataTemplate>
+        </ComboBox.ItemTemplate>
+      </ComboBox>
+      <TextBlock Classes="hint" Text="{DynamicResource settings.close.hint}" />
+    </StackPanel>
+
     <Grid ColumnDefinitions="*,Auto,Auto">
       <Button Grid.Column="1" Content="{DynamicResource settings.cancel}" Click="OnCancelClick"
               Height="38" Width="92" Margin="0,0,8,0"

@@ -160,8 +160,25 @@ internal static class StringsEn
         ["settings.cancel"] = "Cancel",
 
         // ------------------------------------------------------------------ update window
+        // ------------------------------------------------------------------ closing the window
+        ["tray.notice.title"] = "Game Ping Booster is still running",
+        ["tray.notice.body"] = "The app is in the tray and keeps boosting while you play. Click its icon to open it again.",
+        ["close.window.title"] = "Close the app",
+        ["close.title"] = "What would you like to do?",
+        ["close.body.tray"] =
+            "Minimise to tray: the app keeps running and keeps boosting while you play. Open it again from the icon at the right of the taskbar.",
+        ["close.body.quit"] = "Quit: stop boosting and close the app.",
+        ["close.remember"] = "Remember my choice (change it in Settings)",
+        ["close.tray"] = "Minimise to tray",
+        ["close.quit"] = "Quit",
+        ["settings.close"] = "When the window is closed",
+        ["settings.close.ask"] = "Ask every time",
+        ["settings.close.tray"] = "Minimise to tray",
+        ["settings.close.quit"] = "Quit the app",
+        ["settings.close.hint"] = "Applies at once, no need to press Save.",
+
         ["update.window.title"] = "Update",
-        ["update.title"] = "Update to v{0}",
+        ["update.title"] = "A new version is out: v{0}",
         ["update.subtitle"] = "You have v{0}. Download size {1}.",
         ["update.subtitleNoSize"] = "You have v{0}.",
         ["update.body"] =
@@ -172,7 +189,7 @@ internal static class StringsEn
             "back to your normal internet route until you connect again.",
         ["update.warn.connected"] =
             "You are connected. The update will disconnect you while it installs; press Start boosting again when the app reopens.",
-        ["update.later"] = "Later",
+        ["update.later"] = "Cancel",
         ["update.now"] = "Update now",
         ["update.downloading"] = "Downloading the new version...",
         ["update.progress"] = "{0} / {1}",

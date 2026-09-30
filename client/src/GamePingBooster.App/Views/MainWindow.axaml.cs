@@ -184,16 +184,68 @@ public partial class MainWindow : SurfaceWindow
     /// </summary>
     public async void OfferRequiredUpdate()
     {
-        if (_offeredRequiredUpdate || !IsVisible) return;
+        if (_offeredRequiredUpdate || _updateOpen || !IsVisible) return;
         if (DataContext is not MainViewModel { UpdateRequired: true, Update: { CanInstall: true } update } vm) return;
 
         _offeredRequiredUpdate = true;
-        await new UpdateWindow(update, vm).ShowDialog(this);
+        await ShowUpdateWindow(update, vm);
+    }
+
+    /// <summary>
+    /// Opens the update window by itself whenever the app is opened with a newer release known: once as it
+    /// starts - App calls this for the check made then - and again every time the window is brought back
+    /// from the tray. No setting turns it off; Cancel closes it until the next opening (the owner's call,
+    /// 2026-09-30: players left on the footer line alone stayed a week behind).
+    ///
+    /// Only ever at a moment the person asked to look at the app. Never popped up while the window is
+    /// hidden in the tray - a game may be running full screen, and a dialog taking focus minimises it;
+    /// a release found by the six-hourly check in the middle of a session waits for the next opening.
+    /// </summary>
+    public async void OfferUpdate()
+    {
+        if (_updateOpen) return;
+        if (DataContext is not MainViewModel { Update: { } update } vm) return;
+        if (!IsVisible)
+        {
+            // The start-up check can answer before the window has first appeared: offered as it does.
+            if (!_hasOpened) _offerWhenOpened = true;
+            return;
+        }
+        await ShowUpdateWindow(update, vm);
+    }
+
+    private bool _hasOpened;
+    private bool _offerWhenOpened;
+
+    protected override void OnOpened(EventArgs e)
+    {
+        base.OnOpened(e);
+        _hasOpened = true;
+        if (!_offerWhenOpened) return;
+        _offerWhenOpened = false;
+        // Posted, so the dialog's owner is fully on screen first.
+        Dispatcher.UIThread.Post(OfferUpdate);
+    }
+
+    /// <summary>An update window is open - offered, or opened from the footer. One at a time.</summary>
+    private bool _updateOpen;
+
+    private async Task ShowUpdateWindow(AvailableUpdate update, MainViewModel vm)
+    {
+        _updateOpen = true;
+        try
+        {
+            await new UpdateWindow(update, vm).ShowDialog(this);
+        }
+        finally
+        {
+            _updateOpen = false;
+        }
     }
 
     private async void OnUpdateClick(object? sender, RoutedEventArgs e)
     {
-        if (DataContext is not MainViewModel { Update: { } update } vm) return;
+        if (_updateOpen || DataContext is not MainViewModel { Update: { } update } vm) return;
 
         if (!update.CanInstall)
         {
@@ -203,7 +255,7 @@ public partial class MainWindow : SurfaceWindow
             return;
         }
 
-        await new UpdateWindow(update, vm).ShowDialog(this);
+        await ShowUpdateWindow(update, vm);
     }
 
     // ------------------------------------------------------------ minimise to tray
@@ -255,7 +307,16 @@ public partial class MainWindow : SurfaceWindow
         // Restored again in the gap between the post and here - by a taskbar click, or by the
         // tray icon itself. Hiding now would take away a window the user has just asked for.
         if (WindowState is not WindowState.Minimized) return;
+        GoToTray();
+    }
+
+    /// <summary>Raised whenever the window goes to the tray - minimised, or closed with "to the tray".</summary>
+    public event Action? WentToTray;
+
+    private void GoToTray()
+    {
         Hide();
+        WentToTray?.Invoke();
     }
 
     /// <summary>
@@ -270,12 +331,21 @@ public partial class MainWindow : SurfaceWindow
         Show();
         WindowState = _restoreTo;
         Activate();
+
+        // Brought back from the tray is opened: a newer release known is offered again. See OfferUpdate.
+        OfferUpdate();
     }
 
     // ------------------------------------------------------------ closing
 
     /// <summary>Set once the tunnel is down, so the second Close is allowed through.</summary>
     private bool _readyToClose;
+
+    /// <summary>The close question is on screen: a second X press while it is does nothing more.</summary>
+    private bool _askingClose;
+
+    /// <summary>Quit was chosen in the close question: the Close that follows is not asked about again.</summary>
+    private bool _quitChosen;
 
     /// <summary>
     /// Closing the window brings the tunnel down first.
@@ -298,6 +368,52 @@ public partial class MainWindow : SurfaceWindow
         base.OnClosing(e);
 
         if (_readyToClose || e.Cancel) return;
+
+        // The person closing the window - its X, Alt+F4, the taskbar's Close - is asked, or answered as they
+        // chose to be remembered: to the tray, or quit. Nothing else is: the tray's Exit and Windows shutting
+        // down arrive as ApplicationShutdown and OSShutdown, setup ends this app with taskkill anyway, and
+        // this method's own second Close is marked by _quitChosen. Only with a tray icon to come back from -
+        // see EnableMinimizeToTray.
+        //
+        // Not e.IsProgrammatic: the X is drawn by Avalonia (see SurfaceWindow), and its click handler calls
+        // Window.Close() - WindowDrawnDecorations.OnCloseButtonClick - so the one close this is for arrives
+        // as programmatic. The first version tested it and never asked anybody (2026-09-30).
+        if (_minimizeToTray && !_quitChosen && e.CloseReason == WindowCloseReason.WindowClosing)
+        {
+            var action = CloseChoiceStore.Load();
+            if (action == CloseAction.Ask)
+            {
+                e.Cancel = true;
+                if (_askingClose) return;
+                _askingClose = true;
+                CloseChoice? choice;
+                try
+                {
+                    choice = await new CloseChoiceWindow().ShowDialog<CloseChoice?>(this);
+                }
+                finally
+                {
+                    _askingClose = false;
+                }
+                if (choice is null) return; // The question was closed: nothing happens.
+                if (choice.Remember) CloseChoiceStore.Save(choice.Action);
+                if (choice.Action == CloseAction.Tray)
+                {
+                    GoToTray();
+                    return;
+                }
+                _quitChosen = true;
+                Close(); // Back through here, past the question, to quit.
+                return;
+            }
+            if (action == CloseAction.Tray)
+            {
+                e.Cancel = true;
+                GoToTray();
+                return;
+            }
+        }
+
         if (DataContext is not MainViewModel vm) return;
         if (vm.State is TunnelState.Disconnected) return;
 

@@ -1,5 +1,6 @@
 ﻿using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using GamePingBooster.App.Services;
 using GamePingBooster.App.Services.Localization;
 
 namespace GamePingBooster.App.ViewModels;
@@ -149,6 +150,29 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
     }
 
+    // ------------------------------------------------------------------ closing the window
+    //
+    // Like the language: the person's, saved by the app (CloseChoiceStore), and applied the moment it is
+    // picked. "Ask" is what the close dialog's "remember" is undone with.
+
+    public IReadOnlyList<CloseChoiceOption> CloseOptions { get; } =
+    [
+        new(CloseAction.Ask, Loc.T("settings.close.ask")),
+        new(CloseAction.Tray, Loc.T("settings.close.tray")),
+        new(CloseAction.Quit, Loc.T("settings.close.quit")),
+    ];
+
+    private CloseChoiceOption? _selectedCloseOption;
+    public CloseChoiceOption? SelectedCloseOption
+    {
+        get => _selectedCloseOption ??= CloseOptions.First(o => o.Action == CloseChoiceStore.Load());
+        set
+        {
+            if (value is null || !Set(ref _selectedCloseOption, value)) return;
+            CloseChoiceStore.Save(value.Action);
+        }
+    }
+
     /// <summary>
     /// Saving needs SOMETHING to save, and a key only when there are self-hosted addresses to
     /// use it with.
@@ -200,3 +224,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 /// somebody looking for Vietnamese in an English UI is looking for "Tiếng Việt".
 /// </summary>
 public sealed record LanguageChoice(AppLanguage Language, string Label);
+
+/// <summary>One line of the "when the window is closed" list.</summary>
+public sealed record CloseChoiceOption(CloseAction Action, string Label);

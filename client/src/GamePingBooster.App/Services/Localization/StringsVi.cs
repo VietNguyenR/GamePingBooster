@@ -157,8 +157,25 @@ internal static class StringsVi
         ["settings.cancel"] = "Huỷ",
 
         // ------------------------------------------------------------------ update window
+        // ------------------------------------------------------------------ closing the window
+        ["tray.notice.title"] = "Game Ping Booster vẫn đang chạy",
+        ["tray.notice.body"] = "App đang chạy dưới khay và vẫn tăng tốc khi bạn chơi. Bấm vào biểu tượng để mở lại.",
+        ["close.window.title"] = "Đóng app",
+        ["close.title"] = "Bạn muốn làm gì?",
+        ["close.body.tray"] =
+            "Thu xuống khay: app vẫn chạy và vẫn tăng tốc khi bạn chơi. Mở lại bằng biểu tượng ở góc phải thanh tác vụ.",
+        ["close.body.quit"] = "Thoát: ngắt tăng tốc và tắt hẳn app.",
+        ["close.remember"] = "Ghi nhớ lựa chọn này (đổi lại trong Cài đặt)",
+        ["close.tray"] = "Thu xuống khay",
+        ["close.quit"] = "Thoát",
+        ["settings.close"] = "Khi đóng cửa sổ",
+        ["settings.close.ask"] = "Hỏi mỗi lần",
+        ["settings.close.tray"] = "Thu xuống khay",
+        ["settings.close.quit"] = "Thoát app",
+        ["settings.close.hint"] = "Áp dụng ngay, không cần bấm Lưu.",
+
         ["update.window.title"] = "Cập nhật",
-        ["update.title"] = "Cập nhật lên v{0}",
+        ["update.title"] = "Đã có bản mới v{0}",
         ["update.subtitle"] = "Bạn đang dùng v{0}. Dung lượng tải {1}.",
         ["update.subtitleNoSize"] = "Bạn đang dùng v{0}.",
         ["update.body"] =
@@ -169,7 +186,7 @@ internal static class StringsVi
             "quay về đường mạng thường cho tới khi bạn kết nối lại.",
         ["update.warn.connected"] =
             "Bạn đang kết nối. Cập nhật sẽ ngắt kết nối trong lúc cài; app mở lại thì bấm Bắt đầu tăng tốc lần nữa.",
-        ["update.later"] = "Để sau",
+        ["update.later"] = "Huỷ",
         ["update.now"] = "Cập nhật ngay",
         ["update.downloading"] = "Đang tải bản mới...",
         ["update.progress"] = "{0} / {1}",

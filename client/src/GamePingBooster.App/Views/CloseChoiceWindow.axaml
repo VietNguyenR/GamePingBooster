@@ -1,0 +1,48 @@
+<views:SurfaceWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="using:GamePingBooster.App.Views"
+        x:Class="GamePingBooster.App.Views.CloseChoiceWindow"
+        Title="{DynamicResource close.window.title}"
+        Width="420" SizeToContent="Height"
+        MinWidth="420"
+        WindowStartupLocation="CenterOwner"
+        CanResize="False">
+
+  <views:SurfaceWindow.Styles>
+    <Style Selector="TextBlock.body">
+      <Setter Property="Foreground" Value="#CBD5E1" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style Selector="Button">
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="16,8" />
+    </Style>
+  </views:SurfaceWindow.Styles>
+
+  <Grid RowDefinitions="Auto,Auto">
+
+    <Border Grid.Row="0" Height="34" Background="Transparent"
+            PointerPressed="OnTitleBarPressed" />
+
+    <StackPanel Grid.Row="1" Margin="24,4,24,24" Spacing="16">
+
+      <TextBlock Text="{DynamicResource close.title}" Foreground="#F8FAFC" FontSize="18" FontWeight="Bold" />
+
+      <StackPanel Spacing="8">
+        <TextBlock Classes="body" Text="{DynamicResource close.body.tray}" />
+        <TextBlock Classes="body" Text="{DynamicResource close.body.quit}" />
+      </StackPanel>
+
+      <CheckBox Name="RememberBox" Foreground="#ababab" FontSize="13"
+                Content="{DynamicResource close.remember}" />
+
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+        <Button Content="{DynamicResource close.quit}" Click="OnQuitClick"
+                Background="#334155" Foreground="#E2E8F0" />
+        <Button Content="{DynamicResource close.tray}" Click="OnTrayClick"
+                Background="#2563EB" Foreground="White" />
+      </StackPanel>
+    </StackPanel>
+  </Grid>
+</views:SurfaceWindow>

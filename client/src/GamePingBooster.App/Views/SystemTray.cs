@@ -1,6 +1,7 @@
 ﻿using System.ComponentModel;
 using Avalonia.Controls;
 using Avalonia.Platform;
+using GamePingBooster.App.Services;
 using GamePingBooster.App.Services.Localization;
 using GamePingBooster.App.ViewModels;
 
@@ -83,6 +84,18 @@ public sealed class SystemTray : IDisposable
         };
 
         _window.EnableMinimizeToTray();
+
+        // "Still running": the first time the window goes to the tray in this run, so nobody takes a window
+        // that vanished for an app that quit - and only the first, so it is not said at every minimise.
+        _window.WentToTray += OnWentToTray;
+    }
+
+    private bool _noticeShown;
+
+    private void OnWentToTray()
+    {
+        if (_noticeShown) return;
+        _noticeShown = TrayNotice.Show(_icon, Loc.T("tray.notice.title"), Loc.T("tray.notice.body"));
     }
 
     /// <summary>

@@ -135,11 +135,13 @@ public partial class App : Application
             _refresher.Start();
             _quality.Start();
 
-            // Checks GitHub for a newer release now and then, and puts a line in the footer when
-            // there is one. Marshalled for the same reason as the refresher's messages.
-            _updates = new UpdateChecker(update => Dispatcher.UIThread.Post(() =>
+            // Checks GitHub for a newer release as the app opens and every six hours after, and puts a
+            // line in the footer when there is one; the check made as it opens also offers the update
+            // window (MainWindow.OfferUpdate). Marshalled for the same reason as the refresher's messages.
+            _updates = new UpdateChecker((update, atStart) => Dispatcher.UIThread.Post(() =>
             {
                 vm.Update = update;
+                if (atStart) window.OfferUpdate();
                 window.OfferRequiredUpdate();
             }));
             _updates.Start();

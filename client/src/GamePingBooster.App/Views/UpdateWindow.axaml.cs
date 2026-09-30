@@ -75,6 +75,14 @@ public partial class UpdateWindow : SurfaceWindow
 
     private async void OnUpdateClick(object? sender, RoutedEventArgs e)
     {
+        // Offered when the app opens even for a release with no setup .exe to check and run: its page then.
+        if (!_update.CanInstall)
+        {
+            BrowserLauncher.TryOpen(_update.Url);
+            Close();
+            return;
+        }
+
         Show("DownloadPanel");
 
         var bar = Find<ProgressBar>("DownloadBar");
