@@ -69,6 +69,7 @@ internal static class StringsEn
         ["value.none"] = "-",
         ["value.ms"] = "{0} ms",
         ["value.msTo"] = "{0} ms to {1}",
+        ["value.msToExpected"] = "{0} ms to {1} (expected)",
         ["value.lossTo"] = "{0}% to {1}",
         ["value.ranges"] = "{0} ranges",
         ["value.packets"] = "{0} up / {1} down",
@@ -79,6 +80,9 @@ internal static class StringsEn
 
         ["gamePing.tip.pending"] = "Appears once the connection has been measured.",
         ["gamePing.tip.measured"] = "Measured: echoes to this match's game server, through the tunnel.",
+        ["gamePing.tip.expected"] =
+            "{0} is the expected region, not the match's: the app has not yet seen the game play on a server there. " +
+            "Once a match starts, the label follows its game server.",
         ["gamePing.tip.estimated"] =
             "Estimated: the ping to {0} plus the distance from there to the game's {1} servers. The game picks " +
             "its own server - changing the relay changes the route to it, not the server. In a match it follows " +
@@ -104,6 +108,14 @@ internal static class StringsEn
             "Faster relays for this game's other regions, measured by the app and measured again after every match: " +
             "{0}. When the game puts your match on a server in one of those regions, the match goes through that relay, " +
             "and its name turns green. Everything else stays on {1}.",
+        ["adaptive.tip.plan"] =
+            "Each region of this game, measured in the lobby and again after every match:\n{0}\nWhen a match is in a region " +
+            "with its own relay, that relay's name turns green. Everything else goes through {1}.",
+        ["adaptive.region.via"] = "{0} → {1}",
+        ["adaptive.region.inside"] = "{0} → {1} (right next to the game's servers)",
+        ["adaptive.region.home"] = "{0} → {1} (main relay)",
+        ["adaptive.region.homeShort"] = "{0} → {1} (main relay): {2} is {3} ms faster, short of the {4} ms a move needs",
+        ["adaptive.region.homeFaster"] = "{0} → {1} (main relay): {2} is not faster",
         ["adaptive.tip.none"] =
             "Faster relays for the game's other regions appear here once the app has measured them in the lobby. " +
             "None for now: this game has one region, or no other relay beats the one you are on.",
@@ -231,6 +243,7 @@ internal static class StringsEn
         ["svc.reconnecting"] = "Reconnecting via {0} (attempt {1}) - traffic is on the normal path",
         ["svc.reconnected"] = "Reconnected to {0}",
         ["svc.accelerating"] = "Accelerating {0} through {1}",
+        ["svc.acceleratingAdaptive"] = "Accelerating {0} through {1} (adaptive relay) - main relay {2}",
         ["svc.fixingClock"] = "Correcting the system clock...",
         ["svc.clockWrong"] = "This PC's clock is {0} seconds off and could not be corrected automatically. Set the time in Settings > Time & language, then connect again.",
         ["svc.routeFailed"] = "Failed to update the routing table",

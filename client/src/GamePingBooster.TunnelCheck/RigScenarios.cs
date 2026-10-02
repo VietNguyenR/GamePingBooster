@@ -69,6 +69,9 @@ internal static partial class Program
             ("Real relayd: a region's tunnel leaves a lossy road mid-match", RigRegionTunnelLeavesALossyRoad),
             ("Real relayd: home still leaves its own slow road", RigHomeLeavesItsSlowRoad),
             ("Real relayd: lane hunting through an entry, beside entry-switching probes", RigLaneHuntThroughAnEntry),
+            ("Real relayd: entry switching lands on the lane it measured", RigDoorMoveKeepsTheMeasuredLane),
+            ("Real relayd: a region's tunnel moved between matches lands on the lane WayCheck measured", RigWayCheckKeepsTheMeasuredLane),
+            ("Real relayd: WayCheck times the way in use on the tunnel's own lane", RigWayCheckTimesTheLaneInUse),
         };
         try
         {
@@ -517,5 +520,207 @@ internal static partial class Program
         var connectsAfter = System.Text.RegularExpressions.Regex.Matches(RigShell("logs 100000"), @"client connected").Count;
         Check("  one session throughout: relayd saw no new connection", connectsAfter == connectsBefore, $"{connectsAfter - connectsBefore} new");
         Check($"  entry switching's probes were answered throughout ({doorAnswers} of {doorSent})", doorAnswers >= doorSent - 2, $"{doorAnswers} of {doorSent}");
+    }
+
+    /// <summary>
+    /// Entry F has lanes (rig.sh lanes: 20 ms more unless the PC's port is a multiple of four). Home on A, the game
+    /// sending; each round entry switching's probes measure F on a socket of their own, the tunnel moves onto F by
+    /// DoorProbes.Take - as TunnelEngine.MoveOntoDoor does - and the lane it is on is measured again. Before, a move took a
+    /// fresh socket and so a fresh draw of the lane; now every move must land on the lane the way was measured on.
+    /// </summary>
+    private static async Task RigDoorMoveKeepsTheMeasuredLane()
+    {
+        using var rig = new Rig();
+        var home = await RigOpenAsync(rig, _a, 360);
+        home.StartPumping(rig.Device, rig.Cts.Token);
+        rig.Pump.SetHome(home);
+        RigShell("lanes f 20");
+        await Task.Delay(300);
+        var connectsBefore = System.Text.RegularExpressions.Regex.Matches(RigShell("logs 100000"), @"client connected").Count;
+
+        var sent = 0;
+        var back = new ConcurrentDictionary<int, bool>();
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(rig.Cts.Token);
+        var sending = Task.Run(async () =>
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                rig.Device.FromWindows(RigPacket(home.InnerIp, RigSg, sent++));
+                while (rig.Device.ToWindows.TryDequeue(out var p)) if (p.Packet.Length >= 32 && Src(p.Packet) == RigSg) back.TryAdd(SequenceOf(p.Packet), true);
+                await Task.Delay(25);
+            }
+        });
+        await Task.Delay(1000);
+
+        var landings = new List<(double Measured, double Landed)>();
+        var portsKept = 0;
+        // A quarter of the ports are fast: draw until both lanes have been landed on, six moves at least.
+        for (var round = 0; round < 16; round++)
+        {
+            if (round >= 6 && landings.Any(l => l.Measured < 10) && landings.Any(l => l.Measured > 15)) break;
+            var rtts = new ConcurrentBag<double>();
+            using var doors = new DoorProbes(home.SessionId, [new DoorProbes.Door("f", _f)],
+                (_, _, sentAt, receivedAt) => rtts.Add((receivedAt - sentAt) * 1000.0 / Stopwatch.Frequency));
+            for (var i = 0; i < 8; i++)
+            {
+                doors.Send(0);
+                await Task.Delay(100);
+            }
+            await Task.Delay(300);
+
+            if (round == 0)
+            {
+                Check("A socket is never handed over for another session or way",
+                    doors.Take("f", _f, home.SessionId + 1) is null && doors.Take("a", _f, home.SessionId) is null);
+            }
+            var socket = doors.Take("f", _f, home.SessionId);
+            if (socket is null || rtts.IsEmpty)
+            {
+                Check($"Round {round}: F's probe socket handed over", false, socket is null ? "Take returned null" : "no answers");
+                continue;
+            }
+            var measured = rtts.OrderBy(r => r).ElementAt(rtts.Count / 2);
+            var port = ((IPEndPoint)socket.LocalEndPoint!).Port;
+            home.MoveToMeasured(socket, _f);
+            await Task.Delay(500);
+            using var after = await home.HuntLanesAsync(0, LanePick.Rounds, LanePick.MaxProbesPerSecond, rig.Cts.Token);
+            if (home.LocalPort == port) portsKept++;
+            if (after?.Current.MedianMs is { } landed) landings.Add((measured, landed));
+
+            home.MoveTo(_a);
+            await Task.Delay(1200);
+        }
+
+        stop.Cancel();
+        await sending;
+        await Task.Delay(300);
+        while (rig.Device.ToWindows.TryDequeue(out var p)) if (p.Packet.Length >= 32 && Src(p.Packet) == RigSg) back.TryAdd(SequenceOf(p.Packet), true);
+
+        var line = string.Join(", ", landings.Select(l => $"{l.Measured:F0}->{l.Landed:F0}"));
+        var rounds = landings.Count;
+        Check($"{rounds} moves onto F, measured -> landed ms: {line}",
+            rounds >= 6 && portsKept == rounds && landings.All(l => Math.Abs(l.Landed - l.Measured) < 8), $"{portsKept} kept the port; {line}");
+        Check("  both lanes were drawn, so landing on the measured one was not luck",
+            landings.Any(l => l.Measured < 10) && landings.Any(l => l.Measured > 15), line);
+        var missing = Enumerable.Range(40, Math.Max(0, sent - 80)).Count(i => !back.ContainsKey(i));
+        Check($"  the game lost no reply across {rounds * 2} moves ({sent} sent) - the probe's receive was gone before the tunnel read the socket",
+            missing == 0, $"{missing} missing");
+        var connectsAfter = System.Text.RegularExpressions.Regex.Matches(RigShell("logs 100000"), @"client connected").Count;
+        Check("  one session throughout: relayd saw no new connection", connectsAfter == connectsBefore, $"{connectsAfter - connectsBefore} new");
+    }
+
+    /// <summary>
+    /// Between matches: kr's tunnel on B, whose road is 60 ms slow, and entry E with lanes (20 ms more unless the PC's port
+    /// is a multiple of four). Each round WayCheck probes both ways and chooses E, and the tunnel moves onto the socket E
+    /// was measured on (ProbeWaysKeepingAsync, as CheckWaysAsync and MoveOtherToDoor do), then back to B. Before, the move
+    /// took a fresh socket - a fresh draw of E's lane; now it must land on the lane WayCheck measured.
+    /// </summary>
+    private static async Task RigWayCheckKeepsTheMeasuredLane()
+    {
+        using var rig = new Rig();
+        var (_, other, adapterIp) = await RigTunnelsAsync(rig, 370);
+        RigShell("lanes e 20 b 60");
+        await Task.Delay(300);
+        var game = new RigGame(rig, adapterIp, rig.Cts.Token);
+        await Task.Delay(1000);
+        var connectsBefore = BConnects();
+
+        var landings = new List<(double Measured, double Landed)>();
+        var portsKept = 0;
+        var notChosen = new List<string>();
+        for (var round = 0; round < 12; round++)
+        {
+            if (round >= 5 && landings.Any(l => l.Measured < 10) && landings.Any(l => l.Measured > 15)) break;
+
+            WayChoice? choice = null;
+            var (samples, socket) = await TunnelEngine.ProbeWaysKeepingAsync(other.SessionId,
+                [new DoorProbes.Door("b", _b), new DoorProbes.Door("e", _e)], WayCheck.Rounds, WayCheck.SpacingFor(2),
+                measured => (choice = WayCheck.Choose("b", measured)).MoveTo, CancellationToken.None);
+            if (choice?.MoveTo != "e" || socket is null || samples[1].MedianMs is not { } measuredMs)
+            {
+                socket?.Dispose();
+                notChosen.Add($"{string.Join(", ", samples)} - {choice?.Reason}");
+                continue;
+            }
+
+            var port = ((IPEndPoint)socket.LocalEndPoint!).Port;
+            other.MoveToMeasured(socket, _e);
+            await Task.Delay(500);
+            using var after = await other.HuntLanesAsync(0, LanePick.Rounds, LanePick.MaxProbesPerSecond, rig.Cts.Token);
+            if (other.LocalPort == port) portsKept++;
+            if (after?.Current.MedianMs is { } landed) landings.Add((measuredMs, landed));
+
+            other.MoveTo(_b);
+            await Task.Delay(1200);
+        }
+
+        await Task.Delay(500);
+        await game.StopAsync();
+
+        var line = string.Join(", ", landings.Select(l => $"{l.Measured:F0}->{l.Landed:F0}"));
+        var rounds = landings.Count;
+        Check($"WayCheck chose E every round, B 60 ms slow ({rounds} moves)", notChosen.Count == 0 && rounds >= 5, string.Join("; ", notChosen));
+        Check($"  each move landed on the lane E was measured on, measured -> landed ms: {line}",
+            rounds >= 5 && portsKept == rounds && landings.All(l => Math.Abs(l.Landed - l.Measured) < 8), $"{portsKept} kept the port; {line}");
+        Check("  both lanes were drawn, so landing on the measured one was not luck",
+            landings.Any(l => l.Measured < 10) && landings.Any(l => l.Measured > 15), line);
+        var missing = RigGame.Missing(game.KrBack, 40, game.KrSent);
+        Check($"  Korea's game lost no reply across {rounds * 2} moves ({game.KrSent} sent)", missing == 0, $"{missing} missing");
+        Check("  relayd B kept its one session", BConnects() == connectsBefore, $"{BConnects() - connectsBefore} new session(s)");
+    }
+
+    /// <summary>
+    /// Between matches: kr's tunnel on entry E, which has lanes (20 ms more unless the PC's port is a multiple of four),
+    /// moved to a fresh socket each round so it rides either. WayCheck must time E on the tunnel's own socket - the lane
+    /// it rides, as the tunnel's own Probes measure it - where a socket of its own timed some lane of E drawn at random.
+    /// </summary>
+    private static async Task RigWayCheckTimesTheLaneInUse()
+    {
+        using var rig = new Rig();
+        var (_, other, adapterIp) = await RigTunnelsAsync(rig, 380);
+        other.MoveTo(_e);
+        RigShell("lanes e 20");
+        await Task.Delay(300);
+        var game = new RigGame(rig, adapterIp, rig.Cts.Token);
+        await Task.Delay(1000);
+        var connectsBefore = BConnects();
+
+        var pairs = new List<(double Riding, double Timed)>();
+        var failures = new List<string>();
+        for (var round = 0; round < 12; round++)
+        {
+            if (round >= 5 && pairs.Any(l => l.Riding < 10) && pairs.Any(l => l.Riding > 15)) break;
+
+            other.MoveTo(_e);
+            await Task.Delay(500);
+            using (var riding = await other.HuntLanesAsync(0, LanePick.Rounds, LanePick.MaxProbesPerSecond, rig.Cts.Token))
+            {
+                var (samples, kept) = await TunnelEngine.ProbeWaysKeepingAsync(other.SessionId,
+                    [new DoorProbes.Door("b", _b), new DoorProbes.Door("e", _e)], WayCheck.Rounds, WayCheck.SpacingFor(2),
+                    _ => null, CancellationToken.None, own: other, ownWay: "e");
+                kept?.Dispose();
+                if (riding?.Current.MedianMs is { } ride && samples[1].MedianMs is { } timed && samples[1].Loss.Lost == 0)
+                {
+                    pairs.Add((ride, timed));
+                }
+                else
+                {
+                    failures.Add($"riding {riding?.Current}, WayCheck {string.Join(", ", samples)}");
+                }
+            }
+        }
+
+        await Task.Delay(500);
+        await game.StopAsync();
+
+        var line = string.Join(", ", pairs.Select(p => $"{p.Riding:F0}/{p.Timed:F0}"));
+        Check($"E timed by WayCheck = the lane the tunnel rides, riding/timed ms: {line}",
+            failures.Count == 0 && pairs.Count >= 5 && pairs.All(p => Math.Abs(p.Riding - p.Timed) < 8),
+            failures.Count > 0 ? string.Join("; ", failures) : line);
+        Check("  both lanes were ridden, so the match was not luck",
+            pairs.Any(p => p.Riding < 10) && pairs.Any(p => p.Riding > 15), line);
+        var missing = RigGame.Missing(game.KrBack, 40, game.KrSent);
+        Check($"  Korea's game lost no reply while its own socket was probed ({game.KrSent} sent)", missing == 0, $"{missing} missing");
+        Check("  relayd B kept its one session", BConnects() == connectsBefore, $"{BConnects() - connectsBefore} new session(s)");
     }
 }

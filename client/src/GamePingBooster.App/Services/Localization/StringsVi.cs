@@ -69,6 +69,7 @@ internal static class StringsVi
         ["value.none"] = "-",
         ["value.ms"] = "{0} ms",
         ["value.msTo"] = "{0} ms tới {1}",
+        ["value.msToExpected"] = "{0} ms tới {1} (dự kiến)",
         ["value.lossTo"] = "{0}% tới {1}",
         ["value.ranges"] = "{0} dải IP",
         ["value.packets"] = "{0} gửi / {1} nhận",
@@ -79,6 +80,9 @@ internal static class StringsVi
 
         ["gamePing.tip.pending"] = "Hiện ra sau khi đo xong kết nối.",
         ["gamePing.tip.measured"] = "Số đo thật: gói thăm dò tới máy chủ game của trận này, đi qua đường hầm.",
+        ["gamePing.tip.expected"] =
+            "{0} là khu vực dự kiến, chưa phải khu vực của trận: app chưa thấy game chơi trên máy chủ game nào ở đó. " +
+            "Khi trận bắt đầu, nhãn đổi theo đúng máy chủ game của trận.",
         ["gamePing.tip.estimated"] =
             "Số ước tính: ping tới {0} cộng với quãng đường từ đó tới máy chủ game {1}. Game tự chọn máy chủ game của nó - " +
             "đổi máy chủ ở đây là đổi đường đi tới máy chủ game, không đổi được máy chủ game. Khi đang trong trận, số này " +
@@ -102,6 +106,14 @@ internal static class StringsVi
             "Các máy chủ nhanh hơn cho những khu vực khác của game này, app tự đo và đo lại sau mỗi trận: {0}. Khi game xếp " +
             "bạn vào máy chủ game ở một trong các khu vực đó, trận sẽ đi qua máy chủ tương ứng và tên nó chuyển màu xanh. " +
             "Mọi thứ khác vẫn đi qua {1}.",
+        ["adaptive.tip.plan"] =
+            "Từng khu vực của game này, app đo ở sảnh và đo lại sau mỗi trận:\n{0}\nKhi trận ở khu vực có máy chủ riêng, tên " +
+            "máy chủ đó chuyển màu xanh. Mọi thứ khác đi qua {1}.",
+        ["adaptive.region.via"] = "{0} → {1}",
+        ["adaptive.region.inside"] = "{0} → {1} (nằm ngay cạnh máy chủ game)",
+        ["adaptive.region.home"] = "{0} → {1} (máy chủ chính)",
+        ["adaptive.region.homeShort"] = "{0} → {1} (máy chủ chính): {2} nhanh hơn {3} ms, chưa đủ {4} ms để đổi",
+        ["adaptive.region.homeFaster"] = "{0} → {1} (máy chủ chính): {2} không nhanh hơn",
         ["adaptive.tip.none"] =
             "Các máy chủ nhanh hơn cho những khu vực khác của game sẽ hiện ở đây sau khi app đo xong ở sảnh. Hiện chưa có: " +
             "game này chỉ có một khu vực, hoặc không máy chủ nào nhanh hơn máy chủ bạn đang dùng.",
@@ -228,6 +240,7 @@ internal static class StringsVi
         ["svc.reconnecting"] = "Đang kết nối lại qua {0} (lần {1}) - traffic đang đi đường mạng thường",
         ["svc.reconnected"] = "Đã kết nối lại tới {0}",
         ["svc.accelerating"] = "Đang tăng tốc {0} qua {1}",
+        ["svc.acceleratingAdaptive"] = "Đang tăng tốc {0} qua {1} (máy chủ khu vực) - máy chủ chính {2}",
         ["svc.fixingClock"] = "Đang chỉnh lại giờ hệ thống...",
         ["svc.clockWrong"] = "Đồng hồ máy này lệch {0} giây và không tự chỉnh được. Hãy chỉnh giờ trong Cài đặt > Thời gian & ngôn ngữ rồi kết nối lại.",
         ["svc.routeFailed"] = "Không cập nhật được bảng định tuyến",

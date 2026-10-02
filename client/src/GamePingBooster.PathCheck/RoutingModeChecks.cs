@@ -9,7 +9,7 @@ internal static partial class Program
     /// <summary>Where a connection's region-routing mode comes from. docs/MULTI-TUNNEL.md, section 8.1.</summary>
     private static void RoutingModeChecks()
     {
-        static RegionRoutingMode Mode(string? local, string? game, bool routed = false) => RegionRouting.Resolve(local, game, routed).Mode;
+        static RegionRoutingMode Mode(string? local, string? game) => RegionRouting.Resolve(local, game).Mode;
 
         Check("neither config.json nor the game says: off", Mode(null, null) == RegionRoutingMode.Off);
         Check("the game's setting is used", Mode(null, "record") == RegionRoutingMode.Record && Mode(null, "on") == RegionRoutingMode.On);
@@ -18,9 +18,15 @@ internal static partial class Program
         Check("a typo in config.json is record, not the game's value", Mode("onn", "on") == RegionRoutingMode.Record);
         Check("an unknown game value is off", Mode(null, "sometimes") == RegionRoutingMode.Off);
         Check("case and spaces do not matter", Mode(" RECORD ", null) == RegionRoutingMode.Record);
-        Check("routed landmarks are off whatever config.json says", Mode("on", "on", routed: true) == RegionRoutingMode.Off);
-        Check("and the log says why", RegionRouting.Resolve("on", "on", true).Source.Contains("routed"));
-        Check("three tunnels at most, home included", RegionRouting.MaxTunnels == 3);
+
+        // A Steam Datagram Relay game (CS2): its regions may leave home for another relay, never go direct.
+        static GameEntry Sdr(bool direct) => new() { Id = "cs2", Name = "CS2", LandmarksRouted = true, RegionDirect = direct };
+        Check("routed landmarks never allow direct, even when the game says so", !RegionRouting.DirectAllowed(Sdr(direct: true)));
+        Check("and not when it does not", !RegionRouting.DirectAllowed(Sdr(direct: false)));
+        Check("landmarks not routed: direct is the game's setting",
+            RegionRouting.DirectAllowed(new GameEntry { Id = "df", Name = "DF", RegionDirect = true }) &&
+            !RegionRouting.DirectAllowed(new GameEntry { Id = "df", Name = "DF" }));
+        Check("four tunnels at most, home included", RegionRouting.MaxTunnels == 4);
 
         // The fields as the licence server sends them, through the same source-generated reader the service uses.
         var bundle = JsonSerializer.Deserialize(

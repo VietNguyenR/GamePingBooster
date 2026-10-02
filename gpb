@@ -28,7 +28,8 @@
 #                                commit, push main and the tag                (Windows)
 #                                GitHub Actions then builds and publishes the release
 #
-#   ./gpb dev                    build and start the service and UI       (Windows)
+#   ./gpb dev [x.y.z-tag]        build and start the service and UI       (Windows)
+#                                a version stamps the build, e.g. 0.3.8-dev
 #   ./gpb capture [game] [udp|tcp|all]  collect game server addresses         (Windows)
 #                                the game comes from tools/profile-builder/games.json, which
 #                                says which process to watch and which files to write

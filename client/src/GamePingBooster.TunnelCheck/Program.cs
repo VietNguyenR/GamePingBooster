@@ -52,12 +52,17 @@ internal static partial class Program
             ("ICMP error through another relay", AnIcmpErrorReachesWindowsAboutItsOwnPacket),
             ("Home replaced", AReplacedHomeRewritesInsteadOfReaddressing),
             ("The recorder follows the match", TheRecorderFollowsTheTunnelCarryingTheMatch),
+            ("A match that moves relay is two records", AMatchThatMovesRelayIsTwoRecords),
             ("Downlink coupling", DownlinkCouplingAtThreeTunnels),
             ("Region plan echoes, every region at once", PlanEchoesAtOnce),
             ("Relay loss", RelayLossIsMeasured),
             ("A region's tunnel moves its way in, like home", ARegionsTunnelMovesItsWayInLikeHome),
             ("Lanes: the fast port is found and taken under load", ALaneHuntFindsTheFastPortAndMovesOntoIt),
             ("Lanes: a line without lanes is left alone", ALineWithoutLanesIsLeftAlone),
+            ("Relays measured side by side", RelaysAreMeasuredSideBySide),
+            ("Side by side: a match starting stops every relay", AStopReasonStopsEveryRelay),
+            ("Side by side: a skipped way", ASkippedWayIsNotMeasured),
+            ("Side by side: the budget", TheBudgetStillEndsIt),
         };
 
         foreach (var (title, run) in scenarios)

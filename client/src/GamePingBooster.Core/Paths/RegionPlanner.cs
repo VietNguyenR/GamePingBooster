@@ -40,6 +40,10 @@ public readonly record struct RegionPath(PathKind Kind, string? RelayId = null)
 /// <param name="HomeLossy">The home tunnel is losing packets (<see cref="RelayLoss"/>): home is compared as if it were
 /// <see cref="RelayLoss.PenaltyMs"/> slower.</param>
 /// <param name="LossyVia">The other relays, by id, whose way measured for this region lost packets - the same penalty.</param>
+/// <param name="HomeLegMs">The round trip to home's relayd alone, the first leg of <paramref name="HomeMs"/>. Null when not
+/// measured; then home is never taken to be inside the region (<see cref="RegionPlanner.InsideRegionMs"/>).</param>
+/// <param name="ViaRelayLegMs">The same for each other relay: the first leg of its number in <paramref name="ViaRelayMs"/>,
+/// down the same way in. A relay with none is never taken to be inside the region.</param>
 public sealed record RegionMeasurement(
     string RegionId,
     bool HasLandmark,
@@ -47,9 +51,22 @@ public sealed record RegionMeasurement(
     IReadOnlyDictionary<string, double> ViaRelayMs,
     double? DirectMs,
     bool HomeLossy = false,
-    IReadOnlySet<string>? LossyVia = null)
+    IReadOnlySet<string>? LossyVia = null,
+    double? HomeLegMs = null,
+    IReadOnlyDictionary<string, double>? ViaRelayLegMs = null)
 {
     public bool IsLossyVia(string relayId) => LossyVia?.Contains(relayId) ?? false;
+
+    /// <summary>
+    /// The relay's second leg - from it to the landmark - at most <paramref name="limitMs"/>: <see cref="RegionPlanner.InsideRegionMs"/>
+    /// to be taken, <see cref="RegionPlanner.InsideHoldMs"/> to be kept.
+    /// </summary>
+    public bool IsInsideVia(string relayId, double limitMs = RegionPlanner.InsideRegionMs) =>
+        ViaRelayLegMs is { } legs && legs.TryGetValue(relayId, out var leg) && ViaRelayMs.TryGetValue(relayId, out var ms) &&
+        ms - leg <= limitMs;
+
+    /// <summary>The same for home.</summary>
+    public bool IsHomeInside => HomeLegMs is { } leg && HomeMs is { } ms && ms - leg <= RegionPlanner.InsideRegionMs;
 }
 
 /// <param name="AllowDirect">The game may leave a region unrouted (Game.regionDirect).</param>
@@ -64,8 +81,14 @@ public sealed record PlannerOptions(bool AllowDirect, int MaxTunnels, IReadOnlyL
 /// <param name="ChosenScore">What the chosen path was compared on: <paramref name="ChosenMs"/>, plus
 /// <see cref="RelayLoss.PenaltyMs"/> when it loses packets. Null where <paramref name="ChosenMs"/> is.</param>
 /// <param name="HomeScore">The same for home.</param>
+/// <param name="Inside">The path is a relay inside the region taken by rule 4b - no slower than home, not by the margin.</param>
+/// <param name="BestOtherId">The fastest other relay measured for the region, whether or not it was taken; null with none.
+/// The app names it beside a region that stays home, with what it gained and what the margin asked.</param>
+/// <param name="BestOtherMs">What <paramref name="BestOtherId"/> measured.</param>
+/// <param name="MarginMs">What leaving home asked: <see cref="RegionPlanner.LeaveMargin"/> of home's score.</param>
 public sealed record RegionDecision(string RegionId, RegionPath Path, double? ChosenMs, double? HomeMs, string Reason,
-    double? ChosenScore = null, double? HomeScore = null);
+    double? ChosenScore = null, double? HomeScore = null, bool Inside = false,
+    string? BestOtherId = null, double? BestOtherMs = null, double? MarginMs = null);
 
 /// <summary>
 /// Chooses a path for every region of a game from what a measurement pass found. Pure: same inputs, same
@@ -73,8 +96,9 @@ public sealed record RegionDecision(string RegionId, RegionPath Path, double? Ch
 /// stands on:
 ///
 ///   G2  a region is never given a path that scores worse than home - it leaves home only by
-///       <see cref="RescanScore.WorthMoving"/> (max(5 ms, 10%)), and hysteresis may keep an old path only
-///       while that path still scores no worse than home. A path's score is its round trip, plus
+///       <see cref="LeaveMargin"/> (max(5 ms, 10%)) or for a relay inside the region no slower than home (rule 4b), and
+///       hysteresis may keep an old path only while that path still scores no worse than home. The one exception: a region
+///       already on a relay inside it stays there until home beats it by the margin, so near-equal passes do not trade it. A path's score is its round trip, plus
 ///       <see cref="RelayLoss.PenaltyMs"/> when it loses packets (since 2026-09-29): without loss that is the
 ///       round trip exactly, and a home that loses packets is left for a clean relay up to that much slower;
 ///   G3  a region that cannot be measured fairly - no landmark, or no number through home - stays home,
@@ -87,6 +111,39 @@ public sealed record RegionDecision(string RegionId, RegionPath Path, double? Ch
 /// </summary>
 public static class RegionPlanner
 {
+    /// <summary>
+    /// What a region's path must beat home by, and an open path by, to be taken: max(5 ms, 10%), connect's margin
+    /// (<see cref="Profiles.RelayPaths.HelpMargin"/>). It is what one pass varies by.
+    ///
+    /// On 2026-10-02 it went to max(3.5, 10%), max(3, 10%) and 3 flat in one night, and came back: a Hanoi player's Naraka
+    /// Ho Chi Minh City matches stayed home at 37.6 ms with vn-3 at 33.3 (41 ms in the game against 36), and no margin
+    /// held them on vn-3 - passes read vn-3 1.3 to 4.3 ms faster. The margin was not the fault: vn-3 sits next to the
+    /// servers, and rule 4b now takes it on that. Replayed over fourteen days of prod plans, path changes inside a session
+    /// were 399 at max(5, 10%), 546 at 3 flat and 931 with no margin; flips back 32, 51 and 162.
+    /// </summary>
+    public static double LeaveMargin(double ms) => Profiles.RelayPaths.HelpMargin(ms);
+
+    /// <summary>
+    /// A relay whose second leg - from it to the region's landmark, its number less the round trip to its relayd - is at
+    /// most this is inside the region: in the game servers' own datacentre or next to it. Measured from every relay to
+    /// every live landmark on 2026-10-02: the relays next to servers 0.8-5.5 ms (vn-3 to Ho Chi Minh City 4.2, sg-1..4 to
+    /// Singapore, hk-2 and hk-3 to Hong Kong), the nearest other 13.6 (sg-4 to Jakarta), then 14.9 (vn-1 to Ho Chi Minh
+    /// City). Ten, not six: a plan's second leg is a median of eight echoes less the BEST of a ping burst, which reads
+    /// 1-2 ms high - vn-3's came to 7.4 on one pass.
+    /// </summary>
+    public const double InsideRegionMs = 10;
+
+    /// <summary>
+    /// How far a relay's second leg may read and still keep a region rule 4b gave it - three over
+    /// <see cref="InsideRegionMs"/>, so one that measures near the line is not taken on one pass and dropped on the next.
+    /// Found by PlansDoNotFlapOnNoise: a relay 9 ms on read 11 on a jittered pass and the region went home and back.
+    /// Still clear of the nearest relay outside a region, 13.6.
+    /// </summary>
+    public const double InsideHoldMs = InsideRegionMs + 3;
+
+    /// <summary>Whether <paramref name="candidateMs"/> beats <paramref name="currentMs"/> by <see cref="LeaveMargin"/>.</summary>
+    public static bool WorthLeaving(double currentMs, double candidateMs) => currentMs - candidateMs >= LeaveMargin(currentMs);
+
     public static List<RegionDecision> Plan(
         string homeRelayId,
         IReadOnlyList<RegionMeasurement> regions,
@@ -103,7 +160,7 @@ public static class RegionPlanner
         if (room == 0) return regions.Select(r => Decide(homeRelayId, r, options, previous, [])).ToList();
 
         // Over the cap: which `room` relays to keep. Every set of that size is scored by what it saves over home,
-        // summed over the regions, each region re-decided among the set's relays - at most C(7, 2) = 21 sets.
+        // summed over the regions, each region re-decided among the set's relays - at most C(7, 3) = 35 sets.
         //
         //   - The region the game will put this player in counts double (TargetWeight). Trading the player's own
         //     region for a little more elsewhere is the wrong trade - 2026-09-28, an Apex player on Singapore held on
@@ -244,13 +301,47 @@ public static class RegionPlanner
         var chosenScore = homeScore;
         var reason = best is null
             ? $"home {homeText} - no other relay measured"
-            : $"home {homeText} - best other {bestText} is not faster by {Margin(homeScore):F0} ms";
-        if (best is not null && RescanScore.WorthMoving(homeScore, bestScore))
+            : $"home {homeText} - best other {bestText} is not faster by {Margin(homeScore):0.#} ms";
+        if (best is not null && WorthLeaving(homeScore, bestScore))
         {
             chosen = RegionPath.Via(best);
             chosenMs = bestMs;
             chosenScore = bestScore;
             reason = $"{bestText} against home {homeText}";
+        }
+
+        // Rule 4b: a relay inside the region - next to its game servers (InsideRegionMs) - is taken whenever home would
+        // keep the region and the relay scores no worse than home, without the margin. Home is not inside the region, or
+        // there is nothing to prefer. The margin is there for paths that only measured faster; this one is shorter by where
+        // it is. On 2026-10-02 vn-3, in Ho Chi Minh City next to Naraka's servers, read 1.3 to 4.3 ms faster than a Hanoi
+        // home pass after pass - 36 ms in the game against 41 - and no margin held it. Losing packets, it is not inside.
+        var inside = false;
+        if (chosen.Kind == PathKind.Home && !region.IsHomeInside)
+        {
+            string? near = null;
+            var nearMs = double.PositiveInfinity;
+            foreach (var (relayId, ms) in region.ViaRelayMs
+                         .Where(kv => !kv.Key.Equals(homeRelayId, StringComparison.Ordinal))
+                         .Where(kv => allowedRelays is null || allowedRelays.Contains(kv.Key))
+                         .Where(kv => !region.IsLossyVia(kv.Key) && region.IsInsideVia(kv.Key))
+                         .OrderBy(kv => OrderOf(options.RelayOrder, kv.Key))
+                         .ThenBy(kv => kv.Key, StringComparer.Ordinal))
+            {
+                if (ms <= homeScore && ms < nearMs)
+                {
+                    near = relayId;
+                    nearMs = ms;
+                }
+            }
+            if (near is not null)
+            {
+                chosen = RegionPath.Via(near);
+                chosenMs = nearMs;
+                chosenScore = nearMs;
+                inside = true;
+                var secondLeg = nearMs - region.ViaRelayLegMs![near];
+                reason = $"{near} {nearMs:F0} ms, inside the region ({secondLeg:F0} ms on from the relay), against home {homeText}";
+            }
         }
 
         // Rule 5 (G8). Direct carries no penalty: its loss is the player's own line's, which every path shares.
@@ -261,23 +352,39 @@ public static class RegionPlanner
             chosen = RegionPath.DirectPath;
             chosenMs = direct;
             chosenScore = direct;
+            inside = false;
             reason = $"direct {direct:F0} ms against home {homeText}" + (best is null ? "" : $" and {bestText}");
         }
 
+        double? otherMs = best is null ? null : bestMs;
+        var margin = Margin(homeScore);
+
         // Rule 7: hysteresis. The old path stays unless the new one beats its CURRENT score by the margin -
         // and only while the old path still scores no worse than home (G2 holds through hysteresis too).
+        //
+        // Two exceptions, both for 4b. Home does not hold a region against a relay inside it: that move never needed the
+        // margin, and holding it would undo 4b for the session after one pass that read the relay a millisecond slow. And a
+        // region on a relay inside it stays there until home - or anything - beats it by the margin, even when it now reads
+        // a little slower than home: a relay next to the servers and a home that measure alike would otherwise trade the
+        // region on every pass. The one place a path may score worse than home, and never by the margin.
         if (previous is not null && previous.TryGetValue(region.RegionId, out var was) && was != chosen &&
+            !(inside && was.Kind == PathKind.Home) &&
             Current(was, region, homeRelayId, options, allowedRelays, home) is { } current &&
-            current.Score <= homeScore && !RescanScore.WorthMoving(current.Score, chosenScore))
+            (current.Score <= homeScore || IsCleanInside(was, region)) && !WorthLeaving(current.Score, chosenScore))
         {
+            var wasInside = IsCleanInside(was, region);
             return new(region.RegionId, was, current.Ms, home,
-                $"stays on {was} at {Label(current.Ms, current.Score > current.Ms)} - {chosen} at " +
-                $"{Label(chosenMs, chosenScore > chosenMs)} is not faster by {Margin(current.Score):F0} ms",
-                current.Score, homeScore);
+                $"stays on {was} at {Label(current.Ms, current.Score > current.Ms)}{(wasInside ? ", inside the region" : "")} - " +
+                $"{chosen} at {Label(chosenMs, chosenScore > chosenMs)} is not faster by {Margin(current.Score):0.#} ms",
+                current.Score, homeScore, Inside: wasInside, BestOtherId: best, BestOtherMs: otherMs, MarginMs: margin);
         }
 
-        return new(region.RegionId, chosen, chosenMs, home, reason, chosenScore, homeScore);
+        return new(region.RegionId, chosen, chosenMs, home, reason, chosenScore, homeScore, inside, best, otherMs, margin);
     }
+
+    /// <summary>A relay path still inside the region (<see cref="InsideHoldMs"/>) and not losing packets - what rule 7 holds for 4b.</summary>
+    private static bool IsCleanInside(RegionPath path, RegionMeasurement region) =>
+        path.Kind == PathKind.Relay && region.IsInsideVia(path.RelayId!, InsideHoldMs) && !region.IsLossyVia(path.RelayId!);
 
     /// <summary>"38 ms", or "38 ms losing packets" for a path the penalty applies to.</summary>
     private static string Label(double ms, bool lossy) => lossy ? $"{ms:F0} ms losing packets" : $"{ms:F0} ms";
@@ -294,7 +401,7 @@ public static class RegionPlanner
         _ => null,
     };
 
-    private static double Margin(double ms) => Profiles.RelayPaths.HelpMargin(ms);
+    private static double Margin(double ms) => LeaveMargin(ms);
 
     private static int OrderOf(IReadOnlyList<string> order, string id)
     {

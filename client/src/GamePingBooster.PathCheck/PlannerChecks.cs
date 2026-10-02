@@ -23,6 +23,7 @@ internal static partial class Program
         NoLandmarkFollowsHome();
         NoAnswerThroughHomeFollowsHome();
         AFasterRelayByTheMarginIsChosen();
+        ARelayInsideTheRegionIsTakenWithoutTheMargin();
         AFasterRelayInsideTheMarginIsNot();
         TheHomeRelayIsNeverACandidateOfItsOwn();
         DirectIsNeverChosenWhenNotAllowed();
@@ -38,6 +39,7 @@ internal static partial class Program
         APathInUseStaysUnlessClearlyBeaten();
         APathSlowerThanHomeIsLeftWhateverTheMargin();
         DeltaForceFromHanoi();
+        Cs2SingaporeMatchesOnAHongKongHome();
         AHomeLosingPacketsIsLeftForACleanRelay();
         AHomeLosingPacketsIsLeftForACleanRelayMuchSlower();
         ALossyRelayNeverBeatsACleanHomeOnSpeed();
@@ -67,6 +69,68 @@ internal static partial class Program
         var plan = RegionPlanner.Plan(HomeRelay, [Region("hk", 34, via: ("hk-2", 28))], Options());
         Check("A relay 6 ms faster than home at 34 ms (margin 5): chosen", PathOf(plan, "hk") == RegionPath.Via("hk-2"),
             $"got {PathOf(plan, "hk")}");
+    }
+
+    /// <summary>
+    /// Rule 4b, from the night it was made (2026-10-02): a Hanoi Viettel player, Naraka's Ho Chi Minh City region. vn-3 is in
+    /// Ho Chi Minh City next to the game servers - 29.6 ms to its relayd, about 4 on to the landmark - and the Hanoi homes are
+    /// 11-22 ms to their relayd and 15-27 on. 41 ms in the game through any Hanoi home, 36 through vn-3. The four passes after
+    /// the landmark was fixed read vn-3 4.3, 3.7, 1.3 and 2 ms faster; none cleared max(5 ms, 10%).
+    /// </summary>
+    private static RegionMeasurement HcmFromHanoi(double homeMs, double homeLeg, double vn3) =>
+        Region("hcm", homeMs, 31, true, ("vn-3", vn3), ("sg-1", 90)) with
+        {
+            HomeLegMs = homeLeg,
+            ViaRelayLegMs = new Dictionary<string, double> { ["vn-3"] = 29.6, ["sg-1"] = 44 },
+        };
+
+    private static void ARelayInsideTheRegionIsTakenWithoutTheMargin()
+    {
+        var hcm = new PlannerOptions(false, 3, ["vn-1", "vn-2", "vn-3", "vn-4", "sg-1"]);
+        var passes = new[] { ("vn-1", 37.6, 22.0, 33.3), ("vn-2", 38.2, 12.5, 34.5), ("vn-4", 37.5, 11.8, 36.2), ("vn-4", 36.0, 11.8, 34.0) };
+        var taken = passes.Select(p => RegionPlanner.Plan(p.Item1, [HcmFromHanoi(p.Item2, p.Item3, p.Item4)], hcm)[0]).ToList();
+        Check("4b: Naraka hcm from Hanoi - vn-3, inside the region, taken on all four passes (4.3, 3.7, 1.3 and 2 ms faster)",
+            taken.All(d => d.Path == RegionPath.Via("vn-3") && d.Inside),
+            string.Join("; ", taken.Select(d => $"{d.Path} ({d.Reason})")));
+
+        var slower = RegionPlanner.Plan("vn-4", [HcmFromHanoi(37.5, 11.8, 38.0)], hcm)[0];
+        Check("4b: vn-3 measured slower than home (38 vs 37.5) - home, G2 holds", slower.Path == RegionPath.HomePath,
+            $"got {slower.Path} ({slower.Reason})");
+
+        var lossy = RegionPlanner.Plan("vn-4", [HcmFromHanoi(37.5, 11.8, 34) with { LossyVia = new HashSet<string> { "vn-3" } }], hcm)[0];
+        Check("4b: vn-3 losing packets is not inside - home", lossy.Path == RegionPath.HomePath, $"got {lossy.Path} ({lossy.Reason})");
+
+        var noLeg = RegionPlanner.Plan("vn-4", [HcmFromHanoi(37.5, 11.8, 34) with { ViaRelayLegMs = null }], hcm)[0];
+        Check("4b: with no first leg measured nothing is inside - home, as before", noLeg.Path == RegionPath.HomePath,
+            $"got {noLeg.Path} ({noLeg.Reason})");
+
+        // The same numbers, but a first leg that leaves 14 ms on to the landmark: outside, so the margin applies.
+        var far = RegionPlanner.Plan("vn-4", [HcmFromHanoi(37.5, 11.8, 34) with
+            { ViaRelayLegMs = new Dictionary<string, double> { ["vn-3"] = 20, ["sg-1"] = 44 } }], hcm)[0];
+        Check("4b: a relay 14 ms on to the landmark is not inside - 3.5 ms faster is under the margin, home",
+            far.Path == RegionPath.HomePath, $"got {far.Path} ({far.Reason})");
+
+        // Home already inside the region: nothing to prefer.
+        var homeInside = RegionPlanner.Plan("vn-4", [Region("hcm", 33, 31, true, ("vn-3", 32)) with
+            { HomeLegMs = 30, ViaRelayLegMs = new Dictionary<string, double> { ["vn-3"] = 29.6 } }], hcm)[0];
+        Check("4b: home itself inside the region - stays home", homeInside.Path == RegionPath.HomePath && !homeInside.Inside,
+            $"got {homeInside.Path} ({homeInside.Reason})");
+
+        // A plan in force on home must not undo 4b: last pass on home, this pass vn-3 1.3 ms faster and inside.
+        var held = RegionPlanner.Plan("vn-4", [HcmFromHanoi(37.5, 11.8, 36.2)], hcm,
+            new Dictionary<string, RegionPath> { ["hcm"] = RegionPath.HomePath })[0];
+        Check("4b: a plan in force on home does not hold the region against a relay inside it", held.Path == RegionPath.Via("vn-3"),
+            $"got {held.Path} ({held.Reason})");
+
+        // A faster relay outside the region that clears the margin still wins: 4b only replaces home.
+        var faster = RegionPlanner.Plan("vn-4", [HcmFromHanoi(40, 11.8, 36) with
+            { ViaRelayMs = new Dictionary<string, double> { ["vn-3"] = 36, ["vn-1"] = 30 } }], hcm)[0];
+        Check("4b: an outside relay 10 ms faster wins over an inside one 4 ms faster - by the margin, as before",
+            faster.Path == RegionPath.Via("vn-1") && !faster.Inside, $"got {faster.Path} ({faster.Reason})");
+
+        Check("The decision says what kept a region home: the best other relay, its number and the margin",
+            slower.BestOtherId == "vn-3" && slower.BestOtherMs == 38.0 && slower.MarginMs == 5,
+            $"{slower.BestOtherId} {slower.BestOtherMs} {slower.MarginMs}");
     }
 
     private static void AFasterRelayInsideTheMarginIsNot()
@@ -137,7 +201,7 @@ internal static partial class Program
             Region("jkt", 60, via: [("sg-4", 42)]),
         ], Options(maxTunnels: 3), previous);
         // {hk-2, sg-1} is open and saves 45; {hk-2, sg-4} would move sg home (-15) and jkt to sg-4 (+18): 3 ms more,
-        // against 11 ms of margin for the two regions it moves.
+        // against 6 ms of margin for the region it improves.
         Check("Over the cap: the set already open stays when another saves more by less than its moves' margins (48 vs 45)",
             PathOf(plan, "sg") == RegionPath.Via("sg-1") && PathOf(plan, "hk") == RegionPath.Via("hk-2") && PathOf(plan, "jkt") == RegionPath.HomePath,
             string.Join(", ", plan.Select(d => $"{d.RegionId}={d.Path}")));
@@ -218,6 +282,41 @@ internal static partial class Program
             PathOf(plan, "asia-sg") == RegionPath.Via("sg-1") && PathOf(plan, "asia-jp") == RegionPath.Via("vn-3") &&
             PathOf(plan, "asia-hk") == RegionPath.HomePath,
             string.Join(", ", plan.Select(d => $"{d.RegionId}={d.Path} ({d.Reason})")));
+    }
+
+    /// <summary>
+    /// The case that turned CS2's region routing on (2026-10-01): a VNPT customer whose home was hk played FACEIT on
+    /// Singapore at a 76.7 ms datacentre p50, where sg-4 had given the same player 37.7 two weeks before. The numbers are
+    /// prod's averages for VNPT CS2 matches: Singapore 77.6 through hk, 37.9 through sg-4, 44.5 through sg-1; Hong Kong
+    /// 40.9 through hk, 82.6 through sg-1. No direct number - the landmarks are Valve relays inside the game's routes, so
+    /// the pass records none and the game may not go direct.
+    /// </summary>
+    private static void Cs2SingaporeMatchesOnAHongKongHome()
+    {
+        var order = new[] { "hk", "hk-2", "sg-1", "sg-2", "sg-3", "sg-4" };
+        var options = new PlannerOptions(RegionRouting.DirectAllowed(new GameEntry { LandmarksRouted = true, RegionDirect = true }),
+            RegionRouting.MaxTunnels, order, "sgp");
+        var fromHk = RegionPlanner.Plan("hk",
+        [
+            Region("sgp", 77.6, null, true, ("hk-2", 83.9), ("sg-1", 44.5), ("sg-4", 37.9)),
+            Region("hkg", 40.9, null, true, ("hk-2", 41.1), ("sg-1", 82.6), ("sg-4", 88.1)),
+        ], options);
+        Check("CS2 home hk: Singapore leaves for sg-4 (37.9 against 77.6), Hong Kong stays home",
+            PathOf(fromHk, "sgp") == RegionPath.Via("sg-4") && PathOf(fromHk, "hkg") == RegionPath.HomePath,
+            string.Join(", ", fromHk.Select(d => $"{d.RegionId}={d.Path}")));
+
+        var fromSg = RegionPlanner.Plan("sg-1",
+        [
+            Region("sgp", 44.5, null, true, ("sg-4", 37.9), ("hk", 77.6)),
+            Region("hkg", 82.6, null, true, ("hk", 40.9), ("hk-2", 41.1)),
+        ], options with { TargetRegionId = "hkg" });
+        Check("CS2 home sg-1: Hong Kong leaves for hk (40.9 against 82.6); Singapore moves to sg-4 only by its own margin",
+            PathOf(fromSg, "hkg") == RegionPath.Via("hk") && PathOf(fromSg, "sgp") == RegionPath.Via("sg-4"),
+            string.Join(", ", fromSg.Select(d => $"{d.RegionId}={d.Path}")));
+
+        var noDirect = RegionPlanner.Plan("hk", [Region("sgp", 77.6, 30, true, ("sg-4", 37.9))], options);
+        Check("CS2: a direct number, should one ever appear, is never chosen - the landmarks are routed",
+            PathOf(noDirect, "sgp") == RegionPath.Via("sg-4"), $"got {PathOf(noDirect, "sgp")}");
     }
 
     private static void APathInUseStaysUnlessClearlyBeaten()
@@ -322,7 +421,9 @@ internal static partial class Program
 
     // ------------------------------------------------------------ properties
 
-    private static List<RegionMeasurement> RandomRegions(Random rng)
+    /// <param name="legRng">Draws the first legs, on a stream of its own: drawn from <paramref name="rng"/>, they changed every
+    /// random game the properties had been checked on, and the checks then failed on games that had never been run.</param>
+    private static List<RegionMeasurement> RandomRegions(Random rng, Random legRng)
     {
         var regions = new List<RegionMeasurement>();
         for (var r = rng.Next(1, 7); r > 0; r--)
@@ -337,7 +438,15 @@ internal static partial class Program
             var direct = rng.Next(3) == 0 ? (double?)null : 5 + rng.NextDouble() * 150;
             // A path in five losing packets, home included, so every property below also holds on the score.
             var lossyVia = via.Keys.Where(_ => rng.Next(5) == 0).ToHashSet(StringComparer.Ordinal);
-            regions.Add(new RegionMeasurement($"r{regions.Count}", rng.Next(6) != 0, home, via, direct, rng.Next(5) == 0, lossyVia));
+            // First legs, so rule 4b is exercised: about a third of the relays - and home, now and then - sit inside the
+            // region (their number less their leg under InsideRegionMs), the rest well outside it; some have no leg at all.
+            double? Leg(double ms) => legRng.Next(4) == 0 ? null
+                : legRng.Next(3) == 0 ? Math.Max(0, ms - legRng.NextDouble() * RegionPlanner.InsideRegionMs)
+                : Math.Max(0, ms - RegionPlanner.InsideRegionMs - 1 - legRng.NextDouble() * 60);
+            var legs = via.Select(kv => (kv.Key, Leg: Leg(kv.Value))).Where(x => x.Leg is not null)
+                .ToDictionary(x => x.Key, x => x.Leg!.Value, StringComparer.Ordinal);
+            regions.Add(new RegionMeasurement($"r{regions.Count}", rng.Next(6) != 0, home, via, direct, rng.Next(5) == 0, lossyVia,
+                home is { } hm && legRng.Next(4) == 0 ? Leg(hm) : null, legs));
         }
         return regions;
     }
@@ -356,12 +465,13 @@ internal static partial class Program
     private static void PlansHoldForEveryRandomInput()
     {
         var rng = new Random(Seed + 30);
+        var legRng = new Random(Seed + 130);
         var broken = new Dictionary<string, string>();
         void Broke(string rule, string detail) => broken.TryAdd(rule, detail);
 
         for (var i = 0; i < 20_000; i++)
         {
-            var regions = RandomRegions(rng);
+            var regions = RandomRegions(rng, legRng);
             var options = Options(allowDirect: rng.Next(2) == 0, maxTunnels: rng.Next(1, 5),
                 target: rng.Next(2) == 0 ? null : regions[rng.Next(regions.Count)].RegionId);
             var previous = rng.Next(2) == 0 ? null : regions.ToDictionary(r => r.RegionId, _ => RandomPath(rng));
@@ -392,11 +502,20 @@ internal static partial class Program
                     ? m.DirectMs!.Value
                     : RelayLoss.Score(m.ViaRelayMs[d.Path.RelayId!], m.IsLossyVia(d.Path.RelayId!));
 
-                // G2, always: never a path that scores worse than home.
-                if (chosen > home) Broke("G2 never slower than home", $"{at} {d.RegionId}: {d.Path} {chosen:F1} vs home {home:F1}");
+                // G2, always: never a path that scores worse than home - but for a relay inside the region the plan in force
+                // already had, which home must beat by the margin to take back (rule 7, for 4b). Never one taken fresh.
+                var heldInside = !fresh && d.Inside && d.Path.Kind == PathKind.Relay;
+                if (chosen > home && !heldInside) Broke("G2 never slower than home", $"{at} {d.RegionId}: {d.Path} {chosen:F1} vs home {home:F1}");
+                if (heldInside && RegionPlanner.WorthLeaving(chosen, home))
+                    Broke("G2 a relay inside the region is held only inside the margin", $"{at} {d.RegionId}: {d.Path} {chosen:F1} vs home {home:F1}");
+                if (d.Inside && (d.Path.Kind != PathKind.Relay || m.IsLossyVia(d.Path.RelayId!) ||
+                                 !m.IsInsideVia(d.Path.RelayId!, fresh ? RegionPlanner.InsideRegionMs : RegionPlanner.InsideHoldMs)))
+                    Broke("4b only takes a clean relay inside the region", $"{at} {d.RegionId}: {d.Path} ({d.Reason})");
 
                 // G2 and G8 in full, for a plan made from nothing: leaving home, and going direct, take the margin.
-                if (fresh && !RescanScore.WorthMoving(home, chosen)) Broke("G2 leaves home only by the margin", $"{at} {d.RegionId}: {chosen:F1} vs home {home:F1}");
+                if (fresh && !d.Inside && !RegionPlanner.WorthLeaving(home, chosen)) Broke("G2 leaves home only by the margin", $"{at} {d.RegionId}: {chosen:F1} vs home {home:F1}");
+                if (fresh && d.Path.Kind == PathKind.Direct && !RescanScore.WorthMoving(home, chosen))
+                    Broke("G8 direct leaves home only by direct's own 5 ms margin", $"{at} {d.RegionId}: direct {chosen:F1} vs home {home:F1}");
                 if (fresh && d.Path.Kind == PathKind.Direct)
                 {
                     // Against the best relay the plan could still use: when the cap is full, only the relays it kept.
@@ -431,15 +550,16 @@ internal static partial class Program
     private static void PlansDoNotFlapOnNoise()
     {
         var rng = new Random(Seed + 31);
+        var legRng = new Random(Seed + 131);
         string? failure = null;
         var movedOnce = 0;
         for (var i = 0; i < 20_000 && failure is null; i++)
         {
-            var regions = RandomRegions(rng);
+            var regions = RandomRegions(rng, legRng);
             var options = Options(allowDirect: rng.Next(2) == 0, maxTunnels: rng.Next(1, 5),
                 target: rng.Next(2) == 0 ? null : regions[rng.Next(regions.Count)].RegionId);
 
-            double Jitter(double ms) => ms + (rng.NextDouble() * 2 - 1) * RelayPaths.HelpMargin(ms) / 4;
+            double Jitter(double ms) => ms + (rng.NextDouble() * 2 - 1) * RegionPlanner.LeaveMargin(ms) / 4;
             var noisy = regions.Select(r => r with
             {
                 HomeMs = r.HomeMs is { } h ? Jitter(h) : null,

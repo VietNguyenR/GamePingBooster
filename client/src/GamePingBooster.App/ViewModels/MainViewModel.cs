@@ -510,6 +510,19 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    private bool _gameRegionExpected;
+    /// <summary><see cref="GameRegionName"/> is where the next match is expected, not where one was seen. See the status field.</summary>
+    public bool GameRegionExpected
+    {
+        get => _gameRegionExpected;
+        private set
+        {
+            if (!Set(ref _gameRegionExpected, value)) return;
+            Raise(nameof(GamePingText));
+            Raise(nameof(GamePingTip));
+        }
+    }
+
     private double? _lossRatio;
     public double? LossRatio
     {
@@ -593,7 +606,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         set
         {
             var same = value.Count == _regionPathList.Count &&
-                       value.Zip(_regionPathList).All(p => p.First.Region == p.Second.Region && p.First.RelayName == p.Second.RelayName);
+                       value.Zip(_regionPathList).All(p => p.First.Region == p.Second.Region && p.First.RelayName == p.Second.RelayName &&
+                                                           p.First.Home == p.Second.Home && p.First.Inside == p.Second.Inside &&
+                                                           p.First.BestOtherName == p.Second.BestOtherName &&
+                                                           p.First.GainMs == p.Second.GainMs && p.First.MarginMs == p.Second.MarginMs);
             if (same) return;
             _regionPathList = value;
             RaiseTunnels();
@@ -601,7 +617,21 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     /// <summary>Each region leaving by another relay, as "region → relay" joined for the tooltips. Empty with one tunnel.</summary>
-    public string RegionPaths => string.Join("; ", RegionPathList.Select(p => $"{p.Region} → {p.RelayName}"));
+    public string RegionPaths => string.Join("; ", RegionPathList.Where(p => !p.Home).Select(p => $"{p.Region} → {p.RelayName}"));
+
+    /// <summary>
+    /// Every region the plan measured, one line each: where its matches go and, for one that stays on home, why - the
+    /// fastest other relay, what it gained and what the margin asked. A region on home used to be left out, and a region
+    /// relay that lost on the margin read as one the app had never measured.
+    /// </summary>
+    private string RegionPlanLines => string.Join(Environment.NewLine, RegionPathList.Select(p =>
+        !p.Home
+            ? Loc.F(p.Inside ? "adaptive.region.inside" : "adaptive.region.via", p.Region, p.RelayName)
+            : p.BestOtherName is { } other && p.GainMs is { } gain
+                ? gain > 0
+                    ? Loc.F("adaptive.region.homeShort", p.Region, p.RelayName, other, $"{gain:F0}", $"{p.MarginMs ?? 0:0.#}")
+                    : Loc.F("adaptive.region.homeFaster", p.Region, p.RelayName, other)
+                : Loc.F("adaptive.region.home", p.Region, p.RelayName)));
 
     /// <summary>
     /// The adaptive tunnels: the relays the region plan sends some of this game's regions to, besides home - each
@@ -612,7 +642,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         get
         {
-            var names = RegionPathList.Select(p => p.RelayName).Distinct().ToList();
+            var names = RegionPathList.Where(p => !p.Home).Select(p => p.RelayName).Distinct().ToList();
             if (CarriedByOther && RelayName is { } carrier && !names.Contains(carrier)) names.Add(carrier);
             if (names.Count == 0) return [new AdaptiveTunnel(Loc.T("value.none"), ValueBrush)];
             return [.. names.Select((name, i) => new AdaptiveTunnel(
@@ -624,9 +654,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// <summary>The match is on an adaptive tunnel rather than home.</summary>
     private bool CarriedByOther => HomeRelayName is { } home && RelayName is { } carrier && carrier != home;
 
-    public string AdaptiveTip => RegionPaths.Length > 0 || CarriedByOther
-        ? Loc.F("adaptive.tip", RegionPaths.Length > 0 ? RegionPaths : RelayName ?? "", HomeRelayName ?? Loc.T("gamePing.tip.theRelay"))
-        : Loc.T("adaptive.tip.none");
+    public string AdaptiveTip => RegionPathList.Count > 0
+        ? Loc.F("adaptive.tip.plan", RegionPlanLines, HomeRelayName ?? RelayName ?? Loc.T("gamePing.tip.theRelay"))
+        : CarriedByOther
+            ? Loc.F("adaptive.tip", RelayName ?? "", HomeRelayName ?? Loc.T("gamePing.tip.theRelay"))
+            : Loc.T("adaptive.tip.none");
 
     /// <summary>
     /// Green on the relay line while home carries the traffic, grey while an adaptive tunnel carries the match - that
@@ -797,7 +829,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string GamePingText => GamePingMs is { } g
         ? (GamePingDirect ? "" : "~") +
           (GameRegionName is { } region
-              ? Loc.F("value.msTo", $"{g:F0}", region)
+              ? Loc.F(GameRegionExpected ? "value.msToExpected" : "value.msTo", $"{g:F0}", region)
               : Loc.F("value.ms", $"{g:F0}"))
         : Loc.T("value.none");
 
@@ -808,7 +840,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </summary>
     public string GamePingTip => GamePingMs is null
         ? Loc.T("gamePing.tip.pending")
-        : GamePingRelayName is { } via
+        : (GameRegionExpected && GameRegionName is { } expected ? Loc.F("gamePing.tip.expected", expected) + " " : "") +
+          GamePingTipBody;
+
+    private string GamePingTipBody => GamePingRelayName is { } via
             ? Loc.F("gamePing.tip.nextMatch", via, GameRegionName ?? Loc.T("gamePing.tip.itsServers"),
                 RelayName ?? Loc.T("gamePing.tip.theRelay"))
         : GamePingDirect
@@ -1124,9 +1159,28 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private void ApplyServiceText(StatusMessage status)
     {
         _detailKey = null;
-        Detail = Say(status.DetailCode, status.DetailArgs, status.Detail) ?? "";
+        Detail = DetailOf(status);
         LicenceRefusal = Say(status.LicenceRefusalCode, status.LicenceRefusalArgs, status.LicenceRefusal);
         RelayChoiceNote = Say(status.RelayChoiceNoteCode, status.RelayChoiceNoteArgs, status.RelayChoiceNote);
+    }
+
+    /// <summary>
+    /// The line under the status. The service writes "accelerating X through home" once, when the game starts; while
+    /// an adaptive tunnel carries the match that names the wrong relay - a CS2 player on a Singapore match through
+    /// sg-4 read "through Hong Kong #1" (2026-10-01) and took it for the booster not working. So while another tunnel
+    /// carries the match, the line names it, and home beside it. Every status carries both names, so it follows the
+    /// carrier there and back without the service saying anything new.
+    /// </summary>
+    private static string DetailOf(StatusMessage status)
+    {
+        if (status.State == TunnelState.Connected &&
+            status.DetailCode is "svc.accelerating" or "svc.connectedAccelerating" &&
+            status.HomeRelayName is { } home && status.RelayName is { } carrier && carrier != home &&
+            status.GameName is { Length: > 0 } game)
+        {
+            return Loc.F("svc.acceleratingAdaptive", game, carrier, home);
+        }
+        return Say(status.DetailCode, status.DetailArgs, status.Detail) ?? "";
     }
 
     private static string? Say(string? code, List<string>? args, string? english)
@@ -1165,7 +1219,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         State = status.State;
         _detailKey = null;
-        Detail = Say(status.DetailCode, status.DetailArgs, status.Detail) ?? "";
+        Detail = DetailOf(status);
         Error = status.Error;
         ApplyDetails(status);
     });
@@ -1209,6 +1263,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         GamePingMs = status.GamePingMs;
         GamePingDirect = status.GamePingDirect;
         GameRegionName = status.GameRegionName;
+        GameRegionExpected = status.GameRegionExpected;
         GamePingRelayName = status.GamePingRelayName;
         LossRatio = status.LossRatio;
         GameRunning = status.GameRunning;
@@ -1250,6 +1305,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         GamePingMs = null;
         GamePingDirect = false;
         GameRegionName = null;
+        GameRegionExpected = false;
         GamePingRelayName = null;
         LossRatio = null;
         ActiveRoutes = 0;

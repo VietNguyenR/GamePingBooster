@@ -50,7 +50,7 @@ Two observations make it safe:
 | # | Guarantee | Enforced by |
 |---|---|---|
 | G1 | The exit address of a destination in use never changes. | Sticky destinations (5.3); a tunnel stays open while anything is stuck to it. |
-| G2 | No region gets a path that scores worse than home, and a region leaves home only when another path beats it by max(5 ms, 10%). A score is the round trip, plus 100 ms for a relay path losing packets (5.5). | Planner rules 3-4 and 7 (5.5). |
+| G2 | No region gets a path that scores worse than home, and a region leaves home only when another path beats it by max(5 ms, 10%) - or for a relay inside the region no slower than home (rule 4b), which then keeps the region until home beats it by the margin. A score is the round trip, plus 100 ms for a relay path losing packets (5.5). | Planner rules 3-4b and 7 (5.5). |
 | G3 | A region that cannot be measured fairly stays on home - exactly the single-tunnel behaviour. | Planner rule 1. |
 | G4 | With region routing off, the client behaves as a single-tunnel client. | No dispatcher exists until a plan leaves home. |
 | G5 | Never two paths into one relayd: a second handshake to a relay in use would steal its session. | The planner chooses relays, not ways into them; a relay with a tunnel open is measured through that tunnel. |
@@ -69,7 +69,7 @@ PathCheck or TunnelCheck (section 10).
 - **Path** - how a region's packets leave: `home`, another relay, or `direct` (not routed).
 - **Home tunnel** - the tunnel connect opens. Carries the lobby, every region not moved, and anything routed that
   matches no region.
-- **Secondary** - a tunnel to another relay, opened for the regions a plan sends there. At most `MaxTunnels` (3)
+- **Secondary** - a tunnel to another relay, opened for the regions a plan sends there. At most `MaxTunnels` (4; 3 until 2026-10-02)
   tunnels in all, one per relay.
 - **Carrier** (active tunnel) - the tunnel carrying the match right now (5.8).
 - **Stuck destination** - an address that has carried a packet in either direction within 120 s, and the tunnel
@@ -144,14 +144,24 @@ faster. Direct carries no penalty: its loss is the player's own line's.
 1. **Unmeasurable stays home** - no landmark, or no number through home. (G3)
 2. Candidates are relays with a number for the region.
 3. **Best relay** - the lowest score; ties by profile order.
-4. **Leave home only by the margin**, max(5 ms, 10%) of home's score. (G2)
-5. **Direct** only if the game allows it and it beats the chosen path by the margin. (G8)
+4. **Leave home only by the margin**, max(5 ms, 10%) of home's score - connect's margin, `RegionPlanner.LeaveMargin`.
+   On 2026-10-02 it was lowered to 3 ms in steps and put back the same night: fourteen days of prod plans replayed gave
+   path changes within a session of 399 at max(5, 10%), 546 at 3 ms flat and 931 with no margin; flips back 32, 51, 162. (G2)
+4b. **A relay inside the region** is taken when home would keep the region and the relay scores no worse than home,
+   without the margin - and not losing packets. Inside: its second leg - its number less the round trip to its relayd -
+   is at most 10 ms (`RegionPlanner.InsideRegionMs`); kept while it is at most 13 (`InsideHoldMs`). Measured from every
+   relay to every live landmark on 2026-10-02: relays next to servers 0.8-5.5 ms, the nearest other 13.6. Home inside
+   the region already: nothing to prefer. Why: a Hanoi player's Naraka HCM matches played at 41 ms through a Hanoi home
+   and 36 through vn-3, next to the servers; passes read vn-3 1.3-4.3 ms faster, and no margin held the region on it.
+5. **Direct** only if the game allows it and it beats the chosen path by connect's margin, max(5 ms, 10%). (G8)
 6. **Cap** - at most `MaxTunnels - 1` relays besides home. Over it, every set of that many relays is scored by
    what it saves over home, each region re-decided among the set; the region the game is expected to use (the one
    home's path is measured against) counts double. The set the last plan holds stays unless another gains, net of
    what it costs the regions it pushes onto worse paths, the margin of every region it improves.
 7. **Hysteresis** - a region keeps its current path unless the new choice beats that path by the margin, and
-   only while that path still scores no worse than home.
+   only while that path still scores no worse than home. For 4b: home never holds a region against a relay inside
+   it, and a region on a relay inside it stays there - even reading a little slower than home - until something beats
+   it by the margin, so a relay and a home that measure alike do not trade the region on every pass.
 
 When it runs:
 
@@ -177,7 +187,9 @@ pass is logged number by number and uploaded as a `regionPlan` quality record, w
 - Several echoes may be in flight through one tunnel at once (the in-game ping and a planner pass), each matched
   by its own id and sequence.
 - Landmarks are never inside a routed range, so a "direct" echo cannot fall into the tunnel. Games whose
-  landmarks are routed (Steam Datagram Relay) have region routing off.
+  landmarks are routed (Steam Datagram Relay) are the exception: their regions are measured through home and the
+  other relays only - echoes carried inside a tunnel leave from its relay whatever the PC routes - and they never go
+  direct. Until 2026-10-01 such games had region routing off outright.
 
 ### 5.7 Failure: one tunnel at a time
 
@@ -246,14 +258,15 @@ until the next connect - a bug in this code costs its benefit, not the player's 
 | PUBG | record | the game picks its region by probing; multi-tunnel helps only a player placed elsewhere |
 | LoL, TFT, WoT, Apex | record | one region each; nothing to choose until a second exists |
 | VALORANT | off | Riot Direct answers every region on the same addresses |
-| CS2 | off | its landmarks are its relays, and are routed |
+| CS2, Dota 2 | record, then on; never direct | Singapore and Hong Kong PoPs plus FACEIT servers in both; its landmarks are Valve relays inside its routes, so relay against relay only |
 
 ## 7. Server side
 
 ### 7.1 Profile
 
 - Each game carries `regionRouting` (`off` | `record` | `on`) and `regionDirect`. Read at connect, never
-  mid-match; absent reads as `off` and no direct. A Steam Datagram Relay game is always `off`.
+  mid-match; absent reads as `off` and no direct. A Steam Datagram Relay game is served its mode like any other
+  (clients up to 0.3.7 keep it `off`), and never direct.
 - Each relay carries `games` (the games it may carry - home, failover, the app's relay list) and
   `secondaryGames`: games it may carry **one region** of through a second tunnel and nothing else. Such a relay is
   measured by the planner and may be opened as a secondary, but never becomes home for that game - a Hong Kong
@@ -288,7 +301,7 @@ until the next connect - a bug in this code costs its benefit, not the player's 
 |---|---|---|
 | A | The data plane with one tunnel: single reader, per-tunnel downlinks | a week of soak with in-game ping and spikes unchanged |
 | B | Profile fields served; relays report client ids | client ids on live sessions |
-| C | The planner in `record` for every game but CS2 and VALORANT | a week of `regionPlan` records: how often a region would leave home, by how much |
+| C | The planner in `record` for every game but VALORANT (CS2 from 0.3.8) | a week of `regionPlan` records: how often a region would leave home, by how much |
 | D | `on` via config.json on one PC | matches in two regions in one session carried as planned; no reconnect caused by the dispatcher |
 | E | `on` for Delta Force in the served profile | 10.4 holds for a week |
 | F | `regionDirect` for one game, record first | direct chosen only where the in-match probe agrees |
@@ -339,4 +352,4 @@ than a third of the time has a landmark that does not stand for its servers, and
 - **Idle secondaries cost a relay slot and a keepalive a second**; closed when no region needs them.
 - **Anti-cheat.** Nothing touches the game: routes, one adapter, and packets rewritten after they leave Windows'
   stack, as a home router does.
-- Open: whether `MaxTunnels` should be 2.
+- Settled 2026-10-02: `MaxTunnels` is 4, home included - two regions with a relay inside each (rule 4b) and room for a third.

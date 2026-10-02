@@ -99,7 +99,7 @@ internal sealed partial class TunnelEngine
 
         // Region routing on: the regions are planned again, every relay for every region, instead of moving home for
         // the one region connect guessed. See ReplanBetweenMatchesAsync.
-        if (_game is { } game && RegionRouting.Resolve(_config.RegionRouting, game.RegionRouting, game.LandmarksRouted).Mode ==
+        if (_game is { } game && RegionRouting.Resolve(_config.RegionRouting, game.RegionRouting).Mode ==
             RegionRoutingMode.On)
         {
             await ReplanBetweenMatchesAsync(tunnel, game, ct).ConfigureAwait(false);
@@ -215,21 +215,30 @@ internal sealed partial class TunnelEngine
                      (hereLoss.IsLossy ? $", losing packets ({hereLoss})" : RelayLoss.Note(hereLoss)));
             }
 
-            foreach (var relay in others)
+            // Side by side across relays, in order within one - see MeasureSideBySideAsync. The reasons to stop are
+            // asked before every way as they always were, and said once: the first relay to see one stops them all.
+            var stopGate = new object();
+            var stopSaid = false;
+            bool Stop()
             {
-                foreach (var way in RelayPaths.DoorsOf(profile.Relays, relay.Id))
+                lock (stopGate)
                 {
-                    if (MatchStarted(tunnel, packetsAtStart) || (!forGame && TooLate(tunnel, current))) return;
-                    if (IsRoutedIntoTunnel(way))
-                    {
-                        _log($"  {way.Name} [{way.Id}]: skipped - its address is inside a routed game range, so a probe would go through the tunnel.");
-                        continue;
-                    }
-
-                    // One path to a relay open at a time: the next way into it resumes the same session.
-                    CloseProbesOf(probes, relay.Id);
-                    if (await MeasureCandidateAsync(way, psk, path, token).ConfigureAwait(false) is { } probe) probes.Add(probe);
+                    if (stopSaid) return true;
+                    stopSaid = MatchStarted(tunnel, packetsAtStart) || (!forGame && TooLate(tunnel, current));
+                    return stopSaid;
                 }
+            }
+
+            var ways = others.SelectMany(relay => RelayPaths.DoorsOf(profile.Relays, relay.Id)).ToList();
+            var measuredPath = path;
+            if (await MeasureSideBySideAsync(ways, probes,
+                    (way, say, t) => MeasureCandidateAsync(way, psk, measuredPath, t, say),
+                    skip: way => IsRoutedIntoTunnel(way)
+                        ? $"  {way.Name} [{way.Id}]: skipped - its address is inside a routed game range, so a probe would go through the tunnel."
+                        : null,
+                    stop: Stop, _log, token).ConfigureAwait(false))
+            {
+                return;
             }
 
             // Compared on the score: the round trip, plus the penalty for a path losing packets (RelayLoss).
@@ -333,8 +342,10 @@ internal sealed partial class TunnelEngine
     /// One handshake attempt, not the two a connect allows: a relay that does not answer inside two seconds
     /// is not one to move to, and every second spent waiting on it brings the next match closer.
     /// </summary>
-    private async Task<RelayProbe?> MeasureCandidateAsync(RelayEntry way, byte[] psk, PathMeasurement? path, CancellationToken ct)
+    private async Task<RelayProbe?> MeasureCandidateAsync(RelayEntry way, byte[] psk, PathMeasurement? path, CancellationToken ct,
+        Action<string>? say = null)
     {
+        say ??= _log;
         TunnelClient? client = null;
         try
         {
@@ -347,7 +358,7 @@ internal sealed partial class TunnelEngine
             // every candidate the same way, so no relay wins by a number the others were not measured on.
             if (path is null)
             {
-                _log($"  {way.Name} [{way.Id}]: {legOne:F0} ms to the relay{RelayLoss.Note(loss)}");
+                say($"  {way.Name} [{way.Id}]: {legOne:F0} ms to the relay{RelayLoss.Note(loss)}");
                 return new RelayProbe(way, legOne, legOne) { Client = client, Loss = loss };
             }
 
@@ -358,7 +369,7 @@ internal sealed partial class TunnelEngine
             }
             var median = RescanScore.Median(samples);
 
-            _log((median is { } ms
+            say((median is { } ms
                 ? $"  {way.Name} [{way.Id}]: {legOne:F0} ms to the relay, {ms:F0} ms to {path.RegionName}"
                 : $"  {way.Name} [{way.Id}]: {legOne:F0} ms to the relay, too few answers from {path.RegionName} to compare") +
                 RelayLoss.Note(loss));
@@ -371,7 +382,7 @@ internal sealed partial class TunnelEngine
         }
         catch (Exception ex)
         {
-            _log($"  {way.Name} [{way.Id}]: unreachable - {ex.Message}");
+            say($"  {way.Name} [{way.Id}]: unreachable - {ex.Message}");
             // As in ProbeAsync: an entry's session is its relay's, and was closed on purpose a moment ago.
             if (way.ViaRelayId is null) client?.Dispose();
             else Abandon(client);

@@ -9,7 +9,8 @@
 
     Run it from anywhere:
 
-        .\gpb.ps1 dev                 build and start the service (as LocalSystem) plus the UI
+        .\gpb.ps1 dev [x.y.z-tag]     build and start the service (as LocalSystem) plus the UI; a
+                                      version stamps the build, e.g. 0.3.8-dev for a test session
         .\gpb.ps1 stop                stop both
         .\gpb.ps1 capture [game] [udp|tcp|all]  watch for the game and collect server addresses
                                       (udp); tcp/all also report which lobby/login connections
@@ -312,8 +313,20 @@ function Start-UnelevatedUi {
     Start-Process $Path | Out-Null
 }
 
-function Invoke-Dev {
+function Invoke-Dev([string]$Version) {
     Add-VsWhereToPath
+
+    # A dev build calls itself what VERSION says - the release already out - and every quality record it uploads is
+    # filed under that release, mixed with the customers' matches it is meant to be compared with. A version given here
+    # stamps this build alone (VERSION is not touched): name the next release with a tag, e.g. 0.3.8-dev, so the
+    # records stand apart, the licence server's minimum still lets it in and the app sees no update to offer.
+    $versionArgs = @()
+    if ($Version) {
+        if ($Version -notmatch '^\d{1,6}\.\d{1,6}\.\d{1,6}(-[0-9A-Za-z.-]{1,32})?$') {
+            throw "Not a version: '$Version'. Use x.y.z or x.y.z-tag, e.g. 0.3.8-dev."
+        }
+        $versionArgs = @("-p:GpbVersion=$Version")
+    }
 
     # Stop first: the service holds wintun.dll and the UI holds Core.dll, and a build that cannot
     # copy them fails with a locked-file error that says nothing about why.
@@ -321,8 +334,9 @@ function Invoke-Dev {
     Start-Sleep -Milliseconds 500
 
     Say "Building"
-    & dotnet build (Join-Path $client 'GamePingBooster.sln') --nologo -v quiet
+    & dotnet build (Join-Path $client 'GamePingBooster.sln') --nologo -v quiet @versionArgs
     if ($LASTEXITCODE -ne 0) { throw "Build failed." }
+    if ($Version) { Say "Stamped $Version - quality records upload as that version" }
 
     $svc = Get-ServiceExe
     if (-not (Test-Path $svc)) { throw "No service binary at $svc" }
@@ -537,7 +551,7 @@ function Invoke-RelayDeploy($target, $extra) {
 }
 
 switch ($Verb.ToLowerInvariant()) {
-    'dev' { Invoke-Dev }
+    'dev' { Invoke-Dev $Arg1 }
 
     'stop' {
         if ((Stop-Everything) -eq 0) { Say "Nothing was running" 'DarkGray' }

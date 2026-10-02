@@ -41,6 +41,14 @@ internal sealed class LocalResolver : IAsyncDisposable
     private readonly UnblockPolicy _policy;
     private readonly DohUpstream _doh;
     private readonly WorkingEdges _edges;
+
+    /// <summary>
+    /// The tunnel, for names the profile routes through it (UnblockApp.tunnel), and the edge verdicts taken THROUGH
+    /// it - a separate set, because an edge the line resets by name can be a perfectly good one inside the tunnel.
+    /// Null when the service runs without a tunnel to offer (the self-test).
+    /// </summary>
+    private readonly IUnblockRoutes? _routes;
+    private readonly WorkingEdges? _tunnelEdges;
     private readonly Action<string> _log;
     private readonly CancellationTokenSource _stopping = new();
 
@@ -53,13 +61,20 @@ internal sealed class LocalResolver : IAsyncDisposable
     private long _forwarded;
     private long _failed;
 
-    public LocalResolver(IReadOnlyList<IPAddress> upstream, UnblockPolicy policy, Action<string> log)
+    public LocalResolver(IReadOnlyList<IPAddress> upstream, UnblockPolicy policy, Action<string> log,
+        IUnblockRoutes? routes = null)
     {
         _upstream = upstream;
         _policy = policy;
         _log = log;
         _doh = new DohUpstream(log);
         _edges = new WorkingEdges(_doh, log);
+        _routes = routes;
+        if (routes is not null)
+        {
+            // Routed before they are probed, so the probe crosses the tunnel the way the program's connection will.
+            _tunnelEdges = new WorkingEdges(_doh, log, beforeProbe: (name, addresses) => routes.Route(name, addresses));
+        }
     }
 
     public long ScopedQueries => Interlocked.Read(ref _scoped);
@@ -239,12 +254,24 @@ internal sealed class LocalResolver : IAsyncDisposable
             // the HTTPS records browsers now ask for, anything invented later - is relayed as it
             // arrives, because the check has nothing to say about them and synthesising an answer
             // would mean dropping whatever the upstream knew that this code does not.
+            // Through the tunnel when the profile says so and a tunnel is up: the line resets these names whatever the
+            // address (FPT, 2026-10-02), so an honest answer alone would still not connect. Without a tunnel, the
+            // name is answered exactly as before - an honest address is still better than a lie.
+            var viaTunnel = type == DnsWire.TypeA && _routes is { Ready: true } && _tunnelEdges is not null &&
+                            app.RoutesThroughTunnel(name);
+
             if (type == DnsWire.TypeA)
             {
                 // The service's canary travels with the question: it is the name proven to work on
                 // this line, and the only thing worth asking when every address for THIS name is
-                // filtered.
-                var edges = await _edges.ForAsync(name, app.Canary, ct).ConfigureAwait(false);
+                // filtered. Not through the tunnel - the canary's edges were proven on the line, not in it.
+                var edges = viaTunnel
+                    ? await _tunnelEdges!.ForAsync(name, sibling: null, ct).ConfigureAwait(false)
+                    : await _edges.ForAsync(name, app.Canary, ct).ConfigureAwait(false);
+
+                // Again on every answer, cached or not: a verdict outlives a reconnect, and the routes do not.
+                if (edges is not null && viaTunnel) _routes!.Route(name, edges);
+
                 if (edges is not null)
                 {
                     Interlocked.Increment(ref _scoped);
@@ -258,6 +285,12 @@ internal sealed class LocalResolver : IAsyncDisposable
             }
 
             var answer = await _doh.ResolveAsync(query, query.Length, ct).ConfigureAwait(false);
+            if (answer is not null && viaTunnel)
+            {
+                // Relayed as the upstream said it - so its addresses are the ones to route.
+                try { _routes!.Route(name, [.. DnsWire.Parse(answer, answer.Length).Addresses]); }
+                catch (FormatException) { }
+            }
             if (answer is not null)
             {
                 Interlocked.Increment(ref _scoped);

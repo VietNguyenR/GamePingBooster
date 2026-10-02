@@ -137,15 +137,25 @@ degrade() {
 # other shaping; `heal` removes it.
 lanes() {
     addresses
-    local way="$1" delay="${2:-20}" src
+    # Optionally a second way held whole, e.g. "lanes e 20 b 60": a slow road beside an entry with lanes.
+    local way="$1" delay="${2:-20}" slow="${3:-}" slowdelay="${4:-0}" src slowsrc=""
     case "$way" in
         a) src="$A" ;; b) src="$B" ;; e) src="$E" ;; f) src="$F" ;;
         *) echo "way must be a, b, e or f" >&2; exit 2 ;;
     esac
+    case "$slow" in
+        "") ;; a) slowsrc="$A" ;; b) slowsrc="$B" ;; e) slowsrc="$E" ;; f) slowsrc="$F" ;;
+        *) echo "the slow way must be a, b, e or f" >&2; exit 2 ;;
+    esac
     rm -f "$state"/shaped-*
     tc qdisc del dev "$dev" root 2>/dev/null || true
-    tc qdisc add dev "$dev" root handle 1: prio bands 4 priomap 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+    tc qdisc add dev "$dev" root handle 1: prio bands 5 priomap 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
     tc qdisc add dev "$dev" parent 1:4 handle 40: netem delay "${delay}ms"
+    if [ -n "$slowsrc" ]; then
+        tc qdisc add dev "$dev" parent 1:5 handle 50: netem delay "${slowdelay}ms"
+        tc filter add dev "$dev" protocol ip parent 1:0 prio 2 u32 match ip src "$slowsrc/32" flowid 1:5
+        echo "way $slow: held ${slowdelay} ms"
+    fi
     local bits
     for bits in 1 2 3; do
         # u16 at 22: the UDP destination port, behind a 20-byte IPv4 header.
@@ -186,5 +196,5 @@ case "${1:-status}" in
     status) status ;;
     logs) shift; logs "$@" ;;
     ip) echo "$dev $(base_ip | cut -d/ -f1)" ;;
-    *) echo "usage: rig.sh up|down|heal|degrade <a|b|e|f> <delay-ms> [loss-%]|lanes <a|b|e|f> <delay-ms>|status|logs [n]" >&2; exit 2 ;;
+    *) echo "usage: rig.sh up|down|heal|degrade <a|b|e|f> <delay-ms> [loss-%]|lanes <a|b|e|f> <delay-ms> [<slow-way> <delay-ms>]|status|logs [n]" >&2; exit 2 ;;
 esac

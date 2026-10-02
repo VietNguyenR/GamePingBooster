@@ -20,16 +20,29 @@ namespace GamePingBooster.Service.Tunnel;
 ///
 /// Nothing here is part of the tunnel. A failure of any kind leaves the way unmeasured, which the switch
 /// policy reads as "not a candidate".
+///
+/// Until a move, that is. A socket's source port decides which of the ISP's parallel links it rides (LanePick), so
+/// the number a way was judged by belongs to its socket, not to the way: on 0.3.2-0.3.6 the tunnel moved onto a
+/// fresh socket, and 35-42% of the moves landed more than 5 ms slower than the way had measured - a fifth to a third
+/// slower than the way they left. A move now takes the measured socket itself (<see cref="Take"/>), sockets made as
+/// the tunnel makes its own.
 /// </summary>
 internal sealed class DoorProbes : IDisposable
 {
     /// <summary>A way into the relay: the id the profile gives it, and where to send.</summary>
     internal sealed record Door(string Id, IPEndPoint Endpoint);
 
+    /// <summary>How long <see cref="Take"/> waits for a way's pending receive to end before giving the socket up.</summary>
+    private static readonly TimeSpan TakeWait = TimeSpan.FromMilliseconds(500);
+
     private readonly ulong _sessionId;
+    private readonly Door[] _doors;
     private readonly Socket?[] _sockets;
+    private readonly Task?[] _receivers;
+    private readonly CancellationTokenSource[] _slotCts;
     private readonly Action<DoorProbes, int, long, long> _onReply;
-    private readonly CancellationTokenSource _cts = new();
+    private readonly object _gate = new();
+    private bool _disposed;
     private long _answered;
 
     /// <summary>The ways measured, in slot order. Shared into every tick these probes fill.</summary>
@@ -43,30 +56,74 @@ internal sealed class DoorProbes : IDisposable
     {
         _sessionId = sessionId;
         _onReply = onReply;
+        _doors = doors.ToArray();
         Ids = doors.Select(d => d.Id).ToArray();
         _sockets = new Socket?[doors.Count];
+        _receivers = new Task?[doors.Count];
+        _slotCts = new CancellationTokenSource[doors.Count];
 
         for (var slot = 0; slot < doors.Count; slot++)
         {
+            _slotCts[slot] = new CancellationTokenSource();
+            Socket? socket = null;
             try
             {
-                var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+                socket = TunnelClient.NewSocket();
                 socket.Connect(doors[slot].Endpoint);
                 _sockets[slot] = socket;
                 var s = slot;
-                _ = Task.Run(() => ReceiveAsync(socket, s, _cts.Token));
+                var token = _slotCts[slot].Token;
+                _receivers[slot] = Task.Run(() => ReceiveAsync(socket, s, token));
             }
             catch (SocketException)
             {
+                socket?.Dispose();
                 _sockets[slot] = null;
             }
         }
     }
 
+    /// <summary>
+    /// Hands over the socket that has been measuring <paramref name="doorId"/> at <paramref name="endpoint"/> for the
+    /// session <paramref name="sessionId"/>, for the tunnel to move onto: its lane is the one the switch policy judged.
+    /// The way is no longer probed here. Null when these probes are not for that way and session, are disposed, or the
+    /// socket's receive did not stop in time - the caller then moves on a fresh socket, as before.
+    ///
+    /// The receive pending on the socket is ended first: left running, it would race the tunnel's downlink for the
+    /// game's packets. Nothing but Probe answers can be in flight to it until the tunnel sends from it.
+    /// </summary>
+    public Socket? Take(string doorId, IPEndPoint endpoint, ulong sessionId)
+    {
+        if (sessionId != _sessionId) return null;
+        var slot = Array.FindIndex(_doors, d => d.Id.Equals(doorId, StringComparison.OrdinalIgnoreCase) && d.Endpoint.Equals(endpoint));
+        if (slot < 0) return null;
+
+        Socket socket;
+        Task? receiver;
+        lock (_gate)
+        {
+            if (_disposed || _sockets[slot] is not { } open) return null;
+            socket = open;
+            _sockets[slot] = null;
+            receiver = _receivers[slot];
+            _slotCts[slot].Cancel();
+        }
+
+        try
+        {
+            if (receiver is null || receiver.Wait(TakeWait)) return socket;
+        }
+        catch (AggregateException)
+        {
+        }
+        socket.Dispose();
+        return null;
+    }
+
     /// <summary>One Probe down one way. The stamp is the send time, echoed back unchanged by relayd.</summary>
     public void Send(int slot)
     {
-        if ((uint)slot >= (uint)_sockets.Length || _sockets[slot] is not { } socket) return;
+        if ((uint)slot >= (uint)_sockets.Length || Volatile.Read(ref _sockets[slot]) is not { } socket) return;
         try
         {
             socket.Send(GpbProtocol.BuildProbe(_sessionId, (ulong)Stopwatch.GetTimestamp()), SocketFlags.None);
@@ -119,8 +176,16 @@ internal sealed class DoorProbes : IDisposable
 
     public void Dispose()
     {
-        _cts.Cancel();
-        foreach (var socket in _sockets) socket?.Dispose();
-        _cts.Dispose();
+        lock (_gate)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            for (var slot = 0; slot < _sockets.Length; slot++)
+            {
+                _slotCts[slot].Cancel();
+                _sockets[slot]?.Dispose();
+                _sockets[slot] = null;
+            }
+        }
     }
 }

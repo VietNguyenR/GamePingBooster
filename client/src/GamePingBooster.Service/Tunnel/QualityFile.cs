@@ -73,7 +73,22 @@ internal sealed record RegionPlanRecord(
     double MeasureSeconds,
     string? Stopped,
     IReadOnlyList<string> RelaysMeasured,
-    IReadOnlyList<RegionPlanEntry> Regions);
+    IReadOnlyList<RegionPlanEntry> Regions,
+    IReadOnlyList<WayCheckEntry>? WayChecks = null);
+
+/// <summary>
+/// One open tunnel's ways in, measured during a plan by WayCheck: each way's Probes (the way in use on the tunnel's own
+/// socket), what WayCheck chose, whether the tunnel moved, and - when it did - whether it took the socket the way was
+/// measured on (<paramref name="OnMeasured"/>), so the record says if it landed on the lane it was judged by.
+/// </summary>
+internal sealed record WayCheckEntry(
+    string Relay,
+    string InUse,
+    IReadOnlyList<WaySample> Ways,
+    string? MoveTo,
+    string Reason,
+    bool Moved,
+    bool? OnMeasured);
 
 /// <summary>
 /// One region of a plan: the median on each path, the path chosen and why. <paramref name="ViaWay"/> names the way
@@ -276,7 +291,7 @@ internal sealed class QualityFile(Action<string> log)
     /// holds both ways over the following minute, and "moved" whether the tunnel really went.
     /// </summary>
     public void WriteMove(DoorDecision decision, bool movesEnabled, bool requested, bool moved, double followedSeconds,
-        DoorStats afterFrom, DoorStats afterTo, QualityMeta meta) => Append((w, id) =>
+        DoorStats afterFrom, DoorStats afterTo, QualityMeta meta, bool? onMeasured = null) => Append((w, id) =>
     {
         w.WriteStartObject();
         w.WriteString("id", id);
@@ -288,6 +303,9 @@ internal sealed class QualityFile(Action<string> log)
         w.WriteString("mode", movesEnabled ? "on" : "record");
         w.WriteBoolean("requested", requested);
         w.WriteBoolean("moved", moved);
+        // Whether the tunnel landed on the socket the way was measured on - the lane the decision was made on - or on a
+        // fresh one (DoorProbes.Take). Absent when it did not move, and from clients before 0.3.8.
+        if (moved && onMeasured is { } measured) w.WriteString("socket", measured ? "measured" : "fresh");
         w.WriteString("from", decision.From);
         w.WriteString("to", decision.To);
         w.WriteString("reason", decision.Return ? "return" : "worse");
@@ -460,6 +478,35 @@ internal sealed class QualityFile(Action<string> log)
             w.WriteEndObject();
         }
         w.WriteEndArray();
+
+        // Only when an open tunnel's ways were checked: a plan with no other tunnel open is written as before.
+        if (plan.WayChecks is { Count: > 0 } checks)
+        {
+            w.WriteStartArray("wayChecks");
+            foreach (var check in checks)
+            {
+                w.WriteStartObject();
+                w.WriteString("relay", check.Relay);
+                w.WriteString("inUse", check.InUse);
+                w.WriteStartArray("ways");
+                foreach (var way in check.Ways)
+                {
+                    w.WriteStartObject();
+                    w.WriteString("id", way.Id);
+                    Number(w, "p50", way.MedianMs, 1);
+                    w.WriteNumber("sent", way.Loss.Sent);
+                    w.WriteNumber("answered", way.Loss.Answered);
+                    w.WriteEndObject();
+                }
+                w.WriteEndArray();
+                String(w, "moveTo", check.MoveTo);
+                w.WriteString("reason", check.Reason);
+                w.WriteBoolean("moved", check.Moved);
+                if (check.OnMeasured is { } onMeasured) w.WriteString("socket", onMeasured ? "measured" : "fresh");
+                w.WriteEndObject();
+            }
+            w.WriteEndArray();
+        }
 
         w.WriteEndObject();
     }

@@ -11,8 +11,16 @@ internal sealed record UnblockApp(
     string Name,
     IReadOnlyList<string> Scope,
     IReadOnlyList<string> Excluded,
-    string Canary)
+    string Canary,
+    IReadOnlyList<string>? Tunnel = null)
 {
+    /// <summary>
+    /// Whether answers for <paramref name="name"/> are routed through the tunnel while it is up: claimed, and under
+    /// one of the profile's tunnel names. See ProfileUnblock.Tunnel.
+    /// </summary>
+    public bool RoutesThroughTunnel(string name) =>
+        Claims(name) && (Tunnel ?? []).Any(suffix => Matches(name, suffix));
+
     /// <summary>The namespaces the Windows policy is given. A leading dot is what NRPT expects for a suffix.</summary>
     public IReadOnlyList<string> Namespaces => [.. Scope.Select(s => "." + s)];
 
@@ -118,7 +126,8 @@ internal sealed record UnblockPolicy(IReadOnlyList<UnblockApp> Apps, string Sour
                 string.IsNullOrWhiteSpace(entry.Name) ? entry.Id.Trim() : entry.Name.Trim(),
                 scope,
                 Clean(entry.Excluded),
-                canary));
+                canary,
+                Clean(entry.Tunnel)));
         }
 
         return apps.Count == 0

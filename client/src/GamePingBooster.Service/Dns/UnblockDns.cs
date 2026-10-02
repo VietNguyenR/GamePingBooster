@@ -25,13 +25,18 @@ namespace GamePingBooster.Service.Dns;
 /// WHICH services, and which names, comes from the profile the licence server delivers - see
 /// <see cref="UnblockPolicy"/>. Nothing here knows about any particular one.
 ///
-/// Nothing here touches the tunnel, the routes or the relay either. Unblocking a name is not a game
-/// being accelerated, and the two halves of the product share only a switch.
+/// Nothing here touches the tunnel, the routes or the relay, with one narrow exception: names the profile
+/// marks for the tunnel (UnblockApp.tunnel) have their answered addresses routed through it while one is up,
+/// through <see cref="IUnblockRoutes"/> - for a line that resets those handshakes by name, which no answer fixes.
+/// Otherwise unblocking a name is not a game being accelerated, and the two halves share only a switch.
 /// </summary>
 internal sealed class UnblockDns : IAsyncDisposable
 {
     private readonly Func<UnblockPolicy> _policy;
     private readonly Action<string> _log;
+
+    /// <summary>The tunnel, for names the profile routes through it - see <see cref="IUnblockRoutes"/>.</summary>
+    private readonly IUnblockRoutes? _routes;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     private LocalResolver? _resolver;
@@ -44,10 +49,11 @@ internal sealed class UnblockDns : IAsyncDisposable
     /// </summary>
     private bool _allowed;
 
-    public UnblockDns(Func<UnblockPolicy> policy, Action<string> log)
+    public UnblockDns(Func<UnblockPolicy> policy, Action<string> log, IUnblockRoutes? routes = null)
     {
         _policy = policy;
         _log = log;
+        _routes = routes;
     }
 
     public bool Enabled { get; private set; }
@@ -167,7 +173,7 @@ internal sealed class UnblockDns : IAsyncDisposable
     /// <summary>Everything about a policy that changes what the machine does, as one string.</summary>
     private static string Signature(UnblockPolicy policy) =>
         string.Join("|", policy.Apps.Select(a =>
-            $"{a.Id}:{string.Join(",", a.Scope)}:{string.Join(",", a.Excluded)}:{a.Canary}"));
+            $"{a.Id}:{string.Join(",", a.Scope)}:{string.Join(",", a.Excluded)}:{a.Canary}:{string.Join(",", a.Tunnel ?? [])}"));
 
     /// <summary>Returns null when it worked, or a sentence for the user when it did not.</summary>
     public async Task<string?> EnableAsync(CancellationToken ct)
@@ -214,7 +220,7 @@ internal sealed class UnblockDns : IAsyncDisposable
 
             // 3. The resolver first. Pointing Windows at an address nothing is listening on would
             //    take DNS down for the claimed names with no way back except a reboot.
-            var resolver = new LocalResolver(upstream, policy, _log);
+            var resolver = new LocalResolver(upstream, policy, _log, _routes);
             try
             {
                 resolver.Start();

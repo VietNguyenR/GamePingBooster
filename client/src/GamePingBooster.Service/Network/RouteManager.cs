@@ -61,6 +61,18 @@ internal sealed class RouteManager
     // list would have RemoveGameRoutes pull the lobby off the tunnel every time a match ended.
     private readonly List<string> _lobbyPrefixes = [];
 
+    /// <summary>
+    /// Host routes for names the unblock resolver routes through the tunnel (UnblockApp.tunnel). Added from the
+    /// resolver's threads, not the engine's, so every touch of this list is under its own lock.
+    /// </summary>
+    private readonly List<string> _unblockPrefixes = [];
+
+    /// <summary>
+    /// How many unblock routes may pile up in one connection. A handful of names each answered with a few CDN
+    /// edges is a few dozen; past this something is resolving far more than the small APIs the field is for.
+    /// </summary>
+    public const int MaxUnblockRoutes = 128;
+
     // Every /32 pinned to the physical adapter - the home relay, every way into a relay a tunnel is on, the other
     // tunnels' relays - and who wants each. One address is often several of these at once (vn-1 home and the entry
     // vn-1-sg), and it stays pinned until the last of them lets go. See PinLedger.
@@ -389,6 +401,50 @@ internal sealed class RouteManager
     }
 
     /// <summary>
+    /// Installs host routes for addresses the unblock resolver is about to answer, so the connection the program
+    /// opens next goes through the tunnel. Called from the resolver's threads; safe to call again with the same
+    /// addresses - one already held, as a game, lobby or unblock route, is skipped without touching the table.
+    /// Returns how many were added.
+    /// </summary>
+    public int InstallUnblockRoutes(uint tunInterfaceIndex, IEnumerable<string> hostRoutes)
+    {
+        lock (_unblockPrefixes)
+        {
+            var fresh = new List<string>();
+            foreach (var prefix in hostRoutes)
+            {
+                if (!IsValidIPv4Cidr(prefix)) continue;
+                if (_unblockPrefixes.Contains(prefix) || fresh.Contains(prefix)) continue;
+                if (_lobbyPrefixes.Contains(prefix) || _installedPrefixes.Contains(prefix)) continue;
+                if (_unblockPrefixes.Count + fresh.Count >= MaxUnblockRoutes)
+                {
+                    _log?.Invoke($"Routing: {MaxUnblockRoutes} unblock routes already - {prefix} stays on the normal path.");
+                    break;
+                }
+                fresh.Add(prefix);
+            }
+            if (fresh.Count == 0) return 0;
+
+            DeleteRoutes(fresh, tunInterfaceIndex);
+            _unblockPrefixes.AddRange(fresh);
+            foreach (var prefix in fresh) AddRoute(prefix, tunInterfaceIndex, nextHop: null);
+            return fresh.Count;
+        }
+    }
+
+    /// <summary>Removes the unblock resolver's host routes.</summary>
+    public void RemoveUnblockRoutes(uint tunInterfaceIndex)
+    {
+        lock (_unblockPrefixes)
+        {
+            if (_unblockPrefixes.Count == 0) return;
+            Timed($"removed {_unblockPrefixes.Count} unblock route(s)",
+                () => DeleteRoutes(_unblockPrefixes, tunInterfaceIndex));
+            _unblockPrefixes.Clear();
+        }
+    }
+
+    /// <summary>
     /// Puts back any game or lobby route this manager holds that is no longer in Windows' table on the virtual
     /// adapter, and returns how many it put back. The install methods skip a prefix they already hold, so a
     /// route Windows dropped on its own - an address change on the adapter is the moment that might - would
@@ -403,7 +459,10 @@ internal sealed class RouteManager
             .ToHashSet();
 
         var restored = 0;
-        foreach (var prefix in _installedPrefixes.Concat(_lobbyPrefixes))
+        List<string> unblock;
+        lock (_unblockPrefixes) unblock = [.. _unblockPrefixes];
+
+        foreach (var prefix in _installedPrefixes.Concat(_lobbyPrefixes).Concat(unblock))
         {
             if (IpHelper.ParsePrefix(prefix) is not { } parsed || present.Contains(parsed)) continue;
             AddRoute(prefix, tunInterfaceIndex, nextHop: null);
@@ -428,6 +487,7 @@ internal sealed class RouteManager
     {
         RemoveGameRoutes(tunInterfaceIndex);
         RemoveLobbyRoutes(tunInterfaceIndex);
+        RemoveUnblockRoutes(tunInterfaceIndex);
         UnpinStuckDestinations(tunInterfaceIndex);
         if (_pins.CountOwnedByAny(PinOwner.Paths) > 0) PinPathRoutes([]);
 

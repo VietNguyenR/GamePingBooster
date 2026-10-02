@@ -39,6 +39,18 @@ internal sealed class WorkingEdges
     public const uint AnswerTtlSeconds = 120;
 
     /// <summary>
+    /// How long "no edge completed a handshake" is trusted before probing the name again.
+    ///
+    /// Longer than <see cref="Lifetime"/> because almost every name that lands here is not a web
+    /// front at all and never will handshake on 443: PUBG's lobby <c>zk-ga-pcprod.acs.pubg.com</c> is
+    /// an AWS Global Accelerator on TCP 40002, Steam's <c>p2p-*.discovery.steamserver.net</c> answer
+    /// only their own protocol. Re-probing them cost the game 2.7 s per lookup on 2026-10-02, for an
+    /// answer that is always the same - the upstream's, relayed. Short enough that a name whose edges
+    /// were filtered only for a while gets its own addresses back within minutes.
+    /// </summary>
+    private static readonly TimeSpan NoEdgeLifetime = TimeSpan.FromMinutes(5);
+
+    /// <summary>
     /// Enough candidates to find a good one, few enough that a cache miss stays quick. The probes
     /// run together, so the cost of a miss is one handshake's worth of time, not six.
     /// </summary>
@@ -83,10 +95,17 @@ internal sealed class WorkingEdges
     private long _probed;
     private long _rejected;
 
-    public WorkingEdges(DohUpstream doh, Action<string> log)
+    /// <summary>
+    /// Called with every address about to be probed for a name, before the probe. The tunnel's instance routes them
+    /// through the tunnel here, so the probe - and then the program - goes the way the answer will be used.
+    /// </summary>
+    private readonly Action<string, IReadOnlyList<IPAddress>>? _beforeProbe;
+
+    public WorkingEdges(DohUpstream doh, Action<string> log, Action<string, IReadOnlyList<IPAddress>>? beforeProbe = null)
     {
         _doh = doh;
         _log = log;
+        _beforeProbe = beforeProbe;
     }
 
     public long Probed => Interlocked.Read(ref _probed);
@@ -108,7 +127,8 @@ internal sealed class WorkingEdges
     {
         if (_known.TryGetValue(name, out var entry) && entry.Expires > DateTimeOffset.UtcNow)
         {
-            return entry.Addresses;
+            // Empty is a remembered "nothing completed a handshake": relay, do not probe again.
+            return entry.Addresses.Length == 0 ? null : entry.Addresses;
         }
 
         var task = _inFlight.GetOrAdd(name, key => ProbeAsync(key, sibling, ct));
@@ -131,7 +151,7 @@ internal sealed class WorkingEdges
         // Every upstream, not the first one that answers. The whole failure this fixes was one
         // resolver naming a filtered edge while another named a clean one, so asking only the
         // preferred resolver would reproduce it exactly.
-        var candidates = new List<IPAddress>();
+        var perUpstream = new List<IReadOnlyList<IPAddress>>();
 
         foreach (var reply in await _doh.ResolveEverywhereAsync(
                      DnsWire.BuildQuery(0, name), ct).ConfigureAwait(false))
@@ -140,56 +160,91 @@ internal sealed class WorkingEdges
             try { parsed = DnsWire.Parse(reply, reply.Length); }
             catch (FormatException) { continue; }
 
-            foreach (var address in parsed.Addresses)
-            {
-                if (address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) continue;
-                if (!candidates.Contains(address)) candidates.Add(address);
-            }
+            perUpstream.Add([.. parsed.Addresses
+                .Where(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)]);
         }
 
-        if (candidates.Count == 0)
+        // Taken in turn from each upstream, not one list after the other: they disagree about which
+        // CDN to send this line to, and the one that knows the player's subnet is usually right.
+        // Cloudflare named thirteen Tencent addresses for PUBG's lobby and Google one Akamai, and
+        // the first six alone never reached Akamai - see EdgeRanking.
+        var tried = EdgeRanking.Interleave(perUpstream, MaxCandidates);
+
+        if (tried.Length == 0)
         {
             _log($"Unblock: no encrypted resolver returned an address for {name}.");
             return [];
         }
-
-        var tried = candidates.Take(MaxCandidates).ToArray();
 
         // One round for everything, cancelled the moment an answer is settled. A filtered edge does
         // not fail, it hangs for the whole budget, and waiting for every probe to report meant one
         // hanging address cost 2.5 s even when a good one had answered in 90 ms. Measured
         // 2026-09-24: the overlay's first store lookup took 5069 ms, two full budgets back to back,
         // for an edge that handshakes in under a tenth of a second.
+        _beforeProbe?.Invoke(name, tried);
+
         using var round = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var probes = tried.Select(a => ProbeOneAsync(a, name, round.Token)).ToList();
+        var roundClock = Stopwatch.StartNew();
+        var attempts = tried.Select(a => Attempt.Start(a, own: true, name, roundClock, round.Token)).ToList();
 
         var borrowed = Array.Empty<IPAddress>();
 
         // Give the name's own addresses a head start, then borrow in parallel rather than after.
         // Most names never get this far: their own edge answers inside the head start and nothing
         // is borrowed, so a normal lookup costs what it did before.
-        if (!await AnyWorksAsync(probes, HeadStart).ConfigureAwait(false))
+        //
+        // Not when every own address has already refused the connection: borrowed edges could never
+        // be used for this name (see below), and probing them only made Steam's p2p discovery names
+        // wait out the full budget - 2.7 s for an answer known after 0.3.
+        if (!await AnyWorksAsync(Tasks(attempts), HeadStart).ConfigureAwait(false) &&
+            !attempts.All(a => a.Task.IsCompleted && !a.Connected))
         {
             borrowed = await ShortlistAsync(name, sibling, tried, ct).ConfigureAwait(false);
-            probes.AddRange(borrowed.Select(a => ProbeOneAsync(a, name, round.Token)));
+            if (borrowed.Length > 0) _beforeProbe?.Invoke(name, borrowed);
+            attempts.AddRange(borrowed.Select(a => Attempt.Start(a, own: false, name, roundClock, round.Token)));
         }
 
         // Once something works, a short grace to collect whatever else is about to finish - two
         // good edges are worth more than one - then drop the rest.
-        if (await AnyWorksAsync(probes, Timeout.InfiniteTimeSpan).ConfigureAwait(false))
+        if (await AnyWorksAsync(Tasks(attempts), Timeout.InfiniteTimeSpan).ConfigureAwait(false))
         {
-            await Task.WhenAny(Task.WhenAll(probes), Task.Delay(Grace)).ConfigureAwait(false);
+            await Task.WhenAny(Task.WhenAll(Tasks(attempts)), Task.Delay(Grace)).ConfigureAwait(false);
+
+            if (!attempts.Any(a => a.Own && a.Task.IsCompleted && a.Task.Result.Works))
+            {
+                await WaitForSlowOwnAsync(attempts, roundClock).ConfigureAwait(false);
+            }
         }
 
         // Only what finished before the cancel is a verdict. A probe cut off here reports false,
         // but it was abandoned, not rejected, and counting it would blame edges that did nothing.
-        var settled = probes.Where(p => p.IsCompleted).Select(p => p.Result).ToArray();
+        var settled = attempts.Where(a => a.Task.IsCompleted).ToArray();
         round.Cancel();
-        await Task.WhenAll(probes).ConfigureAwait(false);
+        await Task.WhenAll(Tasks(attempts)).ConfigureAwait(false);
 
-        var good = settled.Where(r => r.Works).Select(r => r.Address).ToArray();
-        var bad = settled.Length - good.Length;
-        var abandoned = probes.Count - settled.Length;
+        var working = settled.Where(a => a.Task.Result.Works).ToArray();
+        var bad = settled.Length - working.Length;
+        var abandoned = attempts.Count - settled.Length;
+
+        // The name's own addresses whenever one of them works. A borrowed edge only proved that it
+        // holds a certificate for this name, and a wildcard proves that for a different service:
+        // on 2026-10-02 *.acs.pubg.com let acrt-pcprod's servers pass for zk-ga-pcprod, PUBG's
+        // lobby on TCP 40002, and prod-live-front's Akamai edge for the xenuine API.
+        //
+        // And borrowed edges only for a name that IS a web front on this line: one of its own
+        // addresses took the TCP connection and then failed the handshake - a reset, a stall, a
+        // forged certificate, the shape of the Steam filtering this exists for. A name none of
+        // whose own addresses even accepts a connection on 443 is not served over HTTPS here (the
+        // lobby's Global Accelerator, Steam's p2p discovery), and any edge borrowed for it is wrong.
+        var ownConnected = attempts.Any(a => a.Own && a.Connected);
+        var ownWorking = working.Where(a => a.Own).ToArray();
+        var usable = ownWorking.Length > 0 ? ownWorking
+            : ownConnected ? working
+            : [];
+
+        // Fastest first, and a clearly slower CDN not handed out at all - see EdgeRanking.
+        var good = EdgeRanking.Rank([.. usable.Select(a => (a.Address, a.Task.Result.Elapsed))]);
+        var slower = usable.Length - good.Length;
 
         Interlocked.Add(ref _probed, settled.Length);
         Interlocked.Add(ref _rejected, bad);
@@ -205,9 +260,12 @@ internal sealed class WorkingEdges
             // a tunnel, and "the shortlist of known-good edges happened to be empty", which is a
             // timing accident and fixes itself. Guessing between them from a player's log cost an
             // evening once already.
+            var why = working.Length > 0
+                ? $"{working.Length} borrowed edge(s) passed, but none of its own addresses accepted a connection on 443, so it is not a web front here"
+                : $"{tried.Length} from the resolvers, {borrowed.Length} borrowed, {_pool.Count} in the pool";
             _log($"Unblock: no address for {name} completed a handshake ({clock.ElapsedMilliseconds} ms) - " +
-                 $"{tried.Length} from the resolvers, {borrowed.Length} borrowed, {_pool.Count} in the pool. " +
-                 "Relaying the upstream answer unchanged.");
+                 $"{why}. Relaying the upstream answer unchanged for {NoEdgeLifetime.TotalMinutes:0} min.");
+            _known[name] = new Entry([], DateTimeOffset.UtcNow.Add(NoEdgeLifetime));
             return [];
         }
 
@@ -218,15 +276,18 @@ internal sealed class WorkingEdges
                  $"({clock.ElapsedMilliseconds} ms).");
         }
 
-        if (bad > 0 || abandoned > 0)
+        if (bad > 0 || abandoned > 0 || slower > 0)
         {
             _log($"Unblock: {name} -> {string.Join(", ", good.Select(a => a.ToString()))} " +
                  $"({bad} address(es) dropped for failing a TLS handshake, {abandoned} still pending " +
-                 $"and abandoned, {clock.ElapsedMilliseconds} ms).");
+                 $"and abandoned, {slower} working but clearly slower than the fastest " +
+                 $"({usable.Min(a => a.Task.Result.Elapsed).TotalMilliseconds:0} ms handshake), {clock.ElapsedMilliseconds} ms).");
         }
 
+        // Every working edge goes in the pool, slower ones included: the pool is a shortlist for
+        // other names to probe, and they are ranked again for the name that borrows them.
         var expires = DateTimeOffset.UtcNow.Add(Lifetime);
-        foreach (var address in good) _pool[address] = expires;
+        foreach (var a in working) _pool[a.Address] = expires;
 
         _known[name] = new Entry(good, expires);
         return good;
@@ -278,16 +339,75 @@ internal sealed class WorkingEdges
             .ToArray();
     }
 
-    private static async Task<(IPAddress Address, bool Works)> ProbeOneAsync(
-        IPAddress address, string name, CancellationToken ct) =>
-        (address, await EdgeProber.WorksAsync(address, name, ct).ConfigureAwait(false));
+    /// <summary>One address being probed for one name, and whether its TCP connection was taken.</summary>
+    private sealed class Attempt
+    {
+        private long _connectedAtMs = -1;
+
+        private Attempt(IPAddress address, bool own)
+        {
+            Address = address;
+            Own = own;
+        }
+
+        public IPAddress Address { get; }
+
+        /// <summary>One of the name's own addresses, as opposed to an edge borrowed from another name.</summary>
+        public bool Own { get; }
+
+        public Task<(bool Works, TimeSpan Elapsed)> Task { get; private set; } = null!;
+
+        public bool Connected => Interlocked.Read(ref _connectedAtMs) >= 0;
+
+        /// <summary>When the TCP connection was taken, on the round's clock, or -1.</summary>
+        public long ConnectedAtMs => Interlocked.Read(ref _connectedAtMs);
+
+        public static Attempt Start(IPAddress address, bool own, string name, Stopwatch round, CancellationToken ct)
+        {
+            var attempt = new Attempt(address, own);
+            attempt.Task = attempt.RunAsync(name, round, ct);
+            return attempt;
+        }
+
+        // Elapsed is the probe's own, from its start - borrowed edges start after the head start.
+        private async Task<(bool Works, TimeSpan Elapsed)> RunAsync(string name, Stopwatch round, CancellationToken ct)
+        {
+            var clock = Stopwatch.StartNew();
+            var works = await EdgeProber.WorksAsync(Address, name, ct,
+                () => Interlocked.Exchange(ref _connectedAtMs, round.ElapsedMilliseconds)).ConfigureAwait(false);
+            return (works, clock.Elapsed);
+        }
+    }
+
+    private static List<Task<(bool Works, TimeSpan Elapsed)>> Tasks(IEnumerable<Attempt> attempts) =>
+        [.. attempts.Select(a => a.Task)];
+
+    /// <summary>
+    /// A borrowed edge answered first. Before trusting it, an own address that has its connection and
+    /// is still mid-handshake gets the time an honest handshake over that distance needs - four times
+    /// its connect time, plus a little. acrt-pcprod.acs.pubg.com is in us-east: connected at 240 ms,
+    /// handshake done at 711, well after the head start. A filtered edge is the opposite shape: it
+    /// connects in 30 ms and then hangs, so this waits about a third of a second, not the 19 s it
+    /// takes to send its reset.
+    /// </summary>
+    private static async Task WaitForSlowOwnAsync(List<Attempt> attempts, Stopwatch round)
+    {
+        var midHandshake = attempts.Where(a => a.Own && a.Connected && !a.Task.IsCompleted).ToList();
+        if (midHandshake.Count == 0) return;
+
+        var deadline = midHandshake.Max(a => a.ConnectedAtMs * 4 + 200);
+        var wait = deadline - round.ElapsedMilliseconds;
+        if (wait <= 0) return;
+
+        await AnyWorksAsync(Tasks(midHandshake), TimeSpan.FromMilliseconds(wait)).ConfigureAwait(false);
+    }
 
     /// <summary>
     /// True as soon as any probe reports a working edge; false once all have failed or the wait
     /// is over. Never throws and never cancels anything.
     /// </summary>
     private static async Task<bool> AnyWorksAsync(
-        IReadOnlyList<Task<(IPAddress Address, bool Works)>> probes, TimeSpan wait)
+        IReadOnlyList<Task<(bool Works, TimeSpan Elapsed)>> probes, TimeSpan wait)
     {
         var deadline = wait == Timeout.InfiniteTimeSpan ? null : Task.Delay(wait);
         var pending = probes.ToList();

@@ -208,6 +208,25 @@ internal sealed class SpikeRecorder : IQualitySink
     private ulong _doorsSession;
     private int _doorProbeTicks;
 
+    /// <summary>
+    /// For the supervisor making a move the policy asked for: the socket the way has been probed on, so the tunnel lands
+    /// on the lane it was judged by. Null when these probes are not for that way and session; see DoorProbes.Take.
+    /// </summary>
+    public System.Net.Sockets.Socket? TakeDoorSocket(string doorId, System.Net.IPEndPoint endpoint, ulong sessionId) =>
+        Volatile.Read(ref _doors)?.Take(doorId, endpoint, sessionId);
+
+    /// <summary>The last move between ways in the engine made: onto which way, whether on the measured socket, and when.</summary>
+    private sealed record DoorMoveNote(string DoorId, bool OnMeasured, long AtTick);
+
+    private DoorMoveNote? _doorMoveNote;
+
+    /// <summary>
+    /// The engine, after moving a tunnel onto <paramref name="doorId"/>: whether it took the measured socket. The switch
+    /// record of the decision that asked for it says so ("socket"). Supervisor thread; read on the recorder's.
+    /// </summary>
+    public void NoteDoorMove(string doorId, bool onMeasured) =>
+        Volatile.Write(ref _doorMoveNote, new DoorMoveNote(doorId, onMeasured, Environment.TickCount64));
+
     /// <summary>The connect-time detour last handed to the policy, and the session it was for - so it is handed over once.</summary>
     private (string Door, ulong Session)? _detourSeen;
 
@@ -225,6 +244,7 @@ internal sealed class SpikeRecorder : IQualitySink
         public required bool MovesEnabled { get; init; }
         public required bool Requested { get; init; }
         public required QualityMeta Meta { get; init; }
+        public long DecidedAtTick { get; } = Environment.TickCount64;
 
         public readonly List<double> From = [];
         public readonly List<double> To = [];
@@ -314,6 +334,17 @@ internal sealed class SpikeRecorder : IQualitySink
         var pathKey = $"{context.RelayId}|{context.EntryId}|{context.Landmark}";
         if (_pathKey is not null && pathKey != _pathKey)
         {
+            // Another relay, or another region, mid-match: the record so far is closed and a new one starts. Labelled
+            // with the context of its LAST tick, one record named whatever carried the match at the end. On 2026-10-01 a
+            // Singapore match carried by sg-2 ended as the carrier went back to home, and its record read "vn-1, Ho Chi
+            // Minh City" over sg-2's numbers (44.8 ms to the relay, vn-1 being 21). A way into the same relay is not a
+            // new match - entry switching moves those mid-match and has records of its own - so it only restarts.
+            if (_inMatch && _matchContext is { } was && !SameMatch(was, context))
+            {
+                EndMatch();
+                _log($"Spike recorder: the match moved to {context.RelayId ?? "no relay"}" +
+                     $"{(context.RegionName is null ? "" : $", {context.RegionName}")} - the record so far is closed and a new one starts.");
+            }
             IReadOnlyList<SpikeEvent> restarted;
             lock (_gate) restarted = _detector.Restart();
             foreach (var spike in restarted) Report(spike, _matchContext ?? context);
@@ -896,6 +927,12 @@ internal sealed class SpikeRecorder : IQualitySink
         _log(Describe(spike));
     }
 
+    /// <summary>The same match as far as its record goes: the same relay, carried the same way, in the same region.</summary>
+    private static bool SameMatch(Context a, Context b) =>
+        string.Equals(a.RelayId, b.RelayId, StringComparison.OrdinalIgnoreCase) &&
+        a.Carried == b.Carried &&
+        a.RegionName == b.RegionName;
+
     private void EndMatch()
     {
         IReadOnlyList<SpikeEvent> closed;
@@ -1007,11 +1044,19 @@ internal sealed class SpikeRecorder : IQualitySink
         var afterFrom = DoorSwitchPolicy.Stats(move.From, move.FromSent, move.FromLost);
         var afterTo = DoorSwitchPolicy.Stats(move.To, move.ToSent, move.ToLost);
         var seconds = move.Ticks * SpikeDetector.TickMs / 1000.0;
-        _file.WriteMove(move.Decision, move.MovesEnabled, move.Requested, move.Moved, seconds, afterFrom, afterTo, move.Meta);
+        // The engine's word on the move this decision asked for: onto the same way, and made after the decision.
+        var note = Volatile.Read(ref _doorMoveNote);
+        bool? onMeasured = note is not null && move.Moved && note.AtTick >= move.DecidedAtTick &&
+                           string.Equals(note.DoorId, move.Decision.To, StringComparison.OrdinalIgnoreCase)
+            ? note.OnMeasured
+            : null;
+        _file.WriteMove(move.Decision, move.MovesEnabled, move.Requested, move.Moved, seconds, afterFrom, afterTo, move.Meta, onMeasured);
 
         _log($"Entry switching, {seconds:F0} s after the decision to leave {move.Decision.From}: " +
              $"{move.Decision.From} {Figures(afterFrom)}, {move.Decision.To} {Figures(afterTo)}; " +
-             (move.Moved ? $"the tunnel is on {move.Decision.To}." : $"the tunnel stayed on {move.Decision.From}."));
+             (move.Moved
+                 ? $"the tunnel is on {move.Decision.To}" + (onMeasured is { } m ? (m ? ", on the socket it was measured on." : ", on a fresh socket.") : ".")
+                 : $"the tunnel stayed on {move.Decision.From}."));
     }
 
     private static string Figures(DoorStats stats) =>

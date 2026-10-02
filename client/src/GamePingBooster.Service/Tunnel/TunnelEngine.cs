@@ -77,6 +77,15 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     /// </summary>
     private double _directPingMs = -1;
     private long _directPingAtTick;
+
+    /// <summary>
+    /// The region whose ranges hold the game server the carrying tunnel is playing on now - read off the address, so it
+    /// is known the moment the server is, with no landmark measured. Null with no such server, or one in no region.
+    /// The headline's region comes from here whenever the match tells, never from connect's prediction: on 2026-10-01
+    /// the headline said "Ho Chi Minh City" from the prediction while the player read 45 ms in the game, and nothing
+    /// on screen said the region had only been guessed.
+    /// </summary>
+    private volatile string? _matchServerRegion;
     private readonly ulong _clientId = ClientIdentity.Load();
 
     /// <summary>
@@ -699,6 +708,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             // opens in its first seconds, and one caught by a route after it opened is dropped by
             // the relay for carrying the wrong source address - a late lobby route hangs the lobby.
             InstallLobbyRoutes();
+            ForgetUnblockRoutes();
             phases.Mark("routing");
 
             // Watch EVERY game in the profile, so routes come and go with whichever one is opened.
@@ -1228,18 +1238,15 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         var probes = new List<RelayProbe>();
         try
         {
-            foreach (var relay in candidates)
-            {
-                if (await ProbeAsync(relay, psk, target, ct).ConfigureAwait(false) is { } probe) probes.Add(probe);
-            }
+            // The relays side by side, then - when they are worth it - the entries, side by side across relays and in
+            // order within one. See MeasureSideBySideAsync.
+            await MeasureSideBySideAsync(candidates, probes, (way, say, token) => ProbeAsync(way, psk, target, token, say),
+                skip: null, stop: null, _log, ct).ConfigureAwait(false);
 
             if (paths.Count > 0 && ShouldTryEntries(probes, target))
             {
-                foreach (var path in paths)
-                {
-                    CloseProbesOf(probes, RelayPaths.RelayIdOf(path));
-                    if (await ProbeAsync(path, psk, target, ct).ConfigureAwait(false) is { } probe) probes.Add(probe);
-                }
+                await MeasureSideBySideAsync(paths, probes, (way, say, token) => ProbeAsync(way, psk, target, token, say),
+                    skip: null, stop: null, _log, ct).ConfigureAwait(false);
             }
 
 
@@ -1278,8 +1285,11 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     /// Handshakes with one relay or entry and measures both legs through it, or logs why it could
     /// not and returns null. The probe it returns holds the tunnel open.
     /// </summary>
-    private async Task<RelayProbe?> ProbeAsync(RelayEntry relay, byte[] psk, LandmarkProbe.Result? target, CancellationToken ct)
+    /// <param name="say">Where its own lines go: the log, or a relay's held lines when relays are measured side by side.</param>
+    private async Task<RelayProbe?> ProbeAsync(RelayEntry relay, byte[] psk, LandmarkProbe.Result? target, CancellationToken ct,
+        Action<string>? say = null)
     {
+        say ??= _log;
         ct.ThrowIfCancellationRequested();
         TunnelClient? client = null;
         try
@@ -1302,7 +1312,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     .ConfigureAwait(false);
             }
 
-            _log($"  {relay.Name} [{relay.Id}] ({relay.Location}): {Describe(legOne, endToEnd, target)}{RelayLoss.Note(loss)}");
+            say($"  {relay.Name} [{relay.Id}] ({relay.Location}): {Describe(legOne, endToEnd, target)}{RelayLoss.Note(loss)}");
             return new RelayProbe(relay, legOne, endToEnd) { Client = client, Loss = loss };
         }
         catch (OperationCanceledException)
@@ -1312,7 +1322,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            _log($"  {relay.Name} [{relay.Id}] ({relay.Location}): unreachable - {ex.Message}");
+            say($"  {relay.Name} [{relay.Id}] ({relay.Location}): unreachable - {ex.Message}");
 
             // An entry's session is its relay's session. A Disconnect from it would also end the
             // relay's own probe, closed a moment ago precisely so that it could be reopened.
@@ -1441,6 +1451,106 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     }
 
     /// <summary>
+    /// Measures <paramref name="ways"/> with <paramref name="measure"/>: different relays side by side, the ways into
+    /// one relay one after another, each probe added to <paramref name="probes"/> as it is made.
+    ///
+    /// Side by side because one after another took 17 s for the twenty ways into seven relays on 2026-10-02 - a
+    /// player waiting on a relay not used for his game while every one of them was handshaken and echoed in turn.
+    /// In order within one relay because every way into ONE relayd resumes the same session, so two at once would
+    /// take it from each other - <see cref="CloseProbesOf"/> closes the last before the next, exactly as before. Two
+    /// different relays share nothing but the PC's uplink, and each echo is a few dozen bytes: the region planner
+    /// has measured relays this way since it was written (ReplanBetweenMatchesAsync).
+    ///
+    /// The lines each relay's measurement says are held and logged per relay in the order of <paramref name="ways"/>,
+    /// so the log reads as it did. <paramref name="probes"/> ends in that order too, so a tie is broken as it was.
+    ///
+    /// <paramref name="stop"/> is asked before every way; once it says true, every relay stops and this returns true.
+    /// <paramref name="skip"/> names a way not to measure, and why, before anything is closed for it.
+    /// </summary>
+    internal static async Task<bool> MeasureSideBySideAsync(
+        IReadOnlyList<RelayEntry> ways,
+        List<RelayProbe> probes,
+        Func<RelayEntry, Action<string>, CancellationToken, Task<RelayProbe?>> measure,
+        Func<RelayEntry, string?>? skip,
+        Func<bool>? stop,
+        Action<string> log,
+        CancellationToken ct)
+    {
+        var order = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < ways.Count; i++) order.TryAdd(ways[i].Id, i);
+
+        var relays = ways.GroupBy(w => RelayPaths.RelayIdOf(w), StringComparer.OrdinalIgnoreCase)
+            .Select(g => (RelayId: g.Key, Ways: g.ToList(), Lines: new List<string>()))
+            .ToList();
+
+        using var halt = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var stopped = 0;
+
+        async Task MeasureRelayAsync(string relayId, List<RelayEntry> relayWays, List<string> lines)
+        {
+            void Say(string line)
+            {
+                lock (lines) lines.Add(line);
+            }
+
+            try
+            {
+                foreach (var way in relayWays)
+                {
+                    if (Volatile.Read(ref stopped) == 1) return;
+                    if (stop?.Invoke() == true)
+                    {
+                        Interlocked.Exchange(ref stopped, 1);
+                        halt.Cancel();
+                        return;
+                    }
+                    if (skip?.Invoke(way) is { } why)
+                    {
+                        Say(why);
+                        continue;
+                    }
+
+                    // One path to a relay open at a time: the next way into it resumes the same session.
+                    lock (probes) CloseProbesOf(probes, relayId);
+                    if (await measure(way, Say, halt.Token).ConfigureAwait(false) is { } probe)
+                    {
+                        lock (probes) probes.Add(probe);
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (Volatile.Read(ref stopped) == 1 && !ct.IsCancellationRequested)
+            {
+                // Another relay's measurement saw the reason to stop; this one was cut short for it.
+            }
+        }
+
+        try
+        {
+            await Task.WhenAll(relays.Select(r => MeasureRelayAsync(r.RelayId, r.Ways, r.Lines))).ConfigureAwait(false);
+        }
+        finally
+        {
+            foreach (var relay in relays)
+            {
+                lock (relay.Lines)
+                {
+                    foreach (var line in relay.Lines) log(line);
+                }
+            }
+
+            // Stable: probes from before this call keep their place ahead of these, as they would have.
+            lock (probes)
+            {
+                var ordered = probes.OrderBy(p => order.TryGetValue(p.Relay.Id, out var i) ? i : -1).ToList();
+                probes.Clear();
+                probes.AddRange(ordered);
+            }
+        }
+
+        return Volatile.Read(ref stopped) == 1;
+    }
+
+    /// <summary>
     /// Closes every probe but the winner and hands back the winner's tunnel, reopening it first if it
     /// was closed to make way for an entry to the same relay.
     ///
@@ -1511,7 +1621,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     /// One path measured during selection. <see cref="Client"/> is the open tunnel, and null once it
     /// has been closed - to make way for another path to the same relay, or because it lost.
     /// </summary>
-    private sealed class RelayProbe(RelayEntry relay, double legOneMs, double? endToEndMs)
+    internal sealed class RelayProbe(RelayEntry relay, double legOneMs, double? endToEndMs)
     {
         public RelayEntry Relay { get; } = relay;
         public double LegOneMs { get; } = legOneMs;
@@ -1909,15 +2019,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     /// </summary>
     private async Task FollowMatchRegionAsync(TunnelClient tunnel, IPAddress destination, CancellationToken ct)
     {
-        var profile = _profile;
-        if (profile is null) return;
-
-        RegionEntry? region = null;
-        foreach (var game in profile.Games)
-        {
-            region = game.Regions.FirstOrDefault(r => r.Cidrs.Any(c => IPNetwork.TryParse(c, out var net) && net.Contains(destination)));
-            if (region is not null) break;
-        }
+        var region = RegionOf(destination);
         if (region is null || region.Landmarks.Count == 0) return;
         if (PathFor(tunnel) is { } known && known.RegionName == region.Name) return;
 
@@ -1958,6 +2060,18 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         _regionRetryAfterTick[retryKey] = now + (long)RegionRetryAfter.TotalMilliseconds;
         _log($"The match is in {region.Name}, but its landmark did not answer through {through} - the in-game " +
              "estimate stays where it was for now.");
+    }
+
+    /// <summary>The region of any game in the profile whose ranges hold <paramref name="destination"/>, or null.</summary>
+    private RegionEntry? RegionOf(IPAddress destination)
+    {
+        if (_profile is not { } profile) return null;
+        foreach (var game in profile.Games)
+        {
+            var region = game.Regions.FirstOrDefault(r => r.Cidrs.Any(c => IPNetwork.TryParse(c, out var net) && net.Contains(destination)));
+            if (region is not null) return region;
+        }
+        return null;
     }
 
     private void StartGamePingProbe(CancellationToken ct)
@@ -2298,7 +2412,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         {
             var endpoint = ParseEndpoint(target.Endpoint);
             routes.PinRelayRoute(endpoint.Address);
-            tunnel.MoveTo(endpoint);
+            var measured = MoveOntoDoor(tunnel, target.Id, endpoint);
             _relay = target;
 
             // The in-game reading was taken down the old way.
@@ -2310,7 +2424,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             else _movedFrom[relayId] = (current.Id, Environment.TickCount64);
 
             _log($"Entry switching: moved from {current.Name} [{current.Id}] to {target.Name} [{target.Id}] - the same " +
-                 "relay and session, so the game server sees no change.");
+                 $"relay and session, so the game server sees no change; {LaneNote(measured)}.");
             SetState(TunnelState.Connected, new StatusText("svc.movedRelay",
                 $"Connected to {target.Name} - moved off {current.Name} for a better route",
                 target.Name, current.Name));
@@ -2320,6 +2434,36 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             _log($"Entry switching: could not move to {target.Name} ({ex.Message}) - staying on {current.Name}.");
         }
     }
+
+    /// <summary>
+    /// Moves <paramref name="tunnel"/> onto another way into its relay, on the socket the switch policy measured that way
+    /// on when the recorder still holds it - the lane the move was judged by - and on a fresh socket otherwise: a move
+    /// back, or a way the recorder is not probing. <paramref name="measured"/>, when given, is that socket already in hand
+    /// (WayCheck's), and is moved onto or closed here. True when it took the measured socket. See DoorProbes.
+    /// </summary>
+    private bool MoveOntoDoor(TunnelClient tunnel, string doorId, IPEndPoint endpoint, Socket? measured = null)
+    {
+        if ((measured ?? _recorder?.TakeDoorSocket(doorId, endpoint, tunnel.SessionId)) is { } socket)
+        {
+            try
+            {
+                tunnel.MoveToMeasured(socket, endpoint);
+                _recorder?.NoteDoorMove(doorId, onMeasured: true);
+                return true;
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or SocketException or ObjectDisposedException)
+            {
+                socket.Dispose();
+            }
+        }
+        tunnel.MoveTo(endpoint);
+        _recorder?.NoteDoorMove(doorId, onMeasured: false);
+        return false;
+    }
+
+    private static string LaneNote(bool measured) => measured
+        ? "on the socket it was measured on, so on the same lane"
+        : "on a fresh socket, so on a lane not measured yet";
 
     /// <summary>
     /// Measures the in-game ping against the server the game is actually on, once a second.
@@ -2359,6 +2503,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     misses = 0;
                     selfChecked = false;
                     ForgetDirectPing();
+                    _matchServerRegion = null;
                     continue;
                 }
 
@@ -2381,6 +2526,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     misses = 0;
                     quietUntilTick = 0;
                     ForgetDirectPing();
+                    _matchServerRegion = null;
                 }
 
                 // Prove the mechanism works before there is anything to measure with it.
@@ -2423,6 +2569,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     misses = 0;
                     quietUntilTick = 0;
                     ForgetDirectPing();
+                    _matchServerRegion = RegionOf(target)?.Name;
                     await FollowMatchRegionAsync(tunnel, target, ct).ConfigureAwait(false);
                 }
                 else if (PathFor(tunnel) is null)
@@ -2655,6 +2802,9 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             routes.RemoveLobbyRoutes(adapter.InterfaceIndex);
         }
 
+        // And the unblock resolver's, for the same reason; they go back with the lobby's on the reconnect.
+        routes.RemoveUnblockRoutes(adapter.InterfaceIndex);
+
         var candidates = FailoverOrder(previous);
 
         // Never a relay another tunnel is on: a handshake to it would move that tunnel's session here and silence it
@@ -2749,6 +2899,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     }
 
                     InstallLobbyRoutes();
+                    ReinstallUnblockRoutes();
 
                     if (hadGameRoutes || _config.RouteWithoutGame || (_watcher?.IsGameRunning ?? false))
                     {
@@ -3069,6 +3220,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
 
         try
         {
+            ForgetUnblockRoutes();
             if (_routes is not null && _adapter is not null) _routes.RemoveAll(_adapter.InterfaceIndex);
         }
         catch (Exception ex)
@@ -3258,6 +3410,12 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         var others = OtherTunnelsNow();
         // Between matches with region routing in force: the next match's figure, through the relay the plan gives its region.
         var nextMatch = PlannedForNextMatch(carrying);
+        // The headline's region: the measured server's own when the number is a measurement - none when that server is in
+        // no region; otherwise the estimate's, which is the match's region only once a match there has confirmed it.
+        var matchRegion = _matchServerRegion;
+        var gameRegion = nextMatch?.RegionName ?? (direct is not null ? matchRegion : carrierPath?.RegionName);
+        var regionExpected = gameRegion is not null &&
+                             (nextMatch is not null || (direct is null && gameRegion != matchRegion));
 
         // Both are worked out once and read three times below - the English sentence, its language
         // key and its arguments have to describe the same moment.
@@ -3312,7 +3470,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             // which is right: a number built on no measurement is not better than showing nothing.
             GamePingMs = nextMatch?.Ms ?? direct ?? (carrierPath is { } p && carrier?.LastRttMs is { } live ? live + p.Offset : null),
             GamePingDirect = nextMatch is null && direct is not null,
-            GameRegionName = nextMatch?.RegionName ?? carrierPath?.RegionName,
+            GameRegionName = gameRegion,
+            GameRegionExpected = regionExpected,
             GamePingRelayName = nextMatch?.RelayName,
             // The last minute, as relay comparisons read it (RelayLoss): since connect, an hour of clean play hid
             // loss that had just started, and loss that had stopped stayed on screen for the rest of the evening.

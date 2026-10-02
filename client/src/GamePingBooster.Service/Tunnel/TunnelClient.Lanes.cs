@@ -55,11 +55,44 @@ internal sealed class LaneHunt : IDisposable
 internal sealed partial class TunnelClient
 {
     /// <summary>
-    /// Set only while a lane hunt runs: the downlink thread drops each ProbeReply that reaches the tunnel's own socket in
-    /// here, with the moment it arrived. Null the rest of the time, which costs the downlink one field read per reply -
-    /// and a reply arrives only while a hunt is sending.
+    /// Set only while something measures the tunnel's own socket with Probes - a lane hunt, or WayCheck timing the way in
+    /// use: the downlink thread drops each ProbeReply that reaches the socket in here, with the moment it arrived. Null the
+    /// rest of the time, which costs the downlink one field read per reply - and a reply arrives only while one is sending.
+    /// One holder at a time (<see cref="ClaimProbeReplies"/>): two would take each other's answers.
     /// </summary>
-    private volatile ConcurrentQueue<(long Stamp, long At)>? _laneReplies;
+    private ConcurrentQueue<(long Stamp, long At)>? _laneReplies;
+
+    /// <summary>
+    /// The queue the downlink files the tunnel's own Probe answers in, now the caller's until <see cref="ReleaseProbeReplies"/>;
+    /// null while another measurement holds it.
+    /// </summary>
+    internal ConcurrentQueue<(long Stamp, long At)>? ClaimProbeReplies()
+    {
+        var replies = new ConcurrentQueue<(long Stamp, long At)>();
+        return Interlocked.CompareExchange(ref _laneReplies, replies, null) is null ? replies : null;
+    }
+
+    internal void ReleaseProbeReplies(ConcurrentQueue<(long Stamp, long At)> replies) =>
+        Interlocked.CompareExchange(ref _laneReplies, null, replies);
+
+    /// <summary>
+    /// One Probe down the tunnel's own socket, stamped <paramref name="stamp"/> (a Stopwatch timestamp); relayd answers it
+    /// to that socket without moving anything. False when there is no session or the send failed. Its answer reaches the
+    /// queue of <see cref="ClaimProbeReplies"/>, when one is held.
+    /// </summary>
+    internal bool SendOwnProbe(long stamp)
+    {
+        if (_socket is not { } socket || _sessionId == 0) return false;
+        try
+        {
+            socket.Send(GpbProtocol.BuildProbe(_sessionId, (ulong)stamp), SocketFlags.None);
+            return true;
+        }
+        catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>
     /// Opens <paramref name="candidates"/> sockets to the address the tunnel sends to - the same relay or entry, each
@@ -146,8 +179,12 @@ internal sealed partial class TunnelClient
             pending[s] = [];
         }
 
-        var replies = new ConcurrentQueue<(long Stamp, long At)>();
-        _laneReplies = replies;
+        // Another measurement is reading the tunnel's own answers: no hunt this time rather than two halves.
+        if (ClaimProbeReplies() is not { } replies)
+        {
+            foreach (var socket in sockets) socket?.Dispose();
+            return null;
+        }
         var started = Stopwatch.GetTimestamp();
         try
         {
@@ -250,7 +287,7 @@ internal sealed partial class TunnelClient
         }
         finally
         {
-            _laneReplies = null;
+            ReleaseProbeReplies(replies);
         }
 
         var current = Sample(0);

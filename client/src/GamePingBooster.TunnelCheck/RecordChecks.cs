@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using GamePingBooster.Core.Paths;
+using GamePingBooster.Core.Quality;
 using GamePingBooster.Service.Tunnel;
 
 namespace GamePingBooster.TunnelCheck;
@@ -75,6 +76,29 @@ internal static partial class Program
         var carriedJson = Encoding.UTF8.GetString(carried.ToArray());
         Check("\"carried\" is written when set, and absent when not",
             carriedJson.Contains("\"carried\":\"other\"") && !json.Contains("carried"), carriedJson);
+
+        // An open tunnel's ways checked by WayCheck (0.3.8): written only when there was one, so the golden above - a plan
+        // with no tunnel open - is unchanged, and a moved tunnel says which socket it landed on.
+        var withWays = record with
+        {
+            WayChecks =
+            [
+                new WayCheckEntry("hk-2", "hk-2", [new WaySample("hk-2", 61.2, new PingLoss(16, 16)), new WaySample("hk-2-hn", 37.4, new PingLoss(16, 15))],
+                    "hk-2-hn", "hk-2-hn 37 ms against hk-2 61 ms", Moved: true, OnMeasured: true),
+            ],
+        };
+        var waysBuffer = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(waysBuffer))
+        {
+            QualityFile.WriteRegionPlanJson(writer, "00000000000000000000000000000000", withWays, meta);
+        }
+        var waysJson = Encoding.UTF8.GetString(waysBuffer.ToArray());
+        Check("\"wayChecks\" is written when an open tunnel's ways were checked: each way, the choice, the move and the socket",
+            !json.Contains("wayChecks") && waysJson.Contains("\"wayChecks\":[{\"relay\":\"hk-2\",\"inUse\":\"hk-2\",\"ways\":[{\"id\":\"hk-2\",\"p50\":61.2,\"sent\":16,\"answered\":16}") &&
+            waysJson.Contains("\"moveTo\":\"hk-2-hn\"") && waysJson.Contains("\"moved\":true,\"socket\":\"measured\"") &&
+            !Regex.IsMatch(waysJson, @"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b"), waysJson);
+        var samplePath = Environment.GetEnvironmentVariable("GPB_WRITE_WAYCHECK_SAMPLE");
+        if (!string.IsNullOrEmpty(samplePath)) File.WriteAllText(samplePath, waysJson);
         return Task.CompletedTask;
     }
 

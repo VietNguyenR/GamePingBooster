@@ -15,7 +15,7 @@
   "acted": false,
   "home": "vn-2",
   "allowDirect": false,
-  "maxTunnels": 3,
+  "maxTunnels": 4,
   "measureSeconds": 14.2,
   "complete": true,
   "stopped": null,

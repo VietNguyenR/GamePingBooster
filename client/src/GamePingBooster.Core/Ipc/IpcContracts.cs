@@ -212,6 +212,24 @@ public sealed class RegionPathStatus
 {
     [JsonPropertyName("region")] public string Region { get; set; } = "";
     [JsonPropertyName("relayName")] public string RelayName { get; set; } = "";
+
+    /// <summary>
+    /// The region stays on home - <see cref="RelayName"/> is home's. Listed since 2026-10-02 so the app can say why: a
+    /// region on home used to be missing from the list, and the owner read his Ho Chi Minh City relay as never measured.
+    /// </summary>
+    [JsonPropertyName("home")] public bool Home { get; set; }
+
+    /// <summary>The relay was taken because it sits inside the region, next to its servers (planner rule 4b).</summary>
+    [JsonPropertyName("inside")] public bool Inside { get; set; }
+
+    /// <summary>For a region on home: the fastest other relay measured for it, or null with none.</summary>
+    [JsonPropertyName("bestOtherName")] public string? BestOtherName { get; set; }
+
+    /// <summary>For a region on home: how much faster <see cref="BestOtherName"/> measured than home - negative when slower.</summary>
+    [JsonPropertyName("gainMs")] public double? GainMs { get; set; }
+
+    /// <summary>For a region on home: what leaving home asked.</summary>
+    [JsonPropertyName("marginMs")] public double? MarginMs { get; set; }
 }
 
 /// <summary>State the service pushes up to the UI (on request, and on every change).</summary>
@@ -337,6 +355,14 @@ public sealed class StatusMessage
 
     /// <summary>Display name of the region the game will use, e.g. "Southeast Asia (Singapore)".</summary>
     [JsonPropertyName("gameRegionName")] public string? GameRegionName { get; set; }
+
+    /// <summary>
+    /// True when <see cref="GameRegionName"/> is where the next match is EXPECTED - connect's prediction or the plan's -
+    /// rather than where a match was seen to be. False once the game's own traffic has named the server, and with no
+    /// region at all. The app says so beside the region: a guess shown as fact was read as the match's region on
+    /// 2026-10-01, and a player compared it with the game's own figure.
+    /// </summary>
+    [JsonPropertyName("gameRegionExpected")] public bool GameRegionExpected { get; set; }
 
     /// <summary>
     /// The relay <see cref="GamePingMs"/> is through when that is not <see cref="RelayName"/>, else null. Only between

@@ -165,8 +165,9 @@
                      Foreground="{Binding RelayBrush}" />
 
           <!-- The region plan's other relays for this game - a dash while it has none, the line always there so the card
-               does not change height mid-session. At most two (three tunnels, home
-               included), so the names fit one line; each one is its own TextBlock so the carrier alone turns green. -->
+               does not change height mid-session. At most three (four tunnels, home
+               included); three long names can run past the card and are clipped (ClipToBounds), the tooltip lists every
+               region. Each one is its own TextBlock so the carrier alone turns green. -->
           <TextBlock Grid.Row="4" Grid.Column="0" Classes="label" Text="{DynamicResource main.label.adaptive}" Margin="0,10,0,0"
 />
           <ItemsControl Grid.Row="4" Grid.Column="1" Margin="0,10,0,0" HorizontalAlignment="Right" ClipToBounds="True"

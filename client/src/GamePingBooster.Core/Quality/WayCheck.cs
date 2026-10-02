@@ -23,8 +23,10 @@ public sealed record WayChoice(string? MoveTo, string Reason, bool Return = fals
 /// way it was opened on for the whole connection - a customer's Singapore tunnel held at a high ping all evening -
 /// because the region plan measured it through itself, and every number it produced was that way's.
 ///
-/// Every way, the one in use included, is measured the same way - a round of Probes from a socket of its own, which
-/// relayd answers without moving the session - so nothing here compares a pong with a Probe. The bars are the
+/// Every way, the one in use included, is measured the same way - a round of Probes, which relayd answers without moving
+/// the session - so nothing here compares a pong with a Probe. The way in use is probed on the tunnel's own socket and
+/// every other way on a socket of its own, which the tunnel then moves onto: a socket's port picks the ISP's link
+/// (LanePick), so each number is the lane the tunnel rides or would ride, not one drawn at random. The bars are the
 /// policy's: another way must be better by <see cref="DoorSwitchPolicy.Margin"/>, on the score (a way losing packets
 /// counts <see cref="RelayLoss.PenaltyMs"/> slower); and the way the tunnel left - the relay's direct road, when the
 /// tunnel is on an entry - is gone back to once it is faster by <see cref="DoorSwitchPolicy.ReturnMargin"/> and clean.

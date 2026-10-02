@@ -99,6 +99,10 @@ internal static partial class Program
         LanePickChecks();
 
         Console.WriteLine();
+        Console.WriteLine("Which edges the unblock resolver probes and hands out (EdgeRanking):");
+        EdgeRankingChecks();
+
+        Console.WriteLine();
         if (_failures == 0)
         {
             Console.WriteLine("All spike detector checks passed.");

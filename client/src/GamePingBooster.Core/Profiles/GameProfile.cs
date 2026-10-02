@@ -78,6 +78,13 @@ public sealed class UnblockEntry
     /// having tested anything.
     /// </summary>
     [JsonPropertyName("canary")] public string Canary { get; set; } = "";
+
+    /// <summary>
+    /// Claimed names whose answered addresses are routed through the tunnel while it is up - for a line that
+    /// resets a handshake by its name, which DNS cannot fix (FPT, 2026-10-02). Matched like <see cref="Scope"/>.
+    /// Absent or empty routes nothing.
+    /// </summary>
+    [JsonPropertyName("tunnel")] public List<string> Tunnel { get; set; } = [];
 }
 
 public sealed class GameEntry
@@ -132,7 +139,10 @@ public sealed class GameEntry
     /// and then the relay is its own landmark: it answers ICMP, it is where the game's packets go,
     /// and it is inside a routed /32 by design.
     ///
-    /// All it changes on this side is that the routed-landmark warning stays quiet for such a game.
+    /// What it changes on this side: the routed-landmark warning stays quiet for such a game, and the
+    /// region planner never sends one of its regions direct (RegionRouting.DirectAllowed) - a direct
+    /// echo to a routed landmark would be measured through the tunnel. Its regions may still leave
+    /// home for another relay: echoes through a tunnel are honest whatever this PC routes.
     /// Absent means false, which is right for every profile written before the field existed.
     /// </summary>
     [JsonPropertyName("landmarksRouted")] public bool LandmarksRouted { get; set; }

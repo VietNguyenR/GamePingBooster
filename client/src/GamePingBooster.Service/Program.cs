@@ -130,7 +130,9 @@ public static class Program
         // The policy is read through the engine because that is where the delivered profile lands,
         // and read on every attempt rather than captured once: the profile arrives after startup,
         // so a list captured here would be the built-in fallback for the life of the process.
-        await using var unblock = new UnblockDns(() => engine.UnblockPolicy, log);
+        // The engine also stands in as the tunnel for the few names the profile routes through it (UnblockApp.tunnel):
+        // a line that resets a handshake by its name is past what DNS can fix.
+        await using var unblock = new UnblockDns(() => engine.UnblockPolicy, log, engine);
 
         // Started here and not from the connect verb. The Steam fix has nothing to do with the
         // tunnel - no relay, no bandwidth, no route - and tying it to Connect meant pressing

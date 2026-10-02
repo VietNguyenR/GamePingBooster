@@ -481,16 +481,40 @@ internal sealed partial class TunnelEngine
         if (paths is null || game is null) return null;
 
         var plan = paths.Plan;
+        var decisions = _planDecisions;
+        RegionDecision? DecisionOf(string regionId) => decisions?.FirstOrDefault(d => d.RegionId == regionId);
+        string NameOf(string regionId) => game.Regions.FirstOrDefault(r => r.Id == regionId)?.Name ?? regionId;
         var list = new List<RegionPathStatus>();
+        var listed = new HashSet<string>(StringComparer.Ordinal);
         for (var i = 0; i < plan.Length; i++)
         {
             if (plan[i] is not { } tunnel || OtherTunnelOf(tunnel) is not { } other) continue;
             var regionId = paths.Table.RegionIdAt(i);
+            listed.Add(regionId);
             list.Add(new RegionPathStatus
             {
-                Region = game.Regions.FirstOrDefault(r => r.Id == regionId)?.Name ?? regionId,
+                Region = NameOf(regionId),
                 RelayName = other.Way.Name,
+                Inside = DecisionOf(regionId)?.Inside ?? false,
             });
+        }
+
+        // The regions on home, with what kept them there: the fastest other relay, what it gained and what the margin
+        // asked. Only once a plan has measured them - before that there is nothing to say about any region.
+        if (decisions is not null && _relay is { } home)
+        {
+            foreach (var d in decisions.Where(d => d.Path.Kind == PathKind.Home && !listed.Contains(d.RegionId)))
+            {
+                list.Add(new RegionPathStatus
+                {
+                    Region = NameOf(d.RegionId),
+                    RelayName = home.Name,
+                    Home = true,
+                    BestOtherName = d.BestOtherId is { } id ? Relays.FirstOrDefault(r => r.Id == id)?.Name ?? id : null,
+                    GainMs = d.BestOtherMs is { } other && d.HomeMs is { } homeMs ? homeMs - other : null,
+                    MarginMs = d.MarginMs,
+                });
+            }
         }
         return list.Count == 0 ? null : list;
     }

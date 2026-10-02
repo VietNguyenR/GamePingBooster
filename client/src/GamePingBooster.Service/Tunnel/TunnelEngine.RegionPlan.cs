@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Net.Sockets;
 using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Paths;
 using GamePingBooster.Core.Profiles;
@@ -71,9 +72,13 @@ internal sealed partial class TunnelEngine
     /// </summary>
     private (string GameId, string HomeRelayId, Dictionary<string, RegionPath> Paths)? _planInForce;
 
+    /// <summary>The decisions of the plan in force, for the app's list of regions - see RegionPathsForStatus. Any thread reads.</summary>
+    private volatile IReadOnlyList<RegionDecision>? _planDecisions;
+
     private void ResetRegionPlanning()
     {
         _planInForce = null;
+        _planDecisions = null;
         _regionPlanTries.Clear();
     }
 
@@ -90,7 +95,7 @@ internal sealed partial class TunnelEngine
             return;
         }
 
-        var (mode, source) = RegionRouting.Resolve(_config.RegionRouting, game.RegionRouting, game.LandmarksRouted);
+        var (mode, source) = RegionRouting.Resolve(_config.RegionRouting, game.RegionRouting);
         if (mode == RegionRoutingMode.Off) return;
 
         var key = $"{game.Id}|{RelayPaths.RelayIdOf(home)}";
@@ -136,8 +141,13 @@ internal sealed partial class TunnelEngine
         var viaMs = measurable.ToDictionary(r => r.Region.Id, _ => new Dictionary<string, double>(StringComparer.Ordinal), StringComparer.Ordinal);
         var viaWay = measurable.ToDictionary(r => r.Region.Id, _ => new Dictionary<string, string>(StringComparer.Ordinal), StringComparer.Ordinal);
         var lossyVia = measurable.ToDictionary(r => r.Region.Id, _ => new HashSet<string>(StringComparer.Ordinal), StringComparer.Ordinal);
+        // Each relay's first leg - the round trip to its relayd down the way its number came from - and home's: a number less
+        // its first leg is the relay's road to the region, which says whether the relay is inside it (RegionPlanner rule 4b).
+        var viaLeg = measurable.ToDictionary(r => r.Region.Id, _ => new Dictionary<string, double>(StringComparer.Ordinal), StringComparer.Ordinal);
+        double? homeLegMs = null;
         var homeLoss = PingLoss.Unknown;
         var relaysMeasured = new List<string>();
+        var wayChecks = new List<WayCheckEntry>();
         string? stopped = null;
         var retry = false;   // only ever set to true, from any of the measuring tasks
 
@@ -225,6 +235,7 @@ internal sealed partial class TunnelEngine
                     }
                     // Home's keepalives, not a burst: the downlink thread owns its socket.
                     homeLoss = tunnel.RecentLoss();
+                    homeLegMs = tunnel.LastRttMs;
                     return null;
                 }
                 async Task<string?> Direct()
@@ -257,12 +268,26 @@ internal sealed partial class TunnelEngine
                 foreach (var line in result.Lines) _log(line);
                 if (result.Measured) relaysMeasured.Add(result.RelayId);
                 var best = result.Best;
-                if (result.WayMove is { } move) best = MoveBeforeNextMatch(result, move, Interrupted);
+                var moved = false;
+                bool? onMeasured = null;
+                var legs = result.Legs;
+                if (result.WayMove is { } move)
+                {
+                    (best, moved, onMeasured) = MoveBeforeNextMatch(result, move, Interrupted);
+                    // Moved, the region numbers were shifted onto the new way; its first leg is what Probe measured down it.
+                    if (moved && move.ToSample.MedianMs is { } toLeg) legs = new(legs, StringComparer.Ordinal) { [move.To] = toLeg };
+                }
+                if (result.WayCheck is { } check)
+                {
+                    wayChecks.Add(new WayCheckEntry(result.RelayId, check.InUse, check.Ways, check.Choice.MoveTo, check.Choice.Reason,
+                        moved, onMeasured));
+                }
                 foreach (var (regionId, (ms, way, lossy)) in best)
                 {
                     viaMs[regionId][result.RelayId] = ms;
                     viaWay[regionId][result.RelayId] = way;
                     if (lossy) lossyVia[regionId].Add(result.RelayId);
+                    if (legs.TryGetValue(way, out var leg)) viaLeg[regionId][result.RelayId] = leg;
                 }
             }
             stopped = homeStopped ?? results.Select(r => r.Stopped).FirstOrDefault(r => r is not null);
@@ -291,7 +316,9 @@ internal sealed partial class TunnelEngine
             viaMs.TryGetValue(r.Region.Id, out var via) ? via : new Dictionary<string, double>(),
             directMs.GetValueOrDefault(r.Region.Id),
             homeLoss.IsLossy,
-            lossyVia.TryGetValue(r.Region.Id, out var lossy) ? lossy : null)).ToList();
+            lossyVia.TryGetValue(r.Region.Id, out var lossy) ? lossy : null,
+            homeLegMs,
+            viaLeg.TryGetValue(r.Region.Id, out var legsVia) ? legsVia : null)).ToList();
         var order = profile.Relays.Where(r => r.ViaRelayId is null).Select(r => r.Id).ToList();
         var previous = _planInForce is { } inForce && inForce.GameId == game.Id &&
                        inForce.HomeRelayId.Equals(homeRelayId, StringComparison.OrdinalIgnoreCase)
@@ -303,7 +330,7 @@ internal sealed partial class TunnelEngine
             ? game.Regions.FirstOrDefault(r => r.Name == targetPath.RegionName)?.Id
             : null;
         var plan = RegionPlanner.Plan(homeRelayId, measurements,
-            new PlannerOptions(game.RegionDirect, RegionRouting.MaxTunnels, order, targetRegionId), previous);
+            new PlannerOptions(RegionRouting.DirectAllowed(game), RegionRouting.MaxTunnels, order, targetRegionId), previous);
         if (mode == RegionRoutingMode.On) plan = ForcedByConfig(plan, homeRelayId, profile, viaMs);
 
         var seconds = Stopwatch.GetElapsedTime(started).TotalSeconds;
@@ -318,7 +345,11 @@ internal sealed partial class TunnelEngine
             try
             {
                 acted = await ApplyPlanAsync(tunnel, game, plan, viaWay, profile, ct).ConfigureAwait(false);
-                if (acted) _planInForce = (game.Id, homeRelayId, plan.ToDictionary(d => d.RegionId, d => d.Path, StringComparer.Ordinal));
+                if (acted)
+                {
+                    _planInForce = (game.Id, homeRelayId, plan.ToDictionary(d => d.RegionId, d => d.Path, StringComparer.Ordinal));
+                    _planDecisions = plan;
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -341,7 +372,7 @@ internal sealed partial class TunnelEngine
                 source,
                 acted,
                 homeRelayId,
-                game.RegionDirect,
+                RegionRouting.DirectAllowed(game),
                 RegionRouting.MaxTunnels,
                 seconds,
                 stopped,
@@ -355,7 +386,8 @@ internal sealed partial class TunnelEngine
                     viaWay.TryGetValue(d.RegionId, out var w) ? w : new Dictionary<string, string>(),
                     d.Path.ToString(),
                     d.ChosenMs,
-                    d.Reason)).ToList());
+                    d.Reason)).ToList(),
+                wayChecks);
             recorder.WriteRegionPlan(record, recorder.CurrentMeta(SpikeContext(home: true)));
         }
         return true;
@@ -378,7 +410,7 @@ internal sealed partial class TunnelEngine
         if (home is null || profile is null || !(_watcher?.IsGameRunning ?? false)) return;
         if (game.Regions.Count < 2 || !game.Regions.Any(r => FirstLandmark(r) is not null)) return;
 
-        var (mode, source) = RegionRouting.Resolve(_config.RegionRouting, game.RegionRouting, game.LandmarksRouted);
+        var (mode, source) = RegionRouting.Resolve(_config.RegionRouting, game.RegionRouting);
         _log($"Between matches: the game has been silent {SilenceOfAll(tunnel).TotalSeconds:F0} s - planning {game.Name}'s regions again.");
         if (!await PlanRegionsAsync(tunnel, game, home, profile, mode, source, ct, trigger: "after-match").ConfigureAwait(false))
         {
@@ -413,13 +445,22 @@ internal sealed partial class TunnelEngine
         Dictionary<string, (double Ms, string Way, bool Lossy)> Best,
         List<string> Lines,
         string? Stopped,
-        WayMove? WayMove = null);
+        WayMove? WayMove = null,
+        WayCheckResult? WayCheck = null)
+    {
+        /// <summary>The round trip to the relay's relayd down each way measured, by way id: the first leg of that way's numbers.</summary>
+        public Dictionary<string, double> Legs { get; init; } = new(StringComparer.Ordinal);
+    }
+
+    /// <summary>What WayCheck measured of an open tunnel's ways during a plan, for the record: see WayCheckEntry.</summary>
+    private sealed record WayCheckResult(string InUse, IReadOnlyList<WaySample> Ways, WayChoice Choice);
 
     /// <summary>
     /// An open tunnel's better way in, found while the plan measured it: where to, and what the ways measured to relayd
-    /// - the tunnel's current one and the one moved to - so the region's numbers can be carried across the move.
+    /// - the tunnel's current one and the one moved to - so the region's numbers can be carried across the move. <c>Socket</c>
+    /// is the one <c>To</c> was measured on, kept open for the move to take (see DoorProbes): closed when no move is made.
     /// </summary>
-    private sealed record WayMove(string From, string To, WaySample FromSample, WaySample ToSample, bool Return);
+    private sealed record WayMove(string From, string To, WaySample FromSample, WaySample ToSample, bool Return, Socket? Socket);
 
     /// <summary>
     /// Makes the move <see cref="CheckWaysAsync"/> found for an open tunnel, when that relay's entry switching is on and
@@ -427,28 +468,33 @@ internal sealed partial class TunnelEngine
     /// median through the tunnel shifted by what the move saves to relayd, since the relay's own route to the region is
     /// the same whichever way the packets came in (ChooseDoorAsync's reasoning). Unchanged when nothing moved.
     /// </summary>
-    private Dictionary<string, (double Ms, string Way, bool Lossy)> MoveBeforeNextMatch(RelayPlanResult result, WayMove move,
-        Func<string?> interrupted)
+    private (Dictionary<string, (double Ms, string Way, bool Lossy)> Best, bool Moved, bool? OnMeasured) MoveBeforeNextMatch(
+        RelayPlanResult result, WayMove move, Func<string?> interrupted)
     {
         if (SwitchingFor(result.RelayId) != EntrySwitchingMode.On)
         {
+            move.Socket?.Dispose();
             _log($"  Entry switching is \"record\" for {result.RelayId}: its tunnel would move to {move.To} - not moved.");
-            return result.Best;
+            return (result.Best, false, null);
         }
         if (interrupted() is { } why)
         {
+            move.Socket?.Dispose();
             _log($"  The tunnel to {result.RelayId} stays on {move.From} for now - {why}.");
-            return result.Best;
+            return (result.Best, false, null);
         }
         // Not a rollback even when it goes back to the road left: a way that goes silent right after this move is left again
-        // (MoveOtherTunnelsBackAfterSilence), as after the switch policy's own returns.
-        if (!MoveOtherToDoor(result.RelayId, move.To, rollback: false, why: "between matches")) return result.Best;
+        // (MoveOtherTunnelsBackAfterSilence), as after the switch policy's own returns. The socket goes with the call.
+        if (!MoveOtherToDoor(result.RelayId, move.To, rollback: false, why: "between matches", move.Socket, out var onMeasured))
+        {
+            return (result.Best, false, null);
+        }
 
         var delta = move.ToSample.MedianMs!.Value - (move.FromSample.MedianMs ?? move.ToSample.MedianMs.Value);
-        return result.Best.ToDictionary(
+        return (result.Best.ToDictionary(
             kv => kv.Key,
             kv => (Math.Max(0, kv.Value.Ms + delta), move.To, move.ToSample.Loss.IsLossy),
-            StringComparer.Ordinal);
+            StringComparer.Ordinal), true, onMeasured);
     }
 
     /// <summary>
@@ -461,6 +507,7 @@ internal sealed partial class TunnelEngine
         List<(RegionEntry Region, IPAddress Landmark)> measurable, byte[] psk, Func<string?> interrupted, CancellationToken token)
     {
         var best = new Dictionary<string, (double Ms, string Way, bool Lossy)>(StringComparer.Ordinal);
+        var legs = new Dictionary<string, double>(StringComparer.Ordinal);
         var lines = new List<string>();
         string? stopped = null;
         var measured = false;
@@ -475,11 +522,12 @@ internal sealed partial class TunnelEngine
                 var wayId = openTunnel?.Way.Id ?? relay.Id;
                 var liveLine = new List<string>();
                 // Every way into the relay measured by Probes alongside, from sockets of their own - see CheckWaysAsync.
-                var waysTask = openTunnel is null ? Task.FromResult<(IReadOnlyList<WaySample>, WayChoice)?>(null) : CheckWaysAsync(openTunnel, token);
+                var waysTask = openTunnel is null ? Task.FromResult<(IReadOnlyList<WaySample>, WayChoice, Socket?)?>(null) : CheckWaysAsync(openTunnel, token);
                 var liveSamples = await SampleLiveManyAsync(live, measurable.Select(m => m.Landmark).ToList(), interrupted, token)
                     .ConfigureAwait(false);
                 var ways = await waysTask.ConfigureAwait(false);
                 var liveLoss = live.RecentLoss();
+                if (live.LastRttMs is { } liveLeg) legs[wayId] = liveLeg;
                 if (liveSamples is null) stopped = interrupted();
                 else
                 {
@@ -500,10 +548,15 @@ internal sealed partial class TunnelEngine
                         w.Item1.FirstOrDefault(x => x.Id.Equals(to, StringComparison.OrdinalIgnoreCase)) is { MedianMs: not null } toSample &&
                         w.Item1.FirstOrDefault(x => x.Id.Equals(wayId, StringComparison.OrdinalIgnoreCase)) is { } fromSample)
                     {
-                        wayMove = new WayMove(wayId, to, fromSample, toSample, w.Item2.Return);
+                        wayMove = new WayMove(wayId, to, fromSample, toSample, w.Item2.Return, w.Item3);
+                    }
+                    else
+                    {
+                        w.Item3?.Dispose();
                     }
                 }
-                return new RelayPlanResult(relay.Id, true, best, lines, stopped, wayMove);
+                return new RelayPlanResult(relay.Id, true, best, lines, stopped, wayMove,
+                    ways is { } checkedWays ? new WayCheckResult(wayId, checkedWays.Item1, checkedWays.Item2) : null) { Legs = legs };
             }
 
             foreach (var way in RelayPaths.DoorsOf(profile.Relays, relay.Id))
@@ -522,7 +575,8 @@ internal sealed partial class TunnelEngine
                 if (open is null) continue;
 
                 // The way's loss first, while nothing else is reading the socket: a burst of pings (RelayLoss).
-                var (_, loss) = await open.MeasureRelayBurstAsync(token).ConfigureAwait(false);
+                var (burstBest, loss) = await open.MeasureRelayBurstAsync(token).ConfigureAwait(false);
+                if (burstBest is { } wayLeg) legs[way.Id] = wayLeg;
 
                 // Rounds of one echo per region, every region at once (MeasureManyThroughTunnelAsync): a round costs
                 // the slowest landmark, not the sum of them. A pass that stops mid-way records nothing for this way -
@@ -568,7 +622,7 @@ internal sealed partial class TunnelEngine
             // With a Disconnect: the relay's session goes back to its pool now rather than in 90 s.
             open?.Dispose();
         }
-        return new RelayPlanResult(relay.Id, measured, best, lines, stopped);
+        return new RelayPlanResult(relay.Id, measured, best, lines, stopped) { Legs = legs };
     }
 
     /// <summary>

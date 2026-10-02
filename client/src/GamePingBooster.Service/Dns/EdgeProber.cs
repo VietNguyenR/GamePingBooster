@@ -36,7 +36,12 @@ internal static class EdgeProber
     /// </summary>
     private static readonly TimeSpan Budget = TimeSpan.FromMilliseconds(2500);
 
-    public static async Task<bool> WorksAsync(IPAddress address, string sni, CancellationToken ct)
+    /// <param name="connected">
+    /// Called once the TCP connection is taken, before the handshake. WorkingEdges tells "this address
+    /// is a web front that failed the handshake" (filtering) from "nothing here answers on 443" (not a
+    /// web front at all) by it.
+    /// </param>
+    public static async Task<bool> WorksAsync(IPAddress address, string sni, CancellationToken ct, Action? connected = null)
     {
         try
         {
@@ -45,6 +50,7 @@ internal static class EdgeProber
 
             using var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
             await socket.ConnectAsync(new IPEndPoint(address, Port), timeout.Token).ConfigureAwait(false);
+            connected?.Invoke();
 
             var errors = SslPolicyErrors.None;
 

@@ -1049,9 +1049,9 @@ internal sealed partial class TunnelClient : IDisposable
                         break;
 
                     case GpbProtocol.TypeProbeReply:
-                        // Only a lane hunt sends Probes down the tunnel's own socket - see HuntLanesAsync. Stamped here,
-                        // on this thread, as the pongs are: the lane in use is timed the way the game's packets travel.
-                        if (_laneReplies is { } lane &&
+                        // Only a lane hunt or WayCheck sends Probes down the tunnel's own socket - see ClaimProbeReplies.
+                        // Stamped here, on this thread, as the pongs are: the lane in use is timed the way the game's packets travel.
+                        if (Volatile.Read(ref _laneReplies) is { } lane &&
                             GpbProtocol.TryReadProbeReply(buffer.AsSpan(0, n), out var rsid, out var rstamp) && rsid == _sessionId)
                         {
                             lane.Enqueue(((long)rstamp, Stopwatch.GetTimestamp()));
@@ -1297,6 +1297,19 @@ internal sealed partial class TunnelClient : IDisposable
         Swap(socket, _relayEndpoint);
     }
 
+    /// <summary>
+    /// Moves this tunnel onto <paramref name="socket"/>, already connected to <paramref name="endpoint"/> - another way into
+    /// the same relay - instead of a fresh socket: the one entry switching measured that way on (DoorProbes.Take), so the
+    /// tunnel rides the lane the move was judged by. Otherwise <see cref="MoveTo"/>. Throws, leaving the socket to the
+    /// caller, when it is not connected to that address.
+    /// </summary>
+    internal void MoveToMeasured(Socket socket, IPEndPoint endpoint)
+    {
+        if (_sessionId == 0) throw new InvalidOperationException("The tunnel has no session to move.");
+        if (!endpoint.Equals(socket.RemoteEndPoint)) throw new InvalidOperationException("The socket is connected elsewhere.");
+        Swap(socket, endpoint);
+    }
+
     /// <summary>The local port the tunnel sends from right now - its lane. 0 before the handshake.</summary>
     internal int LocalPort
     {
@@ -1368,7 +1381,7 @@ internal sealed partial class TunnelClient : IDisposable
         if (Interlocked.CompareExchange(ref _draining, null, draining) == draining) draining.Socket.Dispose();
     }
 
-    private static Socket NewSocket() => new(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp)
+    internal static Socket NewSocket() => new(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp)
     {
         // Do not fragment: if the MTU is wrong we want to know immediately, not silently crawl.
         DontFragment = true,
