@@ -69,7 +69,30 @@ internal sealed class WorkingEdges
     private readonly DohUpstream _doh;
     private readonly Action<string> _log;
 
-    private readonly ConcurrentDictionary<string, Entry> _known = new();
+    private readonly ConcurrentDictionary<string, Entry> _known;
+
+    /// <summary>
+    /// How long a verdict may still be ANSWERED with after it stops being fresh (<see cref="Lifetime"/>,
+    /// <see cref="NoEdgeLifetime"/>) - while a new probe runs in the background for the next lookup. Without it every
+    /// lookup after two minutes waited for handshakes again, and a game asking its names at start-up waited for all
+    /// of them (FPT, 2026-10-02: "Initializing..." seconds longer). An edge that went bad in the meantime is answered
+    /// at most once more; the probe already running replaces it.
+    /// </summary>
+    private static readonly TimeSpan UsableFor = TimeSpan.FromMinutes(30);
+
+    /// <summary>Cancelled when the resolver stops; the background probes run under it.</summary>
+    private readonly CancellationToken _background;
+
+    /// <summary>
+    /// The verdicts, kept by the caller so they outlive this instance - see <see cref="EdgeMemory"/>. A fresh one
+    /// when the caller keeps nothing.
+    /// </summary>
+    internal sealed class Memory
+    {
+        internal ConcurrentDictionary<string, Entry> Known { get; } = new();
+        internal ConcurrentDictionary<IPAddress, DateTimeOffset> Pool { get; } = new();
+        internal ConcurrentDictionary<string, DateTimeOffset> Cut { get; } = new();
+    }
 
     /// <summary>
     /// Every address recently seen to complete a handshake for ANY claimed name.
@@ -84,7 +107,7 @@ internal sealed class WorkingEdges
     /// Borrowed addresses are still probed for the name they are about to answer, so this is a
     /// shortlist of things worth trying, never a claim that they will work.
     /// </summary>
-    private readonly ConcurrentDictionary<IPAddress, DateTimeOffset> _pool = new();
+    private readonly ConcurrentDictionary<IPAddress, DateTimeOffset> _pool;
 
     /// <summary>
     /// The probe in flight for a name, so a browser opening eight connections at once causes one
@@ -97,7 +120,7 @@ internal sealed class WorkingEdges
     /// completed, and another name completed on the same address. Read by the resolver to send the name through
     /// the tunnel on its own - see <see cref="CutByName"/>.
     /// </summary>
-    private readonly ConcurrentDictionary<string, DateTimeOffset> _cut = new();
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _cut;
 
     /// <summary>For the confirming handshakes: as long as a filter takes to reset, not as long as it can hang.</summary>
     private static readonly TimeSpan CutConnectTimeout = TimeSpan.FromSeconds(1);
@@ -127,10 +150,24 @@ internal sealed class WorkingEdges
     /// <summary>Whether a name cut on every edge it was given is asked for as other Vietnamese networks - the line's own instance only.</summary>
     private readonly bool _inCountry;
 
+    /// <summary>
+    /// The tunnel's instance: of the edges that work, those named for the player's own network win - see
+    /// EdgeRanking.PreferPlayersNetwork. Not the line's own: there the handshake is timed from the player, and the
+    /// fastest is the right one.
+    /// </summary>
+    private readonly bool _preferPlayersNetwork;
+
     public WorkingEdges(DohUpstream doh, Action<string> log, Action<string, IReadOnlyList<IPAddress>>? beforeProbe = null,
-        Action<string>? onFiltered = null, Func<string, bool>? tunnelFirst = null, bool inCountry = false)
+        Action<string>? onFiltered = null, Func<string, bool>? tunnelFirst = null, bool inCountry = false,
+        bool preferPlayersNetwork = false, Memory? memory = null, CancellationToken background = default)
     {
+        memory ??= new Memory();
+        _known = memory.Known;
+        _pool = memory.Pool;
+        _cut = memory.Cut;
+        _background = background;
         _inCountry = inCountry;
+        _preferPlayersNetwork = preferPlayersNetwork;
         _doh = doh;
         _log = log;
         _beforeProbe = beforeProbe;
@@ -143,7 +180,7 @@ internal sealed class WorkingEdges
     /// <summary>How many addresses were dropped for failing a handshake - the reason this class exists.</summary>
     public long Rejected => Interlocked.Read(ref _rejected);
 
-    private sealed record Entry(IPAddress[] Addresses, DateTimeOffset Expires);
+    internal sealed record Entry(IPAddress[] Addresses, DateTimeOffset Expires, DateTimeOffset UsableUntil);
 
     /// <summary>
     /// True when the last probe of <paramref name="name"/> found the line cutting it by name and nothing on the line
@@ -162,10 +199,20 @@ internal sealed class WorkingEdges
     /// </param>
     public async Task<IPAddress[]?> ForAsync(string name, string? sibling, CancellationToken ct)
     {
-        if (_known.TryGetValue(name, out var entry) && entry.Expires > DateTimeOffset.UtcNow)
+        if (_known.TryGetValue(name, out var entry))
         {
+            var now = DateTimeOffset.UtcNow;
+
             // Empty is a remembered "nothing completed a handshake": relay, do not probe again.
-            return entry.Addresses.Length == 0 ? null : entry.Addresses;
+            if (entry.Expires > now) return entry.Addresses.Length == 0 ? null : entry.Addresses;
+
+            // Stale but still usable: answered now, probed again in the background for the next lookup - the game
+            // never waits for handshakes it waited for once already. See UsableFor.
+            if (entry.UsableUntil > now)
+            {
+                RefreshInBackground(name, sibling);
+                return entry.Addresses.Length == 0 ? null : entry.Addresses;
+            }
         }
 
         var task = _inFlight.GetOrAdd(name, key => ProbeAsync(key, sibling, ct));
@@ -181,6 +228,18 @@ internal sealed class WorkingEdges
         }
     }
 
+    /// <summary>A new probe for a stale verdict, nobody waiting on it. One per name at a time, like any probe.</summary>
+    private void RefreshInBackground(string name, string? sibling)
+    {
+        if (_background.IsCancellationRequested || _inFlight.ContainsKey(name)) return;
+        var task = _inFlight.GetOrAdd(name, key => Task.Run(() => ProbeAsync(key, sibling, _background)));
+        _ = task.ContinueWith(t =>
+        {
+            _ = t.Exception;   // observed: a refresh cut short by the resolver stopping is not an error
+            _inFlight.TryRemove(new KeyValuePair<string, Task<IPAddress[]>>(name, task));
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    }
+
     private async Task<IPAddress[]> ProbeAsync(string name, string? sibling, CancellationToken ct)
     {
         var clock = Stopwatch.StartNew();
@@ -189,16 +248,19 @@ internal sealed class WorkingEdges
         // resolver naming a filtered edge while another named a clean one, so asking only the
         // preferred resolver would reproduce it exactly.
         var perUpstream = new List<IReadOnlyList<IPAddress>>();
+        var playersNetwork = new HashSet<IPAddress>();
 
-        foreach (var reply in await _doh.ResolveEverywhereAsync(
+        foreach (var (resolver, reply) in await _doh.ResolveEachAsync(
                      DnsWire.BuildQuery(0, name), ct).ConfigureAwait(false))
         {
             DnsMessage parsed;
             try { parsed = DnsWire.Parse(reply, reply.Length); }
             catch (FormatException) { continue; }
 
-            perUpstream.Add([.. parsed.Addresses
-                .Where(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)]);
+            List<IPAddress> addresses = [.. parsed.Addresses
+                .Where(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)];
+            perUpstream.Add(addresses);
+            if (DohUpstream.AnswersForPlayersNetwork(resolver)) playersNetwork.UnionWith(addresses);
         }
 
         // Taken in turn from each upstream, not one list after the other: they disagree about which
@@ -305,6 +367,20 @@ internal sealed class WorkingEdges
             : ownConnected ? working
             : [];
 
+        // Through the tunnel the probe is timed from the relay, not from the player, so its speed cannot choose the
+        // CDN: what was named for the player's own network is kept when any of it works. See
+        // EdgeRanking.PreferPlayersNetwork - PUBG's lobby went to mainland China this way on FPT, 2026-10-02.
+        if (_preferPlayersNetwork && usable.Length > 1)
+        {
+            var preferred = EdgeRanking.PreferPlayersNetwork(usable, a => a.Address, playersNetwork);
+            if (preferred.Count < usable.Length)
+            {
+                _log($"Unblock: {name} through the tunnel - kept {string.Join(", ", preferred.Select(a => a.Address))}, " +
+                     $"named for this network, over {usable.Length - preferred.Count} edge(s) named for somewhere else.");
+                usable = [.. preferred];
+            }
+        }
+
         // Fastest first, and a clearly slower CDN not handed out at all - see EdgeRanking.
         var good = EdgeRanking.Rank([.. usable.Select(a => (a.Address, a.Task.Result.Elapsed))]);
         var slower = usable.Length - good.Length;
@@ -331,7 +407,7 @@ internal sealed class WorkingEdges
             _log($"Unblock: no address for {name} completed a handshake ({clock.ElapsedMilliseconds} ms) - " +
                  $"{why}. Relaying the upstream answer unchanged for {NoEdgeLifetime.TotalMinutes:0} min.");
             var until = DateTimeOffset.UtcNow.Add(NoEdgeLifetime);
-            _known[name] = new Entry([], until);
+            _known[name] = new Entry([], until, DateTimeOffset.UtcNow.Add(UsableFor));
 
             // "Its own addresses took the connection" is not yet "the line cuts this name": Steam's
             // p2p-*.discovery names accept on 443 and speak no TLS at all. Only the comparison says which -
@@ -366,7 +442,7 @@ internal sealed class WorkingEdges
         var expires = DateTimeOffset.UtcNow.Add(Lifetime);
         foreach (var a in working) _pool[a.Address] = expires;
 
-        _known[name] = new Entry(good, expires);
+        _known[name] = new Entry(good, expires, DateTimeOffset.UtcNow.Add(UsableFor));
         return good;
     }
 

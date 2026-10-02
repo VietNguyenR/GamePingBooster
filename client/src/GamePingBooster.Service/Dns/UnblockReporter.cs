@@ -36,6 +36,9 @@ internal sealed class UnblockReporter : IDisposable
     private static readonly TimeSpan WatchEvery = TimeSpan.FromMinutes(1);
 
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>How long after the trouble the line is checked - see ReportAsync.</summary>
+    private static readonly TimeSpan SettleFirst = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan[] Retries = [TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(30)];
 
     private static readonly string? AppVersion = typeof(UnblockReporter).Assembly
@@ -207,6 +210,9 @@ internal sealed class UnblockReporter : IDisposable
         var (enabled, lastError) = _state();
         var context = new UnblockDiagnosis.Context(trigger, detail, name, _policy(), enabled, lastError, _routes, _logPath);
 
+        // A moment for the resolver to settle: "filtered" is said from inside a lookup, often while unblocking is
+        // still turning on, and a check run that instant reads a half-built state.
+        await Task.Delay(SettleFirst, ct).ConfigureAwait(false);
         _log($"Unblock report: {trigger} ({detail}) - checking the line before sending.");
         var findings = await UnblockDiagnosis.RunAsync(context, ct).ConfigureAwait(false);
         _log($"Unblock report: {findings.Verdict} - {findings.Summary}");

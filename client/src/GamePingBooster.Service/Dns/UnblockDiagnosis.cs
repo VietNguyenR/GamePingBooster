@@ -113,8 +113,12 @@ internal static class UnblockDiagnosis
         var tunnelUp = context.Routes?.Ready ?? false;
 
         var flags = new List<string>();
-        if (nrpt > 0 && !context.Enabled) flags.Add("leftover-rules");
-        if (!context.Enabled && context.LastError is not null) flags.Add("resolver-failing");
+        // Asked, not inferred from Enabled: two reports on 2026-10-02 said "leftover rules" for a resolver that was
+        // running and answering - checked mid-enable, before Enabled turned true. Rules are only left over when
+        // nothing answers them.
+        var resolverAnswers = await LocalResolverAnswersAsync(context.Policy, ct).ConfigureAwait(false);
+        if (nrpt > 0 && !resolverAnswers) flags.Add("leftover-rules");
+        if (!resolverAnswers && !context.Enabled && context.LastError is not null) flags.Add("resolver-failing");
         if (checks.Any(c => c.Isp.Any(i => i.Lie && IPAddress.TryParse(i.Server, out var s) &&
                                            s.AddressFamily == AddressFamily.InterNetworkV6)))
         {
@@ -134,6 +138,31 @@ internal static class UnblockDiagnosis
             verdict, flags, Summarise(verdict, context, checks),
             [.. v4.Select(a => a.ToString())], [.. v6.Select(a => a.ToString())],
             nrpt, context.Enabled, context.LastError, tunnelUp, checks, processes, ReadLog(context.LogPath));
+    }
+
+    /// <summary>
+    /// Whether the unblock resolver on 127.0.0.53 answers at all - any reply, for any service's canary, within three
+    /// seconds. What "the rules point at something that is not there" actually means.
+    /// </summary>
+    private static async Task<bool> LocalResolverAnswersAsync(UnblockPolicy policy, CancellationToken ct)
+    {
+        var canary = policy.Apps.Select(a => a.Canary).FirstOrDefault() ?? "steamcommunity.com";
+        try
+        {
+            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            limit.CancelAfter(TimeSpan.FromSeconds(3));
+            await socket.SendToAsync(DnsWire.BuildQuery((ushort)Random.Shared.Next(1, ushort.MaxValue), canary),
+                SocketFlags.None, new IPEndPoint(IPAddress.Parse("127.0.0.53"), 53), limit.Token).ConfigureAwait(false);
+            var buffer = new byte[DnsWire.MaxUdpMessage];
+            var received = await socket.ReceiveFromAsync(buffer, SocketFlags.None, new IPEndPoint(IPAddress.Any, 0), limit.Token)
+                .ConfigureAwait(false);
+            return received.ReceivedBytes >= DnsWire.HeaderLength;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            return false;
+        }
     }
 
     /// <summary>The line cuts the real name on this edge - see <see cref="EdgeProber.CutByName"/>.</summary>

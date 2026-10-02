@@ -59,5 +59,15 @@ internal static partial class Program
         Check("An upstream with no answer does not stop the other's being used", one.Length == 2, $"{one.Length}");
 
         Check("No upstream answered - nothing to probe", EdgeRanking.Interleave([], 6).Length == 0, "");
+
+        // FPT, 2026-10-02: through the tunnel, timed from Singapore, Tencent beat the Akamai edge Google named for the
+        // player's network - and Tencent's page sends the lobby to mainland China.
+        IReadOnlySet<IPAddress> playersNetwork = new HashSet<IPAddress> { Ip("23.66.150.216") };
+        var viaRelay = new[] { Ip("43.174.128.40"), Ip("43.175.115.189"), Ip("23.66.150.216") };
+        var kept = EdgeRanking.PreferPlayersNetwork(viaRelay, a => a, playersNetwork);
+        Check("Through the tunnel: the edge named for the player's network is kept over nearer ones named elsewhere",
+            kept.Count == 1 && kept[0].Equals(Ip("23.66.150.216")), string.Join(", ", kept.Select(a => a.ToString())));
+        var none = EdgeRanking.PreferPlayersNetwork(new[] { Ip("43.174.128.40") }, a => a, playersNetwork);
+        Check("  ...and when none of those works, what works is used rather than nothing", none.Count == 1, $"{none.Count}");
     }
 }

@@ -56,7 +56,13 @@ internal sealed class LocalResolver : IAsyncDisposable
     /// the tunnel while here: probing the line again would only find it cut again, at the cost of a slow lookup each
     /// time.
     /// </summary>
-    private readonly ConcurrentDictionary<string, DateTimeOffset> _cut = new();
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _cut;
+
+    /// <summary>What this network taught earlier resolvers - see <see cref="EdgeMemory"/>. Null for a one-off.</summary>
+    private readonly EdgeMemory? _memory;
+
+    /// <summary>At most this many names remembered for warming; a game asks a few dozen.</summary>
+    private const int MaxSeen = 300;
 
     /// <summary>
     /// Then the line is asked again. Long, because a line that cuts a name by name keeps doing it for hours; not for
@@ -77,8 +83,10 @@ internal sealed class LocalResolver : IAsyncDisposable
     private long _failed;
 
     public LocalResolver(IReadOnlyList<IPAddress> upstream, UnblockPolicy policy, Action<string> log,
-        IUnblockRoutes? routes = null, Action<string>? filtered = null)
+        IUnblockRoutes? routes = null, Action<string>? filtered = null, EdgeMemory? memory = null)
     {
+        _memory = memory;
+        _cut = memory?.Cut ?? new ConcurrentDictionary<string, DateTimeOffset>();
         _upstream = upstream;
         _policy = policy;
         _log = log;
@@ -87,12 +95,13 @@ internal sealed class LocalResolver : IAsyncDisposable
         // WorkingEdges.ProbeAsync. Read through `this`: _routes is set below, and the tunnel comes and goes.
         _edges = new WorkingEdges(_doh, log, onFiltered: filtered,
             tunnelFirst: name => _routes is { Ready: true } && _policy.ClaimedBy(name)?.MayTunnelWhenCut(name) == true,
-            inCountry: true);
+            inCountry: true, memory: memory?.Direct, background: _stopping.Token);
         _routes = routes;
         if (routes is not null)
         {
             // Routed before they are probed, so the probe crosses the tunnel the way the program's connection will.
-            _tunnelEdges = new WorkingEdges(_doh, log, beforeProbe: (name, addresses) => routes.Route(name, addresses));
+            _tunnelEdges = new WorkingEdges(_doh, log, beforeProbe: (name, addresses) => routes.Route(name, addresses),
+                preferPlayersNetwork: true, memory: memory?.Tunnel, background: _stopping.Token);
         }
     }
 
@@ -282,6 +291,8 @@ internal sealed class LocalResolver : IAsyncDisposable
             // names through, and sending them over the relay there only spent the session's 256 KB/s. The line first,
             // then, the profile's tunnel list included; the tunnel once the line is seen cutting the name, and
             // straight to it for a while after. Without a tunnel, the name is answered exactly as before.
+            if (type == DnsWire.TypeA && _memory is { } seen && seen.Seen.Count < MaxSeen) seen.Seen.TryAdd(name, 0);
+
             var tunnelReady = type == DnsWire.TypeA && _routes is { Ready: true } && _tunnelEdges is not null;
             var viaTunnel = tunnelReady && TunnelledForCut(name);
 

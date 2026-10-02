@@ -56,6 +56,23 @@ public static class EdgeRanking
     }
 
     /// <summary>
+    /// Of the edges that work, the ones a resolver named FOR THE PLAYER'S OWN NETWORK, when there are any - else all.
+    ///
+    /// For an edge measured through the tunnel, where speed says nothing about the player. On FPT on 2026-10-02 PUBG's
+    /// lobby front went through the tunnel and was probed from the relay in Singapore; from there Tencent's edges
+    /// (named by Cloudflare, which does not pass the player's subnet) are nearer than the Akamai edge Google names for
+    /// a Vietnamese network, so ranking kept Tencent - whose page sends the game to mainland China for the lobby, and
+    /// the lobby took minutes. What a CDN names for the player's network is what it built for that network, whatever
+    /// it measures from somewhere else.
+    /// </summary>
+    public static IReadOnlyList<T> PreferPlayersNetwork<T>(
+        IReadOnlyList<T> working, Func<T, IPAddress> address, IReadOnlySet<IPAddress> playersNetwork)
+    {
+        var named = working.Where(w => playersNetwork.Contains(address(w))).ToList();
+        return named.Count > 0 ? named : working;
+    }
+
+    /// <summary>
     /// The edges that completed a handshake, fastest first, without any that were clearly slower than
     /// the fastest. Never empty when <paramref name="survivors"/> is not.
     /// </summary>

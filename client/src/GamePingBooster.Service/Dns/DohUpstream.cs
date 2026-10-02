@@ -114,7 +114,18 @@ internal sealed class DohUpstream : IDisposable
     /// relayed - the edge check, which wants all the addresses either operator names. A resolver still silent
     /// <see cref="OthersAfterFirst"/> after another has answered is left out rather than waited for.
     /// </summary>
-    public async Task<IReadOnlyList<byte[]>> ResolveEverywhereAsync(byte[] query, CancellationToken ct)
+    public async Task<IReadOnlyList<byte[]>> ResolveEverywhereAsync(byte[] query, CancellationToken ct) =>
+        [.. (await ResolveEachAsync(query, ct).ConfigureAwait(false)).Select(r => r.Body)];
+
+    /// <summary>
+    /// True for a resolver whose answer is computed for the player's own network: Google passes the client's subnet
+    /// to the CDN (EDNS client subnet); Cloudflare deliberately does not, so its answer is for wherever Cloudflare's
+    /// own resolver is. See EdgeRanking.PreferPlayersNetwork for why that matters.
+    /// </summary>
+    public static bool AnswersForPlayersNetwork(string resolver) => resolver.Contains("8.8.8.8", StringComparison.Ordinal);
+
+    /// <summary><see cref="ResolveEverywhereAsync"/>, with which resolver gave each reply.</summary>
+    public async Task<IReadOnlyList<(string Resolver, byte[] Body)>> ResolveEachAsync(byte[] query, CancellationToken ct)
     {
         var wire = (byte[])query.Clone();
         DnsWire.WriteId(wire, 0);
@@ -138,7 +149,10 @@ internal sealed class DohUpstream : IDisposable
             }
         }
 
-        var replies = asks.Where(a => a.IsCompletedSuccessfully).Select(a => a.Result).ToList();
+        var replies = asks.Select((a, i) => (Resolver: Resolvers[i], Ask: a))
+            .Where(x => x.Ask.IsCompletedSuccessfully && x.Ask.Result is not null)
+            .Select(x => (x.Resolver, Body: x.Ask.Result!))
+            .ToList();
         for (var i = 0; i < asks.Count; i++)
         {
             if (!asks[i].IsCompleted && !ct.IsCancellationRequested)
@@ -151,7 +165,7 @@ internal sealed class DohUpstream : IDisposable
         await Task.WhenAll(asks).ConfigureAwait(false);
 
         ct.ThrowIfCancellationRequested();
-        return [.. replies.Where(r => r is not null).Select(r => r!)];
+        return replies;
     }
 
     /// <summary>

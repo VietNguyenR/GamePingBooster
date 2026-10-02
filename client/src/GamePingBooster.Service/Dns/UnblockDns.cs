@@ -38,6 +38,20 @@ internal sealed class UnblockDns : IAsyncDisposable
     /// <summary>The tunnel, for names the profile routes through it - see <see cref="IUnblockRoutes"/>.</summary>
     private readonly IUnblockRoutes? _routes;
 
+    /// <summary>
+    /// What the resolvers learnt on the current network, kept across Disconnect and Connect - see
+    /// <see cref="EdgeMemory"/> - and which network that is: the resolvers Windows uses, joined. A different network
+    /// starts a fresh memory: a verdict is about a line.
+    /// </summary>
+    private EdgeMemory? _memory;
+    private string? _memoryNetwork;
+
+    /// <summary>Claimed names asked before, on disk, so the first Connect after a restart can warm them too.</summary>
+    private static string NamesFile => Path.Combine(ServiceConfig.DefaultDirectory, "unblock-names.txt");
+
+    /// <summary>At most this many names warmed per Connect, and remembered on disk.</summary>
+    private const int MaxWarm = 120;
+
     /// <summary>The loop <see cref="Start"/> runs, cancelled by <see cref="StopAsync"/>. Guarded by _runGate.</summary>
     private CancellationTokenSource? _run;
     private readonly object _runGate = new();
@@ -257,9 +271,17 @@ internal sealed class UnblockDns : IAsyncDisposable
 
             // 3. The resolver first. Pointing Windows at an address nothing is listening on would
             //    take DNS down for the claimed names with no way back except a reboot.
+            var network = string.Join(",", upstream);
+            if (_memory is null || _memoryNetwork != network)
+            {
+                _memory = new EdgeMemory();
+                _memoryNetwork = network;
+            }
+
             var resolver = new LocalResolver(upstream, policy, _log, _routes,
                 filtered: name => Trouble?.Invoke("filtered",
-                    $"the line cuts handshakes naming {name} on its own addresses, while another name completes there", name));
+                    $"the line cuts handshakes naming {name} on its own addresses, while another name completes there", name),
+                memory: _memory);
             try
             {
                 resolver.Start();
@@ -323,11 +345,117 @@ internal sealed class UnblockDns : IAsyncDisposable
             }
 
             Enabled = true;
+
+            // Off the enable path: the names the game will ask, asked now, while the player is still launching it.
+            var memory = _memory;
+            _ = Task.Run(() => PrewarmAsync(policy, memory, ct), CancellationToken.None);
             return null;
         }
         finally
         {
             _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Asks the resolver, as Windows would, every claimed name worth knowing before the game starts: those asked on
+    /// this network before (this service's memory and the list on disk), each service's canary and every name the
+    /// profile routes through the tunnel. Each answer leaves a verdict - edges probed, the tunnel routed - so when the
+    /// game asks seconds later the answer is already there. Players press Connect and then start the game, and
+    /// "Initializing..." is when the game asks; this moves the probing into the gap between the two.
+    /// </summary>
+    private async Task PrewarmAsync(UnblockPolicy policy, EdgeMemory? memory, CancellationToken ct)
+    {
+        try
+        {
+            var names = (memory?.Seen.Keys ?? Enumerable.Empty<string>())
+                .Concat(LoadNames())
+                .Concat(policy.Apps.Select(a => a.Canary))
+                .Concat(policy.Apps.SelectMany(a => a.Tunnel ?? []))
+                .Select(n => n.Trim().TrimEnd('.').ToLowerInvariant())
+                .Where(n => n.Contains('.') && policy.ClaimedBy(n) is not null)
+                .Distinct(StringComparer.Ordinal)
+                .Take(MaxWarm)
+                .ToList();
+            if (names.Count == 0) return;
+
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            using var parallel = new SemaphoreSlim(4);
+            await Task.WhenAll(names.Select(async name =>
+            {
+                await parallel.WaitAsync(ct).ConfigureAwait(false);
+                try { await AskOwnResolverAsync(name, ct).ConfigureAwait(false); }
+                finally { parallel.Release(); }
+            })).ConfigureAwait(false);
+
+            _log($"Unblock: warmed {names.Count} name(s) the game may ask, in {clock.ElapsedMilliseconds} ms.");
+        }
+        catch (OperationCanceledException)
+        {
+            // Disconnected while warming: nothing to finish.
+        }
+        catch (Exception ex)
+        {
+            _log($"Unblock: warming the names failed ({ex.Message}) - they are probed when asked instead.");
+        }
+    }
+
+    /// <summary>One A query to the local resolver, the answer thrown away: only the verdict it leaves matters.</summary>
+    private static async Task AskOwnResolverAsync(string name, CancellationToken ct)
+    {
+        try
+        {
+            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            limit.CancelAfter(TimeSpan.FromSeconds(10));
+            await socket.SendToAsync(DnsWire.BuildQuery((ushort)Random.Shared.Next(1, ushort.MaxValue), name),
+                SocketFlags.None, new IPEndPoint(LocalResolver.ListenAddress, 53), limit.Token).ConfigureAwait(false);
+            var buffer = new byte[DnsWire.MaxUdpMessage];
+            await socket.ReceiveFromAsync(buffer, SocketFlags.None, new IPEndPoint(IPAddress.Any, 0), limit.Token)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // Slow name: its probe goes on in the resolver, and the game will find it there.
+        }
+        catch (SocketException)
+        {
+        }
+    }
+
+    private static List<string> LoadNames()
+    {
+        try
+        {
+            return File.Exists(NamesFile)
+                ? [.. File.ReadAllLines(NamesFile).Select(l => l.Trim()).Where(l => l.Length is > 3 and < 254).Take(MaxWarm)]
+                : [];
+        }
+        catch (Exception)
+        {
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// The names asked on this network, newest first, merged with what was on disk and cut to <see cref="MaxWarm"/>.
+    /// Hostnames of the claimed services only - the resolver records nothing else - so nothing here is the player's.
+    /// </summary>
+    private void SaveNames(EdgeMemory? memory)
+    {
+        if (memory is null || memory.Seen.IsEmpty) return;
+        try
+        {
+            var names = memory.Seen.Keys.Concat(LoadNames())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(MaxWarm)
+                .ToList();
+            Directory.CreateDirectory(Path.GetDirectoryName(NamesFile)!);
+            File.WriteAllLines(NamesFile, names);
+        }
+        catch (Exception ex)
+        {
+            _log($"Unblock: could not keep the names for next time ({ex.Message}).");
         }
     }
 
@@ -337,6 +465,7 @@ internal sealed class UnblockDns : IAsyncDisposable
         try
         {
             if (!Enabled && _resolver is null) return;
+            SaveNames(_memory);
             await RollBackAsync().ConfigureAwait(false);
             _log("Unblocking off.");
         }
