@@ -64,6 +64,43 @@ public static class DnsWire
     }
 
     /// <summary>
+    /// An A query that asks to be answered as a client inside <paramref name="network"/>/<paramref name="prefix"/>
+    /// would be - EDNS Client Subnet (RFC 7871) on an OPT record. A CDN that maps clients to its nearest edge by
+    /// subnet then names the edges it would give that network. Only resolvers that forward the option honour it
+    /// (Google does; Cloudflare, by policy, does not).
+    /// </summary>
+    public static byte[] BuildQueryForSubnet(ushort id, string host, IPAddress network, int prefix)
+    {
+        if (network.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork || prefix is < 0 or > 32)
+        {
+            throw new ArgumentException("An IPv4 network and a prefix of 0-32.", nameof(network));
+        }
+
+        var question = BuildQuery(id, host);
+        var address = network.GetAddressBytes().AsSpan(0, (prefix + 7) / 8);
+
+        // OPT: root name, TYPE 41, CLASS = UDP payload size, TTL 0, then one option.
+        var optionLength = 4 + address.Length;           // FAMILY, SOURCE PREFIX, SCOPE PREFIX, ADDRESS
+        var msg = new byte[question.Length + 11 + 4 + optionLength];
+        question.CopyTo(msg, 0);
+        msg[11] = 1;                                     // ARCOUNT = 1
+
+        var p = question.Length;
+        msg[p++] = 0;                                    // root
+        msg[p++] = 0; msg[p++] = 41;                     // TYPE OPT
+        msg[p++] = 1232 >> 8; msg[p++] = 1232 & 0xFF;    // payload size
+        p += 4;                                          // extended RCODE, version, flags
+        msg[p++] = 0; msg[p++] = (byte)(4 + optionLength); // RDLENGTH
+        msg[p++] = 0; msg[p++] = 8;                      // OPTION-CODE 8: client subnet
+        msg[p++] = 0; msg[p++] = (byte)optionLength;
+        msg[p++] = 0; msg[p++] = 1;                      // FAMILY 1: IPv4
+        msg[p++] = (byte)prefix;
+        msg[p++] = 0;                                    // SCOPE PREFIX, always 0 in a query
+        address.CopyTo(msg.AsSpan(p));
+        return msg;
+    }
+
+    /// <summary>
     /// Reads the question and nothing else - the name being asked about and the record type.
     ///
     /// This is all the resolver needs to decide where a message goes, and deliberately all it

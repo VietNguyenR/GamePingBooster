@@ -155,6 +155,26 @@ internal sealed class DohUpstream : IDisposable
     }
 
     /// <summary>
+    /// The one resolver that passes EDNS Client Subnet on to the CDN. Cloudflare drops the option by policy and
+    /// answers for its own vantage point, so asking it "as another network" only repeats the plain answer.
+    /// </summary>
+    private const string SubnetResolver = "https://8.8.8.8/dns-query";
+
+    /// <summary>
+    /// <paramref name="name"/>'s A records as clients in each of <paramref name="subnets"/> would be told them -
+    /// asked together, one query per network, every reply kept. Empty when the resolver is not answering.
+    /// </summary>
+    public async Task<IReadOnlyList<byte[]>> ResolveAsSubnetsAsync(string name,
+        IReadOnlyList<(System.Net.IPAddress Network, int Prefix)> subnets, CancellationToken ct)
+    {
+        var asks = subnets
+            .Select(s => AskAsync(SubnetResolver, DnsWire.BuildQueryForSubnet(0, name, s.Network, s.Prefix), ct))
+            .ToList();
+        var replies = await Task.WhenAll(asks).ConfigureAwait(false);
+        return [.. replies.Where(r => r is not null).Select(r => r!)];
+    }
+
+    /// <summary>
     /// One resolver, one query, at most <see cref="PerQuery"/>. Null when it failed, said so in the log with the
     /// time it took - prefixed "Unblock:" like everything else the feature says, so a filtered copy of the log
     /// (tools\Check-Unblock.ps1) still carries it. It did not on 2026-10-02, and the line that would have said

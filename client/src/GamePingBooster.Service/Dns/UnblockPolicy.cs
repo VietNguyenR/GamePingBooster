@@ -15,11 +15,41 @@ internal sealed record UnblockApp(
     IReadOnlyList<string>? Tunnel = null)
 {
     /// <summary>
-    /// Whether answers for <paramref name="name"/> are routed through the tunnel while it is up: claimed, and under
-    /// one of the profile's tunnel names. See ProfileUnblock.Tunnel.
+    /// Whether <paramref name="name"/> is in the profile's tunnel list: claimed, and under one of its tunnel names.
+    /// See ProfileUnblock.Tunnel.
+    ///
+    /// Since 0.3.8 the list says "may go through the tunnel when the line cuts it", not "always": the resolver tries
+    /// the line first and sends a listed name through the tunnel only once the line is seen cutting it
+    /// (<see cref="MayTunnelWhenCut"/>). Builds before that route every listed name whenever they are connected, on
+    /// every line - so prod-live-images, listed for FPT in Ho Chi Minh City, rode the relay for Viettel and VNPT
+    /// players too, sharing the 256 KB/s session cap with their matches.
     /// </summary>
     public bool RoutesThroughTunnel(string name) =>
         Claims(name) && (Tunnel ?? []).Any(suffix => Matches(name, suffix));
+
+    /// <summary>
+    /// Download hosts, never sent through the tunnel unless a profile names them itself. A relay caps a session at
+    /// 256 KB/s each way, shared with the game's own packets, so a game update riding it would be slow AND drop the
+    /// match's packets while it ran - and Steam's downloads come from caches inside Vietnam anyway (10 ms against
+    /// 30-43 abroad, 2026-09-20), so a line that cut them would need a different fix, not a relay.
+    /// </summary>
+    private static readonly string[] DownloadHosts =
+    [
+        "steamcontent.com", "steampipe.akamaized.net", "steamcdn-a.akamaihd.net", "steamusercontent.com",
+        "client-update.akamai.steamstatic.com", "client-update.steamstatic.com",
+    ];
+
+    /// <summary>
+    /// Whether the resolver may send <paramref name="name"/> through the tunnel once the line is seen cutting it by
+    /// name (WorkingEdges.CutByName): listed by the profile, or claimed and not a download host.
+    ///
+    /// Why unlisted names too: on 2026-10-02 FPT in Ho Chi Minh City cut prod-live-cfentry and prod-live-images, which
+    /// FPT in Ha Noi had let through that afternoon, and PUBG could not connect until someone added them to the
+    /// profile's tunnel list by hand on the server. The line differs by city and by hour; a list kept by a person
+    /// is always behind it. A listed download host is allowed: the profile named it, which is a decision.
+    /// </summary>
+    public bool MayTunnelWhenCut(string name) =>
+        RoutesThroughTunnel(name) || (Claims(name) && !DownloadHosts.Any(host => Matches(name, host)));
 
     /// <summary>The namespaces the Windows policy is given. A leading dot is what NRPT expects for a suffix.</summary>
     public IReadOnlyList<string> Namespaces => [.. Scope.Select(s => "." + s)];
@@ -59,12 +89,12 @@ internal sealed record UnblockApp(
 /// Now adding a service, or a name to one, is a row in a database and reaches every machine on its
 /// next profile fetch.
 ///
-/// <see cref="Builtin"/> is the fallback and not the source of truth. It exists for two cases that
-/// are both real: a self-hosted installation with no licence server at all, and a client whose
-/// profile came from a server that predates the field. In both, Steam alone is better than nothing
-/// - it is the service this was built for and the one measured. A profile that DOES carry a list
-/// replaces it entirely, including with an empty one, so switching the feature off for everybody
-/// stays a server-side edit.
+/// <see cref="Builtin"/> is the fallback and not the source of truth, and since 2026-10-02 only a
+/// self-hosted installation - one with no licence server at all - gets it. A licensed one gets
+/// exactly what its profile says, nothing when it has none: the list is part of what a licence buys,
+/// and a compiled-in Steam list meant installing the app, never signing in, and having the Steam fix
+/// anyway. A profile that DOES carry a list replaces it entirely, including with an empty one, so
+/// switching the feature off for everybody stays a server-side edit.
 /// </summary>
 internal sealed record UnblockPolicy(IReadOnlyList<UnblockApp> Apps, string Source)
 {
@@ -96,9 +126,10 @@ internal sealed record UnblockPolicy(IReadOnlyList<UnblockApp> Apps, string Sour
     /// edited on a website by a person, and the failure mode of strictness here is every player
     /// losing the fix because somebody left a field blank.
     /// </summary>
-    public static UnblockPolicy FromProfile(ProfileBundle? profile, Action<string> log)
+    /// <param name="allowBuiltin">True only for a self-hosted installation - see the type's summary.</param>
+    public static UnblockPolicy FromProfile(ProfileBundle? profile, Action<string> log, bool allowBuiltin)
     {
-        if (profile is null || profile.Unblock.Count == 0) return Builtin;
+        if (profile is null || profile.Unblock.Count == 0) return allowBuiltin ? Builtin : Empty;
 
         var apps = new List<UnblockApp>();
 

@@ -28,6 +28,7 @@ internal static partial class Program
     {
         if (args.Length > 0 && args[0] == "rig") return RigMain(args[1..]);
         if (args.Length > 0 && args[0] == "service") return ServiceMain(args[1..]);
+        if (args.Length > 0 && args[0] == "unblock") return UnblockMain(args[1..]);
         return AllScenarios();
     }
 

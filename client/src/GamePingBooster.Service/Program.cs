@@ -1,4 +1,5 @@
 ﻿using System.ServiceProcess;
+using GamePingBooster.Core.Ipc;
 using GamePingBooster.Service.Dns;
 using GamePingBooster.Service.Ipc;
 using GamePingBooster.Service.Tunnel;
@@ -134,12 +135,63 @@ public static class Program
         // a line that resets a handshake by its name is past what DNS can fix.
         await using var unblock = new UnblockDns(() => engine.UnblockPolicy, log, engine);
 
-        // Started here and not from the connect verb. The Steam fix has nothing to do with the
-        // tunnel - no relay, no bandwidth, no route - and tying it to Connect meant pressing
-        // Disconnect put the block straight back, which is the opposite of what somebody reading
-        // the Steam store wants. Off only if config.json says so.
-        if (config.UnblockEnabled ?? true) unblock.Start(ct);
-        else log("Name unblocking is switched off in config.json.");
+        // When unblocking goes wrong, the line is checked the way tools\Check-Unblock.ps1 checks it and the result
+        // sent to /admin/unblock/reports - under the same Settings switch as connection quality and discovery.
+        using var unblockReports = engine.CreateUnblockReporter(
+            () => (unblock.Enabled, unblock.LastError),
+            Path.Combine(ServiceConfig.DefaultDirectory, "logs", "gpb-service.log"),
+            log);
+        unblock.Trouble = unblockReports.Trouble;
+
+        // When it runs. A self-hosted installation - no licence server - unblocks for as long as the service runs,
+        // as every installation did until 2026-10-02. A licensed one unblocks while it is CONNECTED, by the owner's
+        // decision that day: running with the service meant installing the app once, never paying, and keeping the
+        // unblocking for good, from the profile left on disk or the Steam list that used to be compiled in. Connect
+        // needs a licence the relay accepts, so tying unblocking to it ties it to a paid or trial account.
+        //
+        // On at Connected; off at Disconnected (Disconnect, or the app closing) and Faulted (gave up). Connecting and
+        // Reconnecting change nothing, so a failover or a move between relays mid-match does not take the fix away.
+        // The cost, accepted: reading the Steam store needs Connect now (it did not from 2026-09-22).
+        if (!(config.UnblockEnabled ?? true))
+        {
+            log("Name unblocking is switched off in config.json.");
+        }
+        else if (string.IsNullOrWhiteSpace(config.LicenceUrl))
+        {
+            unblock.Start(ct);
+        }
+        else
+        {
+            log("Name unblocking runs while connected.");
+            var unblockOn = false;
+            var unblockGate = new object();
+            engine.StatusChanged += message =>
+            {
+                bool? want = message.State switch
+                {
+                    TunnelState.Connected => true,
+                    TunnelState.Disconnected or TunnelState.Faulted => false,
+                    _ => null,
+                };
+                if (want is not { } on) return;
+                lock (unblockGate)
+                {
+                    if (on == unblockOn) return;
+                    unblockOn = on;
+                }
+                if (on)
+                {
+                    unblock.Start(ct);
+                }
+                else
+                {
+                    _ = Task.Run(() => unblock.StopAsync(
+                        message.State == TunnelState.Faulted
+                            ? "Off - the connection failed. Unblocking runs while connected."
+                            : "Off - unblocking runs while connected. Press Connect to turn it on."));
+                }
+            };
+        }
 
         // Load the profile now, not at the first connect.
         //

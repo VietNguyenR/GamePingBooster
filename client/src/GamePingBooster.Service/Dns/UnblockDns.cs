@@ -37,6 +37,16 @@ internal sealed class UnblockDns : IAsyncDisposable
 
     /// <summary>The tunnel, for names the profile routes through it - see <see cref="IUnblockRoutes"/>.</summary>
     private readonly IUnblockRoutes? _routes;
+
+    /// <summary>The loop <see cref="Start"/> runs, cancelled by <see cref="StopAsync"/>. Guarded by _runGate.</summary>
+    private CancellationTokenSource? _run;
+    private readonly object _runGate = new();
+
+    /// <summary>
+    /// Told when unblocking goes wrong: (trigger, what happened, the name or null). UnblockReporter checks the line
+    /// and sends what it finds to /admin/unblock/reports. Called from the resolver's threads; must not block.
+    /// </summary>
+    public Action<string, string, string?>? Trouble { get; set; }
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     private LocalResolver? _resolver;
@@ -105,8 +115,35 @@ internal sealed class UnblockDns : IAsyncDisposable
     /// </summary>
     public void Start(CancellationToken ct)
     {
-        _allowed = true;
-        _ = Task.Run(async () => await RunAsync(ct).ConfigureAwait(false), ct);
+        lock (_runGate)
+        {
+            if (_allowed && _run is not null) return;
+            _allowed = true;
+            _run = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var token = _run.Token;
+            _ = Task.Run(async () => await RunAsync(token).ConfigureAwait(false), token);
+        }
+    }
+
+    /// <summary>
+    /// Turns unblocking off and keeps it off until the next <see cref="Start"/>: the loop that keeps trying
+    /// stops, the policy and the resolver go, and a profile arriving does not bring them back
+    /// (<see cref="RefreshAsync"/> answers to the same switch). For a licensed installation this is a
+    /// Disconnect - unblocking is part of being connected since 2026-10-02.
+    /// </summary>
+    public async Task StopAsync(string why)
+    {
+        CancellationTokenSource? run;
+        lock (_runGate)
+        {
+            _allowed = false;
+            run = _run;
+            _run = null;
+        }
+        run?.Cancel();
+        await DisableAsync().ConfigureAwait(false);
+        run?.Dispose();
+        LastError = why;
     }
 
     private async Task RunAsync(CancellationToken ct)
@@ -190,7 +227,7 @@ internal sealed class UnblockDns : IAsyncDisposable
             {
                 // Not an error and not retried noisily: an account entitled to nothing, or a server
                 // that has switched the feature off, is a decision rather than a fault.
-                return Fail("Nothing to unblock - the profile names no services.");
+                return Fail("Nothing to unblock - the profile names no services.", trouble: false);
             }
 
             // 1. The upstreams, before the policy can point them at us.
@@ -220,7 +257,9 @@ internal sealed class UnblockDns : IAsyncDisposable
 
             // 3. The resolver first. Pointing Windows at an address nothing is listening on would
             //    take DNS down for the claimed names with no way back except a reboot.
-            var resolver = new LocalResolver(upstream, policy, _log, _routes);
+            var resolver = new LocalResolver(upstream, policy, _log, _routes,
+                filtered: name => Trouble?.Invoke("filtered",
+                    $"the line cuts handshakes naming {name} on its own addresses, while another name completes there", name));
             try
             {
                 resolver.Start();
@@ -325,10 +364,11 @@ internal sealed class UnblockDns : IAsyncDisposable
         Enabled = false;
     }
 
-    private string Fail(string message)
+    private string Fail(string message, bool trouble = true)
     {
         LastError = message;
         _log("Unblock: " + message);
+        if (trouble) Trouble?.Invoke("enable-failed", message, null);
         return message;
     }
 

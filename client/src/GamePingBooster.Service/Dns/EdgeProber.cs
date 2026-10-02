@@ -1,6 +1,9 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Text;
 
 namespace GamePingBooster.Service.Dns;
 
@@ -36,12 +39,21 @@ internal static class EdgeProber
     /// </summary>
     private static readonly TimeSpan Budget = TimeSpan.FromMilliseconds(2500);
 
+    /// <summary>The name a handshake is compared against when asking whether the line cuts by name. Nobody filters it.</summary>
+    public const string ControlName = "www.microsoft.com";
+
     /// <param name="connected">
     /// Called once the TCP connection is taken, before the handshake. WorkingEdges tells "this address
     /// is a web front that failed the handshake" (filtering) from "nothing here answers on 443" (not a
     /// web front at all) by it.
     /// </param>
-    public static async Task<bool> WorksAsync(IPAddress address, string sni, CancellationToken ct, Action? connected = null)
+    /// <param name="servesName">
+    /// Also ask the edge for the name over HTTP, and refuse it when it says it does not serve it - see
+    /// <see cref="ServesNameAsync"/>. For edges borrowed from another name, where a valid certificate proves
+    /// much less than it seems to.
+    /// </param>
+    public static async Task<bool> WorksAsync(IPAddress address, string sni, CancellationToken ct, Action? connected = null,
+        bool servesName = false)
     {
         try
         {
@@ -72,7 +84,9 @@ internal static class EdgeProber
             // A completed handshake is not enough. The certificate has to be valid for the name
             // asked about, or this address is not serving that site and handing it out would swap
             // a slow failure for a browser full of certificate warnings.
-            return errors == SslPolicyErrors.None;
+            if (errors != SslPolicyErrors.None) return false;
+
+            return !servesName || await ServesNameAsync(tls, sni, timeout.Token).ConfigureAwait(false);
         }
         catch (Exception)
         {
@@ -82,4 +96,114 @@ internal static class EdgeProber
             return false;
         }
     }
+    /// <summary>
+    /// Whether the edge, asked for the name over the handshake just made, answers as a host of it.
+    ///
+    /// A certificate valid for the name is not that. On 2026-10-02 an FPT line in Ho Chi Minh City reset every
+    /// CloudFront address of prod-live-cfentry and prod-live-images, so the resolver borrowed prod-live-front's
+    /// Akamai edge: its *.playbattlegrounds.com certificate passed for both, and Akamai answered every request for
+    /// them with 400 Bad Request - it holds the certificate, not the site. PUBG said it could not connect.
+    ///
+    /// So: HEAD / for the name, and refuse 400 and 421, the two ways an edge says "not a host of mine" (Akamai's
+    /// Invalid URL, the standard Misdirected Request). Nothing else is judged. Every claimed name measured that day
+    /// answered its own edge with 200, 301, 302 or 404 - an API with nothing at / is still the right server - and
+    /// steamcommunity.com's Akamai edge answered 200 for the store, which is the borrow WorkingEdges exists for.
+    /// No status line at all counts as a refusal: an edge that will not speak HTTP for the name is not proven.
+    /// </summary>
+    private static async Task<bool> ServesNameAsync(SslStream tls, string name, CancellationToken ct)
+    {
+        var request = Encoding.ASCII.GetBytes(
+            $"HEAD / HTTP/1.1\r\nHost: {name}\r\nUser-Agent: GamePingBooster\r\nAccept: */*\r\nConnection: close\r\n\r\n");
+        await tls.WriteAsync(request, ct).ConfigureAwait(false);
+        await tls.FlushAsync(ct).ConfigureAwait(false);
+
+        // "HTTP/1.1 400" is all that is needed, and it arrives in the first record.
+        var buffer = new byte[64];
+        var read = 0;
+        while (read < 12)
+        {
+            var n = await tls.ReadAsync(buffer.AsMemory(read), ct).ConfigureAwait(false);
+            if (n == 0) break;
+            read += n;
+        }
+
+        var line = Encoding.ASCII.GetString(buffer, 0, read);
+        if (read < 12 || !line.StartsWith("HTTP/1.", StringComparison.Ordinal) ||
+            !int.TryParse(line.AsSpan(9, 3), out var status))
+        {
+            return false;
+        }
+
+        return status is not (400 or 421);
+    }
+
+    /// <summary>
+    /// One TLS handshake, said as what happened: ok, cert-mismatch (it completed, for another name), reset,
+    /// stall, no-tcp, refused or tls-error - with how long it took, because a reset before the server could have
+    /// answered is a filter, not the server.
+    /// </summary>
+    /// <param name="port">443 always, except for TunnelCheck's servers on loopback.</param>
+    public static async Task<(string Outcome, long Ms)> HandshakeAsync(IPAddress address, string sni,
+        TimeSpan connectTimeout, TimeSpan handshakeTimeout, CancellationToken ct, int port = Port)
+    {
+        var clock = Stopwatch.StartNew();
+        using var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+        try
+        {
+            using (var connect = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            {
+                connect.CancelAfter(connectTimeout);
+                await socket.ConnectAsync(new IPEndPoint(address, port), connect.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return ("no-tcp", clock.ElapsedMilliseconds);
+        }
+        catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionRefused)
+        {
+            return ("refused", clock.ElapsedMilliseconds);
+        }
+        catch (SocketException)
+        {
+            return ("no-tcp", clock.ElapsedMilliseconds);
+        }
+
+        var errors = SslPolicyErrors.None;
+        try
+        {
+            using var network = new NetworkStream(socket, ownsSocket: false);
+            using var tls = new SslStream(network, leaveInnerStreamOpen: true, (_, _, _, e) =>
+            {
+                errors = e;
+                return true;
+            });
+            using var handshake = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            handshake.CancelAfter(handshakeTimeout);
+            await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = sni }, handshake.Token)
+                .ConfigureAwait(false);
+            return (errors == SslPolicyErrors.None ? "ok" : "cert-mismatch", clock.ElapsedMilliseconds);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return ("stall", clock.ElapsedMilliseconds);
+        }
+        catch (AuthenticationException) when (errors == SslPolicyErrors.None)
+        {
+            return ("tls-error", clock.ElapsedMilliseconds);
+        }
+        catch (Exception ex) when (ex is IOException or SocketException or AuthenticationException)
+        {
+            return ("reset", clock.ElapsedMilliseconds);
+        }
+    }
+
+    /// <summary>
+    /// A handshake for the real name cut, while one for another name on the same address gets an answer from the
+    /// server - completed, completed for the wrong name, or refused by the server with a TLS alert (Akamai answers
+    /// a name it does not serve that way, measured 2026-10-02). Any of those means the path is open and the line is
+    /// cutting this name.
+    /// </summary>
+    public static bool CutByName(string real, string control) =>
+        real is "reset" or "stall" && control is "ok" or "cert-mismatch" or "tls-error";
 }

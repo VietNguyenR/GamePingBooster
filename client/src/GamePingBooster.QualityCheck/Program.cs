@@ -67,6 +67,7 @@ internal static partial class Program
         OneShortOutageDoesNotMove();
         AnOlderRelayThatNeverAnswersProbesIsNeverAChoice();
         AnEntryLosingProbesIsNotClean();
+        ABlipOnTheEntryDoesNotHoldAMoveBack();
         OnlyAClearDifferenceMoves();
         NothingMovesAgainForFiveMinutes();
         ADifferentWayInStartsTheWindowAgain();
@@ -74,6 +75,7 @@ internal static partial class Program
         TheBetterOfTwoWaysIsChosen();
         TheWayLeftIsReturnedToOnceItRecovers();
         AWayLeftThatStillLosesProbesIsNotReturnedTo();
+        AWayLeftIsHeldToTheOldCleanBar();
         AWayLeftThatIsOnlyAsFastIsNotReturnedTo();
         AWayLeftWithTheWorseTailIsNotReturnedTo();
         NothingIsReturnedToWhenTheMoveWasNotMade();
@@ -519,14 +521,30 @@ internal static partial class Program
         w.Run(120, 44, 46);
         Check("thirty calm seconds do not move", w.Decisions.Count == 0, $"{w.Decisions.Count} decision(s)");
         w.Run(120, 77, 46);
-        Check("thirty seconds 31 ms worse than the entry moves to it",
+        Check("31 ms worse than the entry moves to it",
             w.Decisions.Count == 1 && w.Decisions[0] is { From: "sg-2", To: "sg-2-vn" },
             string.Join(", ", w.Decisions.Select(d => $"{d.From}->{d.To}")));
         if (w.Decisions.Count == 1)
         {
+            var after = (w.Decisions[0].TickIndex - 120 + 1) / (double)SpikeDetector.TicksPerSecond;
+            Check("  ...six seconds into it: three quarters of the eight", after == 6, $"{after} s");
             Check("  ...and says what the entry measured", w.Decisions[0].ToStats.P50 is > 44 and < 48,
                 $"{w.Decisions[0].ToStats.P50:F1}");
         }
+    }
+
+    private static void ABlipOnTheEntryDoesNotHoldAMoveBack()
+    {
+        // 2026-10-02 18:21, the owner's match: sg-2 at 83 ms against 46-54 on vn-1-sg2, and the entry lost three probes
+        // in a row 22 s in. With "at most two in thirty seconds" that kept it unclean for thirty seconds more - 58 s of lag.
+        var w = new Ways { Current = "sg-2", Others = ["vn-1-sg2"] };
+        w.Run(120, 52, 54);
+        w.Run(16, 85, 54);
+        w.Run(3, (double?)85, (double?)null);
+        w.Run(120, 85, 45);
+        Check("three probes lost in a row on the entry do not hold the move back",
+            w.Decisions.Count == 1 && w.Decisions[0].TickIndex - 120 < 8 * SpikeDetector.TicksPerSecond,
+            string.Join(", ", w.Decisions.Select(d => $"{(d.TickIndex - 120) / (double)SpikeDetector.TicksPerSecond} s")));
     }
 
     private static void AFiveSecondSpikeDoesNotMove()
@@ -573,8 +591,13 @@ internal static partial class Program
     private static void AnEntryLosingProbesIsNotClean()
     {
         var w = new Ways();
-        w.Run(400, _ => 84, i => i % 24 == 0 ? null : 46);
-        Check("a way losing five probes in thirty seconds is not moved to", w.Decisions.Count == 0, $"{w.Decisions.Count} decision(s)");
+        w.Run(400, _ => 84, i => i % 8 == 0 ? null : 46);
+        Check("a way losing one probe in eight is not moved to", w.Decisions.Count == 0, $"{w.Decisions.Count} decision(s)");
+
+        var loss = new Ways();
+        loss.Run(400, i => i % 4 == 0 ? null : 44, i => i % 24 == 0 ? null : 46);
+        Check("  ...nor, for loss alone, one losing five in thirty seconds", loss.Decisions.Count == 0,
+            $"{loss.Decisions.Count} decision(s)");
     }
 
     private static void OnlyAClearDifferenceMoves()
@@ -591,7 +614,7 @@ internal static partial class Program
     private static void NothingMovesAgainForFiveMinutes()
     {
         var w = new Ways();
-        w.Run(DoorSwitchPolicy.CooldownTicks + 100, 84, 46);
+        w.Run(DoorSwitchPolicy.WindowTicks + DoorSwitchPolicy.CooldownTicks - 2, 84, 46);
         Check("still bad, nothing is decided again inside five minutes", w.Decisions.Count == 1, $"{w.Decisions.Count} decision(s)");
         w.Run(40, 84, 46);
         Check("  ...and is after them", w.Decisions.Count == 2 &&
@@ -602,11 +625,11 @@ internal static partial class Program
     private static void ADifferentWayInStartsTheWindowAgain()
     {
         var w = new Ways();
-        w.Run(100, 84, 46);
+        w.Run(DoorSwitchPolicy.WindowTicks - 4, 84, 46);
         w.Current = "sg-2-vn";
         w.Others = ["sg-2"];
-        w.Run(119, 84, 46);
-        Check("thirty seconds on a way count only from when the tunnel took it", w.Decisions.Count == 0, $"{w.Decisions.Count} decision(s)");
+        w.Run(DoorSwitchPolicy.WindowTicks - 1, 84, 46);
+        Check("eight seconds on a way count only from when the tunnel took it", w.Decisions.Count == 0, $"{w.Decisions.Count} decision(s)");
         w.Run(1, 84, 46);
         Check("  ...and then they do", w.Decisions.Count == 1 && w.Decisions[0].From == "sg-2-vn", $"{w.Decisions.Count} decision(s)");
     }
@@ -618,10 +641,10 @@ internal static partial class Program
     private static void ADifferentLaneStartsTheWindowAgain()
     {
         var w = new Ways { Current = "vn-1-sg4", Others = ["sg-4"], Lane = 50001 };
-        w.Run(100, 84, 46);
+        w.Run(DoorSwitchPolicy.WindowTicks - 4, 84, 46);
         w.Lane = 50002;
-        w.Run(119, 84, 46);
-        Check("thirty seconds on a way count only from when the tunnel took its lane", w.Decisions.Count == 0, $"{w.Decisions.Count} decision(s)");
+        w.Run(DoorSwitchPolicy.WindowTicks - 1, 84, 46);
+        Check("eight seconds on a way count only from when the tunnel took its lane", w.Decisions.Count == 0, $"{w.Decisions.Count} decision(s)");
         w.Run(1, 84, 46);
         Check("  ...and then they do", w.Decisions.Count == 1, $"{w.Decisions.Count} decision(s)");
     }
@@ -639,7 +662,7 @@ internal static partial class Program
     private static Ways LeftSg4()
     {
         var w = new Ways { Current = "sg-4", Others = ["vn-1-sg4"] };
-        w.Run(120, i => i % 5 == 0 ? null : 90, _ => 60);
+        w.Run(DoorSwitchPolicy.WindowTicks, i => i % 5 == 0 ? null : 90, _ => 60);
         w.Current = "vn-1-sg4";
         w.Others = ["sg-4"];
         return w;
@@ -671,10 +694,28 @@ internal static partial class Program
 
     private static void AWayLeftThatStillLosesProbesIsNotReturnedTo()
     {
+        // 9 ms: inside the "worse" margin, so only the return rule could take the player back. At exactly 10 the
+        // eight-second window's jitter takes a way that much faster now and then - as WayCheck does at its margin.
         var w = LeftSg4();
-        w.Run(DoorSwitchPolicy.CooldownTicks * 2, _ => 53, i => i % 50 == 0 ? null : 43);
+        w.Run(DoorSwitchPolicy.CooldownTicks * 2, _ => 52, i => i % 50 == 0 ? null : 43);
         Check("a way left still losing one probe in fifty is not gone back to", w.Decisions.Count == 1,
             $"{w.Decisions.Count} decision(s)");
+    }
+
+    private static void AWayLeftIsHeldToTheOldCleanBar()
+    {
+        // Left for being bad: a tenth lost in eight seconds is clean for any other way, not for this one.
+        var lossy = LeftSg4();
+        lossy.Run(DoorSwitchPolicy.CooldownTicks * 2, _ => 60, i => i % 20 == 0 ? null : 43);
+        Check("a way left, 17 ms faster but losing one probe in twenty, is not moved back to", lossy.Decisions.Count == 1,
+            $"{lossy.Decisions.Count} decision(s)");
+
+        var clean = LeftSg4();
+        clean.Run(DoorSwitchPolicy.CooldownTicks + DoorSwitchPolicy.WindowTicks, 90, 43);
+        Check("  ...clean, with the entry gone bad, it is - once the five minutes are up",
+            clean.Decisions.Count == 2 && clean.Decisions[1] is { From: "vn-1-sg4", To: "sg-4" } &&
+            clean.Decisions[1].TickIndex - clean.Decisions[0].TickIndex == DoorSwitchPolicy.CooldownTicks,
+            string.Join(", ", clean.Decisions.Select(d => $"{d.From}->{d.To} at {d.TickIndex}")));
     }
 
     private static void AWayLeftThatIsOnlyAsFastIsNotReturnedTo()
@@ -706,7 +747,7 @@ internal static partial class Program
     private static void AMoveToAFasterWayDoesNotBounceBack()
     {
         var w = new Ways();
-        w.Run(120, 56, 44);
+        w.Run(DoorSwitchPolicy.WindowTicks, 56, 44);
         w.Current = "sg-2-vn";
         w.Others = ["sg-2"];
         w.Run(DoorSwitchPolicy.CooldownTicks * 2, 44, 56);
@@ -726,10 +767,10 @@ internal static partial class Program
         Check("  ...but not with the game closed", closed.Decisions.Count == 0, $"{closed.Decisions.Count} decision(s)");
 
         var intoMatch = new Ways { Current = "hk", Others = ["vn-2-hk"], Mode = TickMode.Lobby };
-        intoMatch.Run(60, 98, 50);
+        intoMatch.Run(DoorSwitchPolicy.WindowTicks / 2, 98, 50);
         intoMatch.Mode = TickMode.Match;
-        intoMatch.Run(60, 98, 50);
-        Check("  ...and the lobby's seconds count towards the match's thirty", intoMatch.Decisions.Count == 1,
+        intoMatch.Run(DoorSwitchPolicy.WindowTicks / 2, 98, 50);
+        Check("  ...and the lobby's seconds count towards the match's eight", intoMatch.Decisions.Count == 1,
             $"{intoMatch.Decisions.Count} decision(s)");
     }
 
@@ -737,9 +778,10 @@ internal static partial class Program
     {
         // The connect started on vn-2-hk because hk was slow. hk is back at 43 against 53: inside the "worse" margin,
         // so only the return rule can bring the player back - as after the 2026-09-18 move off sg-4.
+        // 52, not 53: 10 ms is exactly the margin, and over eight seconds jitter crosses it now and then.
         var plain = new Ways { Current = "vn-2-hk", Others = ["hk"] };
-        plain.Run(DoorSwitchPolicy.ReturnWindowTicks * 2, 53, 43);
-        Check("without a detour at connect, 43 against 53 moves nobody", plain.Decisions.Count == 0,
+        plain.Run(DoorSwitchPolicy.ReturnWindowTicks * 2, 52, 43);
+        Check("without a detour at connect, 43 against 52 moves nobody", plain.Decisions.Count == 0,
             $"{plain.Decisions.Count} decision(s)");
 
         var detour = new Ways { Current = "vn-2-hk", Others = ["hk"] };

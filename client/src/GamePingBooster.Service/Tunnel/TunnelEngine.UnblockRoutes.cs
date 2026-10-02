@@ -91,6 +91,17 @@ internal sealed partial class TunnelEngine : IUnblockRoutes
         }
     }
 
+    /// <summary>
+    /// The reporter for unblock trouble, with what only the engine holds: the licence token, this device's key, the
+    /// Settings switch, the profile's games. Sent like discovery - see UnblockReporter.
+    /// </summary>
+    public UnblockReporter CreateUnblockReporter(Func<(bool Enabled, string? LastError)> state, string? logPath, Action<string> log) =>
+        new(() => _config.LicenceUrl, () => _token, _device.Key, () => _config.ShareQuality, log,
+            () => UnblockPolicy, state, this,
+            () => _profile is { } profile &&
+                  Network.GameProcessWatcher.FindRunning(profile.Games.SelectMany(g => g.ProcessNames)) is not null,
+            logPath);
+
     /// <summary>On a disconnect: the next connection starts with none, and asks again as names are resolved.</summary>
     private void ForgetUnblockRoutes()
     {

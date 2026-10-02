@@ -43,7 +43,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     /// the engine is not where that decision belongs. It is only the thing that happens to hold the
     /// profile the list arrives in.
     /// </summary>
-    public UnblockPolicy UnblockPolicy => UnblockPolicy.FromProfile(_profile, _log);
+    public UnblockPolicy UnblockPolicy =>
+        UnblockPolicy.FromProfile(_profile, _log, allowBuiltin: string.IsNullOrWhiteSpace(_config.LicenceUrl));
     private WintunAdapter? _adapter;
     private TunnelClient? _tunnel;
 
@@ -1916,10 +1917,33 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         ResetLaneHunting();
 
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+        Task<bool>? tick = null;
+        Task? woken = null;
         try
         {
-            while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
+            while (true)
             {
+                // A move the switch policy asks for is made the moment it is asked, not on the next five-second pass:
+                // the policy decides eight seconds into a lag, and up to five more of waiting here was most of the
+                // rest. Only the move - the full pass stays on the timer. Both waits are kept across turns, so a
+                // wake-up is never taken by a wait nobody is watching.
+                tick ??= timer.WaitForNextTickAsync(ct).AsTask();
+                woken ??= _doorMoveAsked.WaitAsync(ct);
+                if (await Task.WhenAny(tick, woken).ConfigureAwait(false) == woken)
+                {
+                    await woken.ConfigureAwait(false);
+                    woken = null;
+                    if (_state == TunnelState.Connected && _tunnel is { } asked && asked.SinceLastHeard < SilenceBeforeDead &&
+                        Interlocked.Exchange(ref _pendingDoorMove, null) is { } askedMove)
+                    {
+                        MakeDoorMove(asked, askedMove);
+                    }
+                    continue;
+                }
+                var ticked = await tick.ConfigureAwait(false);
+                tick = null;
+                if (!ticked) break;
+
                 if (_state != TunnelState.Connected) continue;
 
                 var tunnel = _tunnel;
@@ -2203,7 +2227,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
 
     /// <summary>
     /// Undoes a move whose new way went silent. The policy only moves onto a way that answered nine probes in ten
-    /// for the last thirty seconds, so this is rare - but the alternative is the supervisor's own rule, fifteen
+    /// for the last eight seconds, so this is rare - but the alternative is the supervisor's own rule, fifteen
     /// seconds of silence and then a reconnect, and a reconnect takes the game routes down and drops the match.
     /// Going back to the way the tunnel just came from keeps it. Home's tunnel; see
     /// <see cref="MoveOtherTunnelsBackAfterSilence"/> for the others.
@@ -2350,9 +2374,12 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         }
     }
 
+    /// <summary>Wakes the supervisor for a move the policy asked for. At most one wake-up waits.</summary>
+    private readonly SemaphoreSlim _doorMoveAsked = new(0, 1);
+
     /// <summary>
-    /// The recorder's switch policy asking for a move. Only noted here; the supervisor makes it on its next
-    /// pass, the one place a tunnel is ever replaced or moved. False when it will not be made at all.
+    /// The recorder's switch policy asking for a move. Only noted here, and the supervisor woken; it makes the
+    /// move, the one place a tunnel is ever replaced or moved. False when it will not be made at all.
     ///
     /// Which tunnel is found from the way asked for: every way belongs to exactly one relay, and one relay has at most
     /// one tunnel - home, or another relay's (G5).
@@ -2367,6 +2394,14 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         if ((isHome ? _switching : SwitchingFor(relayId)) != EntrySwitchingMode.On) return false;
         if (!isHome && OtherTunnelTo(relayId) is null) return false;
         Volatile.Write(ref _pendingDoorMove, new DoorMove(relayId, decision.To));
+        try
+        {
+            _doorMoveAsked.Release();
+        }
+        catch (SemaphoreFullException)
+        {
+            // A wake-up is already waiting; it takes this move too.
+        }
         return true;
     }
 

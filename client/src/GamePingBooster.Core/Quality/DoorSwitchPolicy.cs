@@ -8,7 +8,8 @@ public sealed record DoorStats(double? P50, double? P95, int Sent, int Lost)
 
 /// <summary>
 /// The tunnel's current way into its relay was worse than another way into the same relay for most of
-/// the last thirty seconds. Whether anything is done about it is the recorder's and the engine's call.
+/// the last eight seconds, or lost pongs steadily for thirty. Whether anything is done about it is the
+/// recorder's and the engine's call.
 /// </summary>
 public sealed class DoorDecision
 {
@@ -56,22 +57,35 @@ public sealed class DoorDecision
 /// win. That is the fault moving fixes, and the one the 2026-09-15 match had: seven minutes at 77 ms
 /// and 12-18% loss on Viettel's road to sg-2, with the home router flat throughout.
 ///
-/// WHEN. The current way worse in at least three quarters of the last thirty seconds - later than a
-/// spike of two to five seconds can reach, so a blip never moves anybody. Worse means over by
-/// max(10 ms, 15%) of the other way, or unanswered while the other way answered. Or loss on its own:
-/// a tenth of the current way's pongs gone while the other way answered, spread over at least four of
-/// the window's six five-second slices, because steady loss at normal latency is as bad for a game as
-/// latency and never reaches three quarters - and a single outage of a few seconds, however total,
-/// sits in one or two slices and does not count. The other way must
-/// itself have been answered in nine quarter seconds in ten and lost at most two probes: moving onto a
-/// way that is also struggling is how thirty seconds of lag becomes a minute of it. A way that has never
-/// answered a probe is an older relayd that does not know the message, and is never a candidate.
+/// WHEN. The current way worse in at least three quarters of the last EIGHT seconds (<see cref="WindowTicks"/>),
+/// so six seconds of it at the least - longer than a spike of two to five seconds can reach, so a blip never
+/// moves anybody. Worse means over by max(10 ms, 15%) of the other way, or unanswered while the other way
+/// answered. The other way must itself have been answered in nine quarter seconds in ten and lost at most a
+/// tenth of its probes (<see cref="MaxOtherLostShare"/>): moving onto a way that is also struggling is how
+/// seconds of lag become a minute of it.
+///
+/// Eight, not the thirty this began with, since 2026-10-02. The owner's own match that evening sat at 83 ms
+/// on sg-2 against 46 on its entry for 58 s before it moved: thirty for the window, and twenty-eight more
+/// because the entry lost three probes in a row once while the bar was "at most two in thirty seconds" -
+/// which the other ways exceed in one calm ten-second stretch in eight. Replayed over 5,469 match hours of prod
+/// spike records with every way's samples: eight seconds decided 6.8 s into a lag at the median, three
+/// quarters of those lags were still going five seconds later, and a move to a way that then proved slower
+/// for nothing came about four times in a thousand hours - most ways in sit within 3 ms of each other.
+/// Six seconds doubled those wasted moves; five, more again.
+///
+/// Or loss on its own, over thirty seconds (<see cref="LossWindowTicks"/>): a tenth of the current way's
+/// pongs gone while the other way answered, spread over at least four of the window's six five-second
+/// slices, because steady loss at normal latency is as bad for a game as latency and never reaches three
+/// quarters - and a single outage of a few seconds, however total, sits in one or two slices and does not
+/// count. That one keeps the old, stricter bar for the other way, at most two probes lost: moving for loss
+/// onto a way that loses too buys nothing. A way that has never answered a probe is an older relayd that
+/// does not know the message, and is never a candidate.
 ///
 /// THEN five minutes before it decides anything again, including moving back. A way that has just
 /// been left because it was bad needs time to prove it is good again, and a player bounced between two
 /// ways every half minute is worse off than one left on a bad one.
 ///
-/// It also moves a player onto a way that has simply been better by that margin for thirty seconds with
+/// It also moves a player onto a way that has simply been better by that margin for eight seconds with
 /// no incident at all. That is consistent with the connect-time rule, which would have chosen the same
 /// way had it measured it then.
 ///
@@ -83,8 +97,8 @@ public sealed class DoorDecision
 /// fifth of its pongs for thirty seconds and the tunnel moved to vn-1-sg4; a minute later sg-4 was back
 /// at 43 ms against 53 on the entry, clean - but the gap was 9.6 ms at the median and 10 ms or more in
 /// only 40% of quarter seconds, so the player stayed on the detour for the rest of the hour. The longer
-/// window is what the lower bar costs: a way that was bad must be good for four times as long as "worse"
-/// asks. The five minutes still apply first. A move back is not itself returned from.
+/// window is what the lower bar costs: a way that was bad must be good for two minutes, where "worse" asks
+/// eight seconds. The five minutes still apply first. A move back is not itself returned from.
 ///
 /// A connect that started on an entry because it was faster than the direct road (TunnelEngine.ChooseDoorAsync)
 /// is the same detour, and <see cref="StartedOnDetour"/> opens the same way back - without the five minutes,
@@ -94,22 +108,30 @@ public sealed class DoorDecision
 /// </summary>
 public sealed class DoorSwitchPolicy
 {
-    public const int WindowTicks = 30 * SpikeDetector.TicksPerSecond;
+    /// <summary>The window "worse" is judged over. See WHEN above.</summary>
+    public const int WindowTicks = 8 * SpikeDetector.TicksPerSecond;
+
+    /// <summary>The window steady loss is judged over: loss needs time to show it is steady and not one outage.</summary>
+    public const int LossWindowTicks = 30 * SpikeDetector.TicksPerSecond;
+
     public const int CooldownTicks = 5 * 60 * SpikeDetector.TicksPerSecond;
 
-    /// <summary>Of <see cref="WindowTicks"/>, how many must have both ways measured.</summary>
+    /// <summary>Of a window, how many quarter seconds must have both ways measured.</summary>
     internal const double MinComparableShare = 0.9;
 
     internal const double WorseShareToMove = 0.75;
 
-    /// <summary>Current-way pongs lost while the other way answered, as a reason to move on its own.</summary>
-    internal const int LossTicksToMove = WindowTicks / 10;
+    /// <summary>The share of its probes the other way may lose in <see cref="WindowTicks"/> and still count as clean.</summary>
+    internal const double MaxOtherLostShare = 0.1;
 
-    /// <summary>The window in slices, and how many must hold some of that loss: steady, not one outage.</summary>
+    /// <summary>Current-way pongs lost while the other way answered, as a reason to move on its own.</summary>
+    internal const int LossTicksToMove = LossWindowTicks / 10;
+
+    /// <summary>The loss window in slices, and how many must hold some of that loss: steady, not one outage.</summary>
     internal const int LossSlices = 6;
     internal const int LossSlicesToMove = 4;
 
-    /// <summary>Probes the other way may lose in the window and still count as clean.</summary>
+    /// <summary>Probes the other way may lose in <see cref="LossWindowTicks"/> and still be moved to for loss.</summary>
     internal const int MaxOtherLost = 2;
 
     public static double Margin(double otherMs) => Math.Max(10.0, 0.15 * otherMs);
@@ -193,67 +215,32 @@ public sealed class DoorSwitchPolicy
 
         for (var slot = 0; slot < ids.Length; slot++)
         {
-            int comparable = 0, worse = 0, lostWorse = 0, currentSent = 0, currentLost = 0, otherSent = 0, otherLost = 0;
-            var lossSlices = 0;
-            var position = -1;
-            var current = new List<double>(WindowTicks);
-            var other = new List<double>(WindowTicks);
+            // "Worse" over the last eight seconds, against a way that lost at most a tenth of its probes - or, for
+            // the way the last decision left, at most two in thirty seconds: it was left for being bad, and eight
+            // seconds faster is not it proving itself clean again (GOING BACK).
+            var fast = Count(slot, WindowTicks);
+            var clean = IsLeft(ids[slot])
+                ? Count(slot, Math.Min(_window.Count, LossWindowTicks)).OtherLost <= MaxOtherLost
+                : fast.OtherLost <= MaxOtherLostShare * fast.OtherSent;
+            var candidate = fast.Other.Count > 0 && clean &&
+                            fast.Comparable >= MinComparableShare * WindowTicks && fast.Share >= WorseShareToMove
+                ? Decide(last, slot, fast, WindowTicks)
+                : null;
 
-            foreach (var tick in _window.Skip(_window.Count - WindowTicks))
+            // Or steady loss over the last thirty, against a way that lost at most two.
+            if (candidate is null && _window.Count >= LossWindowTicks)
             {
-                position++;
-                if (tick.RelayProcessSent)
+                var loss = Count(slot, LossWindowTicks);
+                var steadyLoss = loss.LostWorse >= LossTicksToMove &&
+                                 System.Numerics.BitOperations.PopCount((uint)loss.LossSlices) >= LossSlicesToMove;
+                if (loss.Other.Count > 0 && loss.OtherLost <= MaxOtherLost &&
+                    loss.Comparable >= MinComparableShare * LossWindowTicks && steadyLoss)
                 {
-                    currentSent++;
-                    if (tick.RelayProcessMs is { } c) current.Add(c);
-                    else currentLost++;
-                }
-
-                var otherWasSent = tick.DoorSent is { } sent && slot < sent.Length && sent[slot];
-                double? otherMs = otherWasSent && tick.DoorMs is { } ms && slot < ms.Length ? ms[slot] : null;
-                if (otherWasSent)
-                {
-                    otherSent++;
-                    if (otherMs is { } o) other.Add(o);
-                    else otherLost++;
-                }
-
-                // Comparable only when both went out and the other way answered. The current way going
-                // unanswered while the other answered is the loss half of "worse".
-                if (!tick.RelayProcessSent || otherMs is not { } otherValue) continue;
-                comparable++;
-                if (tick.RelayProcessMs is not { } currentValue)
-                {
-                    worse++;
-                    lostWorse++;
-                    lossSlices |= 1 << (position * LossSlices / WindowTicks);
-                }
-                else if (currentValue - otherValue >= Margin(otherValue))
-                {
-                    worse++;
+                    candidate = Decide(last, slot, loss, LossWindowTicks);
                 }
             }
 
-            if (other.Count == 0) continue;
-            if (otherLost > MaxOtherLost) continue;
-            if (comparable < MinComparableShare * WindowTicks) continue;
-
-            var share = (double)worse / comparable;
-            var steadyLoss = lostWorse >= LossTicksToMove &&
-                             System.Numerics.BitOperations.PopCount((uint)lossSlices) >= LossSlicesToMove;
-            if (share < WorseShareToMove && !steadyLoss) continue;
-
-            var candidate = new DoorDecision
-            {
-                TickIndex = last.Index,
-                AtUtc = last.StartUtc,
-                From = last.CurrentDoor!,
-                To = ids[slot],
-                FromStats = Stats(current, currentSent, currentLost),
-                ToStats = Stats(other, otherSent, otherLost),
-                WorseShare = share,
-                Comparable = comparable,
-            };
+            if (candidate is null) continue;
             if (best is null || (candidate.ToStats.P50 ?? double.MaxValue) < (best.ToStats.P50 ?? double.MaxValue))
             {
                 best = candidate;
@@ -261,6 +248,71 @@ public sealed class DoorSwitchPolicy
         }
         return best;
     }
+
+    private bool IsLeft(string id) => _leftFrom is not null && string.Equals(id, _leftFrom, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The current way against the way in <paramref name="slot"/>, over the last <paramref name="ticks"/> of the window.</summary>
+    private sealed class Tally
+    {
+        public int Comparable, Worse, LostWorse, CurrentSent, CurrentLost, OtherSent, OtherLost, LossSlices;
+        public readonly List<double> Current = [];
+        public readonly List<double> Other = [];
+        public double Share => Comparable == 0 ? 0 : (double)Worse / Comparable;
+    }
+
+    private Tally Count(int slot, int ticks)
+    {
+        var t = new Tally();
+        var position = -1;
+        foreach (var tick in _window.Skip(_window.Count - ticks))
+        {
+            position++;
+            if (tick.RelayProcessSent)
+            {
+                t.CurrentSent++;
+                if (tick.RelayProcessMs is { } c) t.Current.Add(c);
+                else t.CurrentLost++;
+            }
+
+            var otherWasSent = tick.DoorSent is { } sent && slot < sent.Length && sent[slot];
+            double? otherMs = otherWasSent && tick.DoorMs is { } ms && slot < ms.Length ? ms[slot] : null;
+            if (otherWasSent)
+            {
+                t.OtherSent++;
+                if (otherMs is { } o) t.Other.Add(o);
+                else t.OtherLost++;
+            }
+
+            // Comparable only when both went out and the other way answered. The current way going
+            // unanswered while the other answered is the loss half of "worse".
+            if (!tick.RelayProcessSent || otherMs is not { } otherValue) continue;
+            t.Comparable++;
+            if (tick.RelayProcessMs is not { } currentValue)
+            {
+                t.Worse++;
+                t.LostWorse++;
+                t.LossSlices |= 1 << (position * LossSlices / ticks);
+            }
+            else if (currentValue - otherValue >= Margin(otherValue))
+            {
+                t.Worse++;
+            }
+        }
+        return t;
+    }
+
+    private static DoorDecision Decide(QualityTick last, int slot, Tally t, int windowTicks) => new()
+    {
+        TickIndex = last.Index,
+        AtUtc = last.StartUtc,
+        From = last.CurrentDoor!,
+        To = last.DoorIds![slot],
+        FromStats = Stats(t.Current, t.CurrentSent, t.CurrentLost),
+        ToStats = Stats(t.Other, t.OtherSent, t.OtherLost),
+        WorseShare = t.Share,
+        Comparable = t.Comparable,
+        WindowTicks = windowTicks,
+    };
 
     /// <summary>
     /// Going back to the way the last decision left, once it has been the better one for two minutes - see

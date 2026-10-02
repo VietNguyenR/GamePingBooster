@@ -92,6 +92,17 @@ internal sealed class WorkingEdges
     /// </summary>
     private readonly ConcurrentDictionary<string, Task<IPAddress[]>> _inFlight = new();
 
+    /// <summary>
+    /// Names the line was just seen cutting by name, until when: every own address took the connection, nothing
+    /// completed, and another name completed on the same address. Read by the resolver to send the name through
+    /// the tunnel on its own - see <see cref="CutByName"/>.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _cut = new();
+
+    /// <summary>For the confirming handshakes: as long as a filter takes to reset, not as long as it can hang.</summary>
+    private static readonly TimeSpan CutConnectTimeout = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan CutHandshakeTimeout = TimeSpan.FromMilliseconds(1500);
+
     private long _probed;
     private long _rejected;
 
@@ -101,11 +112,30 @@ internal sealed class WorkingEdges
     /// </summary>
     private readonly Action<string, IReadOnlyList<IPAddress>>? _beforeProbe;
 
-    public WorkingEdges(DohUpstream doh, Action<string> log, Action<string, IReadOnlyList<IPAddress>>? beforeProbe = null)
+    /// <summary>
+    /// Told the name when its own addresses took the connection and still nothing completed a handshake: the
+    /// line is cutting it by name. Feeds the unblock report (UnblockReporter, trigger "filtered").
+    /// </summary>
+    private readonly Action<string>? _onFiltered;
+
+    /// <summary>
+    /// True for a name the tunnel will carry if the line turns out to cut it: then no edge is borrowed for it - see the
+    /// borrowing in <see cref="ProbeAsync"/>. Asked per probe, because the tunnel comes and goes.
+    /// </summary>
+    private readonly Func<string, bool>? _tunnelFirst;
+
+    /// <summary>Whether a name cut on every edge it was given is asked for as other Vietnamese networks - the line's own instance only.</summary>
+    private readonly bool _inCountry;
+
+    public WorkingEdges(DohUpstream doh, Action<string> log, Action<string, IReadOnlyList<IPAddress>>? beforeProbe = null,
+        Action<string>? onFiltered = null, Func<string, bool>? tunnelFirst = null, bool inCountry = false)
     {
+        _inCountry = inCountry;
         _doh = doh;
         _log = log;
         _beforeProbe = beforeProbe;
+        _onFiltered = onFiltered;
+        _tunnelFirst = tunnelFirst;
     }
 
     public long Probed => Interlocked.Read(ref _probed);
@@ -114,6 +144,13 @@ internal sealed class WorkingEdges
     public long Rejected => Interlocked.Read(ref _rejected);
 
     private sealed record Entry(IPAddress[] Addresses, DateTimeOffset Expires);
+
+    /// <summary>
+    /// True when the last probe of <paramref name="name"/> found the line cutting it by name and nothing on the line
+    /// rescued it - so an honest address will not connect, and only the tunnel can help. Lasts as long as that probe's
+    /// verdict (<see cref="NoEdgeLifetime"/>).
+    /// </summary>
+    public bool CutByName(string name) => _cut.TryGetValue(name, out var until) && until > DateTimeOffset.UtcNow;
 
     /// <summary>
     /// The addresses to answer with, or null when none could be found and the caller should fall
@@ -196,7 +233,16 @@ internal sealed class WorkingEdges
         // Not when every own address has already refused the connection: borrowed edges could never
         // be used for this name (see below), and probing them only made Steam's p2p discovery names
         // wait out the full budget - 2.7 s for an answer known after 0.3.
-        if (!await AnyWorksAsync(Tasks(attempts), HeadStart).ConfigureAwait(false) &&
+        //
+        // Nor when the tunnel can carry the name's own addresses. A borrowed edge proves it holds a
+        // certificate for the name and answers HTTP for it, and that is still not serving it: on
+        // 2026-10-02 FPT in Ho Chi Minh City cut prod-live-cfentry and prod-live-images, prod-live-
+        // front's Akamai edge answered them 400, and once that was refused, prod-live-xenuine's AWS
+        // ingress answered them 403 - passed, handed to PUBG, "cannot connect" again. The name's own
+        // addresses through the tunnel are right by construction; a borrowed edge is a guess.
+        var tunnelFirst = _tunnelFirst?.Invoke(name) == true;
+        if (!tunnelFirst &&
+            !await AnyWorksAsync(Tasks(attempts), HeadStart).ConfigureAwait(false) &&
             !attempts.All(a => a.Task.IsCompleted && !a.Connected))
         {
             borrowed = await ShortlistAsync(name, sibling, tried, ct).ConfigureAwait(false);
@@ -227,9 +273,10 @@ internal sealed class WorkingEdges
         var abandoned = attempts.Count - settled.Length;
 
         // The name's own addresses whenever one of them works. A borrowed edge only proved that it
-        // holds a certificate for this name, and a wildcard proves that for a different service:
-        // on 2026-10-02 *.acs.pubg.com let acrt-pcprod's servers pass for zk-ga-pcprod, PUBG's
-        // lobby on TCP 40002, and prod-live-front's Akamai edge for the xenuine API.
+        // holds a certificate for this name and does not refuse it over HTTP, and a wildcard proves
+        // the first for a different service: on 2026-10-02 *.acs.pubg.com let acrt-pcprod's servers
+        // pass for zk-ga-pcprod, PUBG's lobby on TCP 40002, and prod-live-front's Akamai edge for the
+        // xenuine API - and later the same evening for prod-live-cfentry, answering it 400.
         //
         // And borrowed edges only for a name that IS a web front on this line: one of its own
         // addresses took the TCP connection and then failed the handshake - a reset, a stall, a
@@ -238,6 +285,22 @@ internal sealed class WorkingEdges
         // lobby's Global Accelerator, Steam's p2p discovery), and any edge borrowed for it is wrong.
         var ownConnected = attempts.Any(a => a.Own && a.Connected);
         var ownWorking = working.Where(a => a.Own).ToArray();
+
+        // Cut on every address this line was given - but those are only the edges the CDN picked for
+        // this subnet. Asked as other Vietnamese networks, it names edges inside the country, and the
+        // line's filter, which sits on its international links, never sees them. They are the name's
+        // own answers, so right by construction, and they are tried before any borrowed edge or the
+        // tunnel. See InCountrySubnets.
+        Attempt[] inCountry = [];
+        if (ownWorking.Length == 0 && ownConnected && _inCountry)
+        {
+            inCountry = await InCountryAsync(name, tried, roundClock, ct).ConfigureAwait(false);
+            if (inCountry.Length > 0)
+            {
+                ownWorking = inCountry;
+                working = [.. working, .. inCountry];
+            }
+        }
         var usable = ownWorking.Length > 0 ? ownWorking
             : ownConnected ? working
             : [];
@@ -262,14 +325,28 @@ internal sealed class WorkingEdges
             // evening once already.
             var why = working.Length > 0
                 ? $"{working.Length} borrowed edge(s) passed, but none of its own addresses accepted a connection on 443, so it is not a web front here"
-                : $"{tried.Length} from the resolvers, {borrowed.Length} borrowed, {_pool.Count} in the pool";
+                : tunnelFirst
+                    ? $"{tried.Length} from the resolvers, none borrowed - the tunnel can carry its own"
+                    : $"{tried.Length} from the resolvers, {borrowed.Length} borrowed, {_pool.Count} in the pool";
             _log($"Unblock: no address for {name} completed a handshake ({clock.ElapsedMilliseconds} ms) - " +
                  $"{why}. Relaying the upstream answer unchanged for {NoEdgeLifetime.TotalMinutes:0} min.");
-            _known[name] = new Entry([], DateTimeOffset.UtcNow.Add(NoEdgeLifetime));
+            var until = DateTimeOffset.UtcNow.Add(NoEdgeLifetime);
+            _known[name] = new Entry([], until);
+
+            // "Its own addresses took the connection" is not yet "the line cuts this name": Steam's
+            // p2p-*.discovery names accept on 443 and speak no TLS at all. Only the comparison says which -
+            // the same address, another name - and it is what decides whether the tunnel may take it.
+            if (ownConnected &&
+                await IsCutAsync(name, [.. attempts.Where(a => a.Own && a.Connected).Select(a => a.Address)], ct)
+                    .ConfigureAwait(false))
+            {
+                _cut[name] = until;
+                _onFiltered?.Invoke(name);
+            }
             return [];
         }
 
-        if (!good.Any(tried.Contains))
+        if (!good.Any(tried.Contains) && inCountry.Length == 0)
         {
             _log($"Unblock: no address the upstreams gave for {name} worked in time on this line; " +
                  $"answering with {good.Length} edge(s) proven for another name of the same service " +
@@ -291,6 +368,94 @@ internal sealed class WorkingEdges
 
         _known[name] = new Entry(good, expires);
         return good;
+    }
+
+    /// <summary>
+    /// Networks inside Vietnam to ask the name's DNS for it as, when every edge this line was given is cut.
+    ///
+    /// Measured 2026-10-02 for prod-live-images (CloudFront), through Google with Client Subnet: 27.64.0.0/24 and
+    /// 123.20.0.0/24 were sent to SGN50 in Ho Chi Minh City, 118.69.0.0/24 and 14.160.0.0/24 to HAN51 in Ha Noi -
+    /// while FPT's own 42.116.116.0/24 was sent to Hong Kong and Singapore, every edge of which FPT cuts by name. The
+    /// HCM player whose images crawled through the relay at 256 KB/s fetched them from HAN51 directly: 200 in
+    /// 0.25 s. Two cities, two operators each, so one network renumbered does not lose a city.
+    /// </summary>
+    private static readonly (IPAddress Network, int Prefix)[] InCountrySubnets =
+    [
+        (IPAddress.Parse("27.64.0.0"), 24), (IPAddress.Parse("123.20.0.0"), 24),
+        (IPAddress.Parse("118.69.0.0"), 24), (IPAddress.Parse("14.160.0.0"), 24),
+    ];
+
+    /// <summary>
+    /// The name's edges as <see cref="InCountrySubnets"/> are told them, minus those already tried, probed on this
+    /// line as its own addresses. Returns the ones that completed a handshake; empty when the CDN does not map by
+    /// subnet (the same addresses come back) or none of them gets through either.
+    /// </summary>
+    private async Task<Attempt[]> InCountryAsync(string name, IPAddress[] tried, Stopwatch roundClock, CancellationToken ct)
+    {
+        var clock = Stopwatch.StartNew();
+        var perSubnet = new List<IReadOnlyList<IPAddress>>();
+        foreach (var reply in await _doh.ResolveAsSubnetsAsync(name, InCountrySubnets, ct).ConfigureAwait(false))
+        {
+            try
+            {
+                perSubnet.Add([.. DnsWire.Parse(reply, reply.Length).Addresses
+                    .Where(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork && !tried.Contains(a))]);
+            }
+            catch (FormatException) { }
+        }
+
+        var candidates = EdgeRanking.Interleave(perSubnet, MaxCandidates);
+        if (candidates.Length == 0) return [];
+
+        using var round = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var attempts = candidates.Select(a => Attempt.Start(a, own: true, name, roundClock, round.Token)).ToList();
+        if (await AnyWorksAsync(Tasks(attempts), Timeout.InfiniteTimeSpan).ConfigureAwait(false))
+        {
+            await Task.WhenAny(Task.WhenAll(Tasks(attempts)), Task.Delay(Grace)).ConfigureAwait(false);
+        }
+        var found = attempts.Where(a => a.Task.IsCompleted && a.Task.Result.Works).ToArray();
+        round.Cancel();
+        await Task.WhenAll(Tasks(attempts)).ConfigureAwait(false);
+
+        _log(found.Length > 0
+            ? $"Unblock: every edge this line was given for {name} is cut, but as other Vietnamese networks see it, it is " +
+              $"also served from {string.Join(", ", found.Select(a => a.Address))} - and those work here " +
+              $"({clock.ElapsedMilliseconds} ms)."
+            : $"Unblock: {name} asked as other Vietnamese networks: {string.Join(", ", candidates.Select(a => a.ToString()))}, " +
+              $"none of which works on this line either ({clock.ElapsedMilliseconds} ms).");
+        return found;
+    }
+
+    /// <summary>
+    /// Whether the line cuts handshakes naming <paramref name="name"/>: on up to two of its own addresses, the real
+    /// name and the control name side by side, and any address where the real one is reset or stalls while the
+    /// control gets an answer. What tools\Check-Unblock.ps1 and UnblockDiagnosis compare, asked in a fraction of
+    /// their time - an FPT reset lands within 25 ms.
+    /// </summary>
+    private async Task<bool> IsCutAsync(string name, IPAddress[] connected, CancellationToken ct)
+    {
+        var checks = connected.Take(2).Select(async address =>
+        {
+            var real = EdgeProber.HandshakeAsync(address, name, CutConnectTimeout, CutHandshakeTimeout, ct);
+            var control = EdgeProber.HandshakeAsync(address, EdgeProber.ControlName, CutConnectTimeout, CutHandshakeTimeout, ct);
+            var (realOutcome, _) = await real.ConfigureAwait(false);
+            var (controlOutcome, _) = await control.ConfigureAwait(false);
+            return (Address: address, Real: realOutcome, Control: controlOutcome);
+        });
+
+        var results = await Task.WhenAll(checks).ConfigureAwait(false);
+        var cut = results.FirstOrDefault(r => EdgeProber.CutByName(r.Real, r.Control));
+        if (cut.Address is not null)
+        {
+            _log($"Unblock: the line cuts {name} by name - on {cut.Address} its handshake is {cut.Real}, " +
+                 $"{EdgeProber.ControlName}'s is {cut.Control}.");
+            return true;
+        }
+
+        _log($"Unblock: {name} is not cut by name here - " +
+             string.Join(", ", results.Select(r => $"{r.Address} real {r.Real}, control {r.Control}")) +
+             ". Not a web front for this name, so nothing to send through the tunnel.");
+        return false;
     }
 
     /// <summary>
@@ -370,11 +535,15 @@ internal sealed class WorkingEdges
         }
 
         // Elapsed is the probe's own, from its start - borrowed edges start after the head start.
+        // A borrowed edge must also answer as a host of the name, not just hold its certificate - see
+        // EdgeProber.ServesNameAsync. The name's own addresses are not asked: it costs a round trip, and an
+        // upstream naming them is already the claim that they serve it.
         private async Task<(bool Works, TimeSpan Elapsed)> RunAsync(string name, Stopwatch round, CancellationToken ct)
         {
             var clock = Stopwatch.StartNew();
             var works = await EdgeProber.WorksAsync(Address, name, ct,
-                () => Interlocked.Exchange(ref _connectedAtMs, round.ElapsedMilliseconds)).ConfigureAwait(false);
+                () => Interlocked.Exchange(ref _connectedAtMs, round.ElapsedMilliseconds),
+                servesName: !Own).ConfigureAwait(false);
             return (works, clock.Elapsed);
         }
     }

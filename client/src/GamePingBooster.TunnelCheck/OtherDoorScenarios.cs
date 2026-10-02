@@ -12,8 +12,9 @@ namespace GamePingBooster.TunnelCheck;
 /// home's roads still for five minutes after a move on the other one.
 ///
 /// Real tunnels, a real recorder and real Probes; the engine's part - turning a decision into TunnelClient.MoveTo and a
-/// new context - is played by the callback, as the supervisor plays it. About 75 s: two thirty-second windows. The
-/// recorder writes its match summary into a scratch folder, never this PC's quality folder or upload queue.
+/// new context - is played by the callback, as the supervisor plays it. About 25 s: two eight-second windows and the
+/// match moving between them. The recorder writes its match summary into a scratch folder, never this PC's quality
+/// folder or upload queue.
 /// </summary>
 internal static partial class Program
 {
@@ -138,7 +139,7 @@ internal static partial class Program
         var movedOther = await WaitUntil(() => decisions.Any(d => d.Decision.To == "vn-1-sg"), 45_000);
         var otherDecision = decisions.FirstOrDefault(d => d.Decision.To == "vn-1-sg");
         Check($"Region's tunnel: its direct road 80 ms slow, the entry fine - the policy for sg-1 moves it to vn-1-sg " +
-              $"({(movedOther ? (otherDecision.At - started) / 1000.0 : 0):F0} s: thirty seconds of evidence, a match's worth)",
+              $"({(movedOther ? (otherDecision.At - started) / 1000.0 : 0):F0} s: eight seconds of evidence, six of them worse)",
             movedOther && otherDecision.Decision.From == "sg-1", Show(decisions));
         var session1 = otherRelay.SessionOf(other.SessionId);
         Check("  the same session, now answered on the entry's door - the relay and the game server see nothing change",

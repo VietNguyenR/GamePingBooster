@@ -37,7 +37,7 @@ internal static class StringsVi
         ["unblock.onFor"] = "{0}",
         ["unblock.off"] = "Chưa bật",
         ["unblock.tip.on"] = "Những tên miền bị đường mạng này trả về địa chỉ giả sẽ được phân giải qua DNS mã hoá, nên các trang đó vào bình thường. Tải về không bị ảnh hưởng - vẫn đi đường của nhà mạng, vì đường đó nhanh hơn.",
-        ["unblock.tip.off"] = "Tính năng mở chặn chưa chạy. Service sẽ tiếp tục thử lại.",
+        ["unblock.tip.off"] = "Mở chặn chỉ chạy khi đang kết nối - bấm Kết nối để bật. Nếu đã kết nối mà vẫn chưa bật, service sẽ tự thử lại.",
         ["main.games.tip"] = "Xem các game được hỗ trợ",
 
         ["main.setup.needed"] = "Chưa cấu hình máy chủ. Mở Cài đặt rồi nhập địa chỉ máy chủ và khoá của bạn.",

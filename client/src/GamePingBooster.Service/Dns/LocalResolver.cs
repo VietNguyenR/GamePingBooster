@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using GamePingBooster.Core.Net;
@@ -49,6 +50,20 @@ internal sealed class LocalResolver : IAsyncDisposable
     /// </summary>
     private readonly IUnblockRoutes? _routes;
     private readonly WorkingEdges? _tunnelEdges;
+
+    /// <summary>
+    /// Names sent through the tunnel because the line was seen cutting them, and until when. Asked straight through
+    /// the tunnel while here: probing the line again would only find it cut again, at the cost of a slow lookup each
+    /// time.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _cut = new();
+
+    /// <summary>
+    /// Then the line is asked again. Long, because a line that cuts a name by name keeps doing it for hours; not for
+    /// ever, because the player may move to a line that does not, and these names would ride the relay for nothing.
+    /// </summary>
+    private static readonly TimeSpan CutLifetime = TimeSpan.FromMinutes(30);
+
     private readonly Action<string> _log;
     private readonly CancellationTokenSource _stopping = new();
 
@@ -62,13 +77,17 @@ internal sealed class LocalResolver : IAsyncDisposable
     private long _failed;
 
     public LocalResolver(IReadOnlyList<IPAddress> upstream, UnblockPolicy policy, Action<string> log,
-        IUnblockRoutes? routes = null)
+        IUnblockRoutes? routes = null, Action<string>? filtered = null)
     {
         _upstream = upstream;
         _policy = policy;
         _log = log;
         _doh = new DohUpstream(log);
-        _edges = new WorkingEdges(_doh, log);
+        // A name the tunnel may carry is never answered with another name's edge while one is up - see
+        // WorkingEdges.ProbeAsync. Read through `this`: _routes is set below, and the tunnel comes and goes.
+        _edges = new WorkingEdges(_doh, log, onFiltered: filtered,
+            tunnelFirst: name => _routes is { Ready: true } && _policy.ClaimedBy(name)?.MayTunnelWhenCut(name) == true,
+            inCountry: true);
         _routes = routes;
         if (routes is not null)
         {
@@ -76,6 +95,10 @@ internal sealed class LocalResolver : IAsyncDisposable
             _tunnelEdges = new WorkingEdges(_doh, log, beforeProbe: (name, addresses) => routes.Route(name, addresses));
         }
     }
+
+    /// <summary>Sent through the tunnel for a cut a short while ago - see <see cref="_cut"/>.</summary>
+    private bool TunnelledForCut(string name) =>
+        _cut.TryGetValue(name, out var until) && until > DateTimeOffset.UtcNow;
 
     public long ScopedQueries => Interlocked.Read(ref _scoped);
 
@@ -254,11 +277,13 @@ internal sealed class LocalResolver : IAsyncDisposable
             // the HTTPS records browsers now ask for, anything invented later - is relayed as it
             // arrives, because the check has nothing to say about them and synthesising an answer
             // would mean dropping whatever the upstream knew that this code does not.
-            // Through the tunnel when the profile says so and a tunnel is up: the line resets these names whatever the
-            // address (FPT, 2026-10-02), so an honest answer alone would still not connect. Without a tunnel, the
-            // name is answered exactly as before - an honest address is still better than a lie.
-            var viaTunnel = type == DnsWire.TypeA && _routes is { Ready: true } && _tunnelEdges is not null &&
-                            app.RoutesThroughTunnel(name);
+            // Through the tunnel only where the line cuts the name: FPT resets some of these names whatever the
+            // address (2026-10-02), so an honest answer alone would not connect - but Viettel and VNPT let the same
+            // names through, and sending them over the relay there only spent the session's 256 KB/s. The line first,
+            // then, the profile's tunnel list included; the tunnel once the line is seen cutting the name, and
+            // straight to it for a while after. Without a tunnel, the name is answered exactly as before.
+            var tunnelReady = type == DnsWire.TypeA && _routes is { Ready: true } && _tunnelEdges is not null;
+            var viaTunnel = tunnelReady && TunnelledForCut(name);
 
             if (type == DnsWire.TypeA)
             {
@@ -268,6 +293,26 @@ internal sealed class LocalResolver : IAsyncDisposable
                 var edges = viaTunnel
                     ? await _tunnelEdges!.ForAsync(name, sibling: null, ct).ConfigureAwait(false)
                     : await _edges.ForAsync(name, app.Canary, ct).ConfigureAwait(false);
+
+                // Nothing on the line works and the line was seen cutting this very name: the tunnel, listed or
+                // not. See UnblockApp.MayTunnelWhenCut.
+                if (edges is null && !viaTunnel && tunnelReady && _edges.CutByName(name) && app.MayTunnelWhenCut(name))
+                {
+                    edges = await _tunnelEdges!.ForAsync(name, sibling: null, ct).ConfigureAwait(false);
+                    if (edges is not null)
+                    {
+                        viaTunnel = true;
+                        // Said once: a game asks for a name several times at once, and each answer lands here.
+                        var fresh = !TunnelledForCut(name);
+                        _cut[name] = DateTimeOffset.UtcNow.Add(CutLifetime);
+                        if (fresh)
+                        {
+                            var listed = app.RoutesThroughTunnel(name) ? "in" : "not in";
+                            _log($"Unblock: {name} goes through the tunnel - the line cuts it by name ({listed} the profile's " +
+                                 $"tunnel list). Kept that way for {CutLifetime.TotalMinutes:0} min.");
+                        }
+                    }
+                }
 
                 // Again on every answer, cached or not: a verdict outlives a reconnect, and the routes do not.
                 if (edges is not null && viaTunnel) _routes!.Route(name, edges);

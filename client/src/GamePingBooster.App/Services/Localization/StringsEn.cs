@@ -36,7 +36,7 @@ internal static class StringsEn
         ["unblock.onFor"] = "{0}",
         ["unblock.off"] = "Not enabled",
         ["unblock.tip.on"] = "Names this connection answers falsely are resolved over encrypted DNS instead, so these sites load normally. Downloads are not affected - they stay on your provider's own path, which is faster.",
-        ["unblock.tip.off"] = "Name unblocking is not running. The service will keep trying.",
+        ["unblock.tip.off"] = "Name unblocking runs while you are connected - press Connect to turn it on. If you are connected and it is still off, the service keeps trying.",
         ["main.games.tip"] = "See supported games",
 
         ["main.setup.needed"] =
