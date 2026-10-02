@@ -390,43 +390,69 @@ internal sealed class UnblockDns : IAsyncDisposable
     /// Asks the local resolver directly, bypassing Windows, so a failure here is the resolver's and
     /// not the policy's. The two are diagnosed separately because they fail for different reasons
     /// and the log has to say which.
+    ///
+    /// Every service's canary in turn, and one good answer is enough: the question is whether the resolver
+    /// is up and answering, and it is the same resolver for all of them. Until 2026-10-02 it asked only the
+    /// first service's, and on an FPT line that one could only be RELAYED - the line reset every edge of it -
+    /// and the relay took the whole ten seconds, so the feature rolled back every minute for half an hour
+    /// while Steam's canary would have answered at once. Whether the policy then takes is still proven
+    /// against Windows afterwards (VerifyAsync), so being lenient here costs no certainty.
     /// </summary>
     private async Task<bool> AnswersItselfAsync(UnblockPolicy policy, CancellationToken ct)
     {
-        var canary = policy.Apps[0].Canary;
+        var canaries = policy.Apps.Select(a => a.Canary).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
-        try
+        // Ten seconds in all, as before, shared out: one slow canary must not use up the next one's turn.
+        var each = TimeSpan.FromMilliseconds(Math.Max(3000, 10000 / Math.Max(1, canaries.Count)));
+        var tried = new List<string>();
+
+        foreach (var canary in canaries)
         {
-            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-
-            var query = DnsWire.BuildQuery((ushort)Random.Shared.Next(1, ushort.MaxValue), canary);
-
-            await socket.SendToAsync(query, SocketFlags.None,
-                new IPEndPoint(LocalResolver.ListenAddress, 53), ct).ConfigureAwait(false);
-
-            var buffer = new byte[DnsWire.MaxUdpMessage];
-
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(TimeSpan.FromSeconds(10));
-
-            var received = await socket.ReceiveFromAsync(
-                buffer, SocketFlags.None, new IPEndPoint(IPAddress.Any, 0), timeout.Token).ConfigureAwait(false);
-
-            var parsed = DnsWire.Parse(buffer, received.ReceivedBytes);
-            if (parsed.RCode != 0 || parsed.Addresses.Count == 0)
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            try
             {
-                _log($"The unblock resolver answered {DnsWire.RCodeName(parsed.RCode)} for {canary} " +
-                     $"with {parsed.Addresses.Count} address(es).");
-                return false;
-            }
+                using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
 
-            return !LooksPoisoned([.. parsed.Addresses]);
+                var query = DnsWire.BuildQuery((ushort)Random.Shared.Next(1, ushort.MaxValue), canary);
+
+                await socket.SendToAsync(query, SocketFlags.None,
+                    new IPEndPoint(LocalResolver.ListenAddress, 53), ct).ConfigureAwait(false);
+
+                var buffer = new byte[DnsWire.MaxUdpMessage];
+
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeout.CancelAfter(each);
+
+                var received = await socket.ReceiveFromAsync(
+                    buffer, SocketFlags.None, new IPEndPoint(IPAddress.Any, 0), timeout.Token).ConfigureAwait(false);
+
+                var parsed = DnsWire.Parse(buffer, received.ReceivedBytes);
+                if (parsed.RCode == 0 && parsed.Addresses.Count > 0 && !LooksPoisoned([.. parsed.Addresses]))
+                {
+                    if (tried.Count > 0)
+                    {
+                        _log($"Unblock: the resolver answered {canary} in {clock.ElapsedMilliseconds} ms, after " +
+                             $"{string.Join("; ", tried)}.");
+                    }
+                    return true;
+                }
+
+                tried.Add($"{canary}: {DnsWire.RCodeName(parsed.RCode)} with {parsed.Addresses.Count} address(es) " +
+                          $"in {clock.ElapsedMilliseconds} ms");
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                tried.Add($"{canary}: no answer in {clock.ElapsedMilliseconds} ms");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                tried.Add($"{canary}: {ex.Message} after {clock.ElapsedMilliseconds} ms");
+            }
         }
-        catch (Exception ex)
-        {
-            _log($"The unblock resolver did not answer its own query: {ex.Message}");
-            return false;
-        }
+
+        _log($"Unblock: the resolver did not answer its own query - {string.Join("; ", tried)}. " +
+             "The DoH lines above say which resolver was slow.");
+        return false;
     }
 
     private static async Task<IPAddress[]> ResolveThroughWindowsAsync(string host)

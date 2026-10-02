@@ -170,6 +170,12 @@ if ($route) {
     $ispDns = @((Get-DnsClientServerAddress -InterfaceIndex $route.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)
     Say "Default route: $($route.InterfaceAlias) via $($route.NextHop)"
     Say "DNS servers on it: $($ispDns -join ', ')"
+    $v6 = @((Get-DnsClientServerAddress -InterfaceIndex $route.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue).ServerAddresses |
+        Where-Object { $_ -notmatch '^fec0:0:0:ffff' })
+    Say "IPv6 DNS servers on it: $(if ($v6) { $v6 -join ', ' } else { 'none' })"
+    if ($v6) {
+        $hints.Add("Windows also asks $($v6 -join ', ') over IPv6 - usually the modem, passing on the ISP's answer - even with another resolver set for IPv4.")
+    }
 }
 try {
     $info = Invoke-RestMethod -Uri 'https://ipinfo.io/json' -TimeoutSec 6
@@ -207,6 +213,50 @@ if ($ours.Count -gt 0 -and -not $listener) {
 }
 if (-not ($rules | Where-Object { $_.Namespace -eq '.playbattlegrounds.com' })) {
     Say 'No rule for .playbattlegrounds.com - this machine is not unblocking PUBG (old app, profile not loaded yet, or unblocking off).'
+}
+
+# ---------------------------------------------------------------- loopback DNS
+# 2026-10-02, FPT: the service's resolver never received its own test query in 10 s, on 0.3.7 and on the new build
+# alike, while the same code answers in under 300 ms elsewhere. Something on that machine swallows UDP to port 53
+# on loopback - a security suite's DNS filter, a network optimiser, another DNS proxy. These say which.
+Section 'Port 53 on this machine'
+Get-NetUDPEndpoint -LocalPort 53 -ErrorAction SilentlyContinue | ForEach-Object {
+    $p = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue
+    Say "  udp $($_.LocalAddress):53 - $($p.ProcessName) ($($_.OwningProcess)) $($p.Path)"
+}
+$av = @(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction SilentlyContinue | ForEach-Object { $_.displayName })
+Say "Security software: $(if ($av) { $av -join ', ' } else { 'none reported' })"
+$suspects = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.ProcessName -match 'kaspersky|avp|eset|ekrn|bitdefender|vsserv|bdagent|avast|avg|norton|mcafee|sophos|adguard|dnscrypt|acrylic|nextdns|cfos|netlimiter|killer|dragon|lagofast|gearup|exitlag|wtfast|noping|outfox|haste|warp'
+} | Select-Object -ExpandProperty ProcessName -Unique
+Say "Network or security processes running: $(if ($suspects) { $suspects -join ', ' } else { 'none recognised' })"
+
+function Test-LoopbackUdp([int]$port) {
+    $listener = $null; $sender = $null
+    try {
+        $listener = New-Object Net.Sockets.UdpClient (New-Object Net.IPEndPoint ([Net.IPAddress]::Parse('127.0.0.57'), $port))
+        $listener.Client.ReceiveTimeout = 2000
+        $sender = New-Object Net.Sockets.UdpClient
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        [void]$sender.Send([byte[]](1, 2, 3, 4), 4, '127.0.0.57', $port)
+        $from = New-Object Net.IPEndPoint ([Net.IPAddress]::Any, 0)
+        [void]$listener.Receive([ref]$from)
+        return "arrived in $($sw.ElapsedMilliseconds) ms"
+    } catch {
+        $m = $_.Exception
+        while ($m.InnerException) { $m = $m.InnerException }
+        return "NOT RECEIVED: $($m.Message)"
+    } finally {
+        if ($listener) { $listener.Close() }
+        if ($sender) { $sender.Close() }
+    }
+}
+$u53 = Test-LoopbackUdp 53
+$uCtl = Test-LoopbackUdp 53530
+Say "UDP to 127.0.0.57:53   : $u53"
+Say "UDP to 127.0.0.57:53530: $uCtl  (control - 5353 is mDNS and taken)"
+if ($u53 -like 'NOT*' -and $uCtl -like 'arrived*') {
+    $hints.Add('A datagram to port 53 on loopback never arrives while one to another port does - something on this machine intercepts DNS (see the security software and processes above). That is why the unblock resolver cannot answer.')
 }
 
 # ---------------------------------------------------------------- names
@@ -284,6 +334,8 @@ if (Test-Path $log) {
     Get-Content $log -Tail 4000 -ErrorAction SilentlyContinue |
         Where-Object { $_ -match 'nblock|NRPT|poison|resolver|encrypted|Loaded the pushed profile|Profiles updated' } |
         Select-Object -Last 60 | ForEach-Object { Say "  $_" }
+    Section 'The service log, last 120 lines as written'
+    Get-Content $log -Tail 120 -ErrorAction SilentlyContinue | ForEach-Object { Say "  $_" }
 } else {
     Say "  no log at $log (or no permission - run PowerShell as Administrator)"
 }
