@@ -240,9 +240,32 @@ function Get-GameTcp {
     return @(Get-NetTCPConnection -OwningProcess $ids -ErrorAction SilentlyContinue |
         Where-Object { $_.RemoteAddress -notin @('0.0.0.0', '::', '127.0.0.1', '::1') })
 }
+$firstLookAt = Get-Date
 $tcpFirst = Get-GameTcp
 Start-Sleep -Seconds 5
 $tcpSecond = Get-GameTcp
+
+# 2026-10-03, FPT: the black screen came on LEAVING a match, after the two looks above were taken in the lobby - the
+# moment that mattered was never seen. So the game is watched for a while longer, every 2 s, and what it opened, kept
+# retrying or dropped is told as a timeline. Enter ends it early.
+$watchSeconds = 90
+$tcpSamples = New-Object System.Collections.Generic.List[object]
+$tcpSamples.Add([pscustomobject]@{ At = 0; Conns = $tcpFirst })
+$tcpSamples.Add([pscustomobject]@{ At = 5; Conns = $tcpSecond })
+if (-not $NoWait) {
+    Write-Host ''
+    Write-Host "Dang theo doi ket noi cua game trong $watchSeconds giay. Neu man den hien ra luc THOAT TRAN: thoat tran ngay bay gio." -ForegroundColor Yellow
+    Write-Host '(Bam Enter de dung som.)'
+    $watchStart = Get-Date
+    while (((Get-Date) - $watchStart).TotalSeconds -lt $watchSeconds) {
+        Start-Sleep -Seconds 2
+        Note-GamePids
+        $tcpSamples.Add([pscustomobject]@{ At = [int](5 + ((Get-Date) - $watchStart).TotalSeconds); Conns = Get-GameTcp })
+        try { if ([Console]::KeyAvailable -and [Console]::ReadKey($true).Key -eq 'Enter') { break } } catch { }
+    }
+    Write-Host 'Dang kiem tra, mat khoang 1-2 phut...'
+}
+$watchEnded = Get-Date
 
 # The game's questions, from the log - event 3008 is a query completed: name, type, status, results.
 $gameQueries = New-Object System.Collections.Generic.List[object]
@@ -420,7 +443,9 @@ if (-not $isAdmin) {
         $st = if ($statusText.ContainsKey($last.Status)) { $statusText[$last.Status] } else { "status $($last.Status)" }
         $got = if ($ips.Count -gt 0) { $ips -join ',' } else { $st }
         $claimed = Test-Claimed $g.Name
-        Say "  $($g.Name)  [$($last.Process), asked $($g.Count)x, $(if ($claimed) { 'unblocked by the app' } else { 'NOT unblocked' })] -> $got$(if ($alias) { "  (via $alias)" })"
+        $times = @($g.Group | Sort-Object Time | ForEach-Object { $_.Time.ToString('HH:mm:ss') } | Select-Object -Unique)
+        $when = if ($times.Count -gt 3) { "$($times[0])..$($times[-1])" } else { $times -join ',' }
+        Say "  $($g.Name)  [$($last.Process), asked $($g.Count)x at $when, $(if ($claimed) { 'unblocked by the app' } else { 'NOT unblocked' })] -> $got$(if ($alias) { "  (via $alias)" })"
         if ($claimed -or $asked -ge 40) { continue }
         $asked++
         $ia = if ($isp) { Resolve-Isp $g.Name $isp } else { $null }
@@ -465,6 +490,40 @@ if ($tcpAll.Count -eq 0) {
         if ($owners[$ip] -match ' CN$' -and $two.Count -ge 3) {
             $hints.Add("The game holds $($two.Count) connections to ${ip}:$port ($who, $($owners[$ip])) - a server in China, slow from Vietnam; a CDN that maps this line there would explain a long Initializing.")
         }
+    }
+}
+
+# ---------------------------------------------------------------- the watch, as a timeline
+# One line per server the game talked to during the watch: when it first and last showed, how many connections at
+# most, and the states seen in order. A server that only appears after the match ended, or that ends SynSent, is
+# where the game was stuck.
+Section "The game's TCP over the watch (every 2 s, $($tcpSamples[-1].At) s in all; seconds from the first look at $($firstLookAt.ToString('HH:mm:ss')))"
+$timeline = @{}
+foreach ($sample in $tcpSamples) {
+    foreach ($g in (@($sample.Conns) | Group-Object RemoteAddress, RemotePort)) {
+        $key = "$($g.Group[0].RemoteAddress):$($g.Group[0].RemotePort)"
+        if (-not $timeline.ContainsKey($key)) {
+            $timeline[$key] = [pscustomobject]@{ Ip = $g.Group[0].RemoteAddress; First = $sample.At; Last = $sample.At; Most = 0
+                States = New-Object System.Collections.Generic.List[string]; Ports = @{} }
+        }
+        $t = $timeline[$key]
+        $t.Last = $sample.At
+        $t.Most = [Math]::Max($t.Most, $g.Count)
+        foreach ($c in $g.Group) { $t.Ports[[int]$c.LocalPort] = $true }
+        $st = ($g.Group | Group-Object State | Sort-Object Name | ForEach-Object { "$($_.Count) $($_.Name)" }) -join '+'
+        if ($t.States.Count -eq 0 -or $t.States[-1] -ne $st) { $t.States.Add("${st}@$($sample.At)") }
+    }
+}
+if ($timeline.Count -eq 0) { Say '  no TCP connections from the game during the watch' }
+$end = $tcpSamples[-1].At
+foreach ($t in ($timeline.Values | Sort-Object First, Ip)) {
+    $key = ($timeline.GetEnumerator() | Where-Object { $_.Value -eq $t }).Key
+    $who = if ($ipName.ContainsKey($t.Ip)) { $ipName[$t.Ip] } else { '?' }
+    $gone = if ($t.Last -lt $end) { "gone after $($t.Last)" } else { 'still open' }
+    Say "  $key  [$who]  seen $($t.First)-$($t.Last) s, $gone, up to $($t.Most) at once, $($t.Ports.Count) local port(s)"
+    Say "      $($t.States -join ' -> ')"
+    if ($t.States[-1] -match 'SynSent' -and $t.Last -eq $end) {
+        $hints.Add("At the end of the watch the game was still trying $key ($who) with no answer (SynSent).")
     }
 }
 

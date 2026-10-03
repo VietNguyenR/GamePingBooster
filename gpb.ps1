@@ -123,13 +123,25 @@ function Add-VsWhereToPath {
 # `./gpb release` rehearses the whole CI build on this machine before a tag is pushed: a rehearsal
 # that stopped the booster somebody is playing through, and replaced its binaries with a build from a
 # scratch checkout, would be a strange price for checking a release.
+#
+# The native compiler (ilc) has crashed twice on this machine on 2026-10-02/03 - exit -1073741819 and -1073740286,
+# an access violation and a fail-fast inside the tool, never a compile error - and both times the same publish went
+# through once the build servers left over from earlier builds were shut down. So they are shut down first, and a
+# failed publish is retried once after shutting them down again, said out loud, before it counts as failed.
 function Invoke-AotPublish {
     Add-VsWhereToPath
     Say "Native AOT publish"
-    & dotnet publish (Join-Path $client 'src\GamePingBooster.Service\GamePingBooster.Service.csproj') -c Release -r win-x64 --nologo
-    if ($LASTEXITCODE -ne 0) { throw "publish failed" }
-    & dotnet publish (Join-Path $client 'src\GamePingBooster.App\GamePingBooster.App.csproj') -c Release -r win-x64 --nologo
-    if ($LASTEXITCODE -ne 0) { throw "publish failed" }
+    & dotnet build-server shutdown | Out-Null
+    foreach ($project in 'GamePingBooster.Service', 'GamePingBooster.App') {
+        $csproj = Join-Path $client "src\$project\$project.csproj"
+        & dotnet publish $csproj -c Release -r win-x64 --nologo
+        if ($LASTEXITCODE -ne 0) {
+            Warn "$project publish failed (exit $LASTEXITCODE) - shutting the build servers down and trying once more"
+            & dotnet build-server shutdown | Out-Null
+            & dotnet publish $csproj -c Release -r win-x64 --nologo
+            if ($LASTEXITCODE -ne 0) { throw "publish failed" }
+        }
+    }
 }
 
 # Git's bash, found through git itself rather than through PATH. A bare `bash` on Windows 11 is

@@ -85,15 +85,6 @@ public sealed class UnblockEntry
     /// Absent or empty routes nothing.
     /// </summary>
     [JsonPropertyName("tunnel")] public List<string> Tunnel { get; set; } = [];
-
-    /// <summary>
-    /// Names the resolver answers "does not exist" at once, whatever their real records say - for a name the game asks
-    /// that only ever hangs from Vietnam. PUBG asks prod-live-front.playbattlegrounds.com.cn, its lobby's mainland China
-    /// mirror on a Tencent CDN with no node outside China; from a Vietnamese line it does not answer, and a game that
-    /// picked it sat on a black screen or "Initializing..." (2026-10-03). Told it does not exist, the game uses the
-    /// global lobby. Matched like <see cref="Scope"/>, and need not be under it. Absent or empty refuses nothing.
-    /// </summary>
-    [JsonPropertyName("refuse")] public List<string> Refuse { get; set; } = [];
 }
 
 public sealed class GameEntry

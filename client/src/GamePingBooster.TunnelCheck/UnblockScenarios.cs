@@ -36,10 +36,6 @@ internal static partial class Program
 {
     private static int UnblockMain(string[] args)
     {
-        Console.WriteLine("Refused names (offline):");
-        RefusedNamesAreAnsweredAsNotExisting().GetAwaiter().GetResult();
-
-        Console.WriteLine();
         Console.WriteLine("Cut by name, told from not TLS at all (offline):");
         CutByNameIsToldFromNoTls().GetAwaiter().GetResult();
 
@@ -52,7 +48,11 @@ internal static partial class Program
         AskedAsAnotherNetworkTheCdnNamesItsLocalEdges().GetAwaiter().GetResult();
 
         Console.WriteLine();
-        Console.WriteLine("The tunnel only where the line cuts the name, listed or not:");
+        Console.WriteLine("A listed name goes through the tunnel on every line:");
+        ACutNameGoesThroughTheTunnelUnasked("prod-live-front.playbattlegrounds.com").GetAwaiter().GetResult();
+
+        Console.WriteLine();
+        Console.WriteLine("An unlisted name, only where the line cuts it:");
         foreach (var name in args.Length > 0 ? args : ["prod-live-cfentry.playbattlegrounds.com", "store.steampowered.com"])
         {
             if (ACutNameGoesThroughTheTunnelUnasked(name).GetAwaiter().GetResult()) break;
@@ -223,32 +223,18 @@ internal static partial class Program
     {
         var lines = new ConcurrentQueue<string>();
         var routes = new RecordingRoutes();
-        // The tunnel list prod carries since 2026-10-02, cfentry and images included.
+        // The tunnel list prod carries on 2026-10-03.
         var pubg = new UnblockApp("pubg", "PUBG", ["playbattlegrounds.com", "pubg.com"], [], "prod-live-front.playbattlegrounds.com",
-            ["prod-live-front.playbattlegrounds.com", "prod-live-cfentry.playbattlegrounds.com", "prod-live-images.playbattlegrounds.com"]);
+            ["prod-live-front.playbattlegrounds.com", "prod-live-xenuine.playbattlegrounds.com", "acrt-pcprod.acs.pubg.com", "accounts.pubg.com"]);
         var steam = new UnblockApp("steam", "Steam", ["steampowered.com", "steamcommunity.com"], [], "steamcommunity.com");
         var policy = new UnblockPolicy([pubg, steam], "tunnelcheck");
 
+        // Asked straight, not over 127.0.0.53:53 - a running service holds that port, and the answer is the same code.
         var resolver = new LocalResolver([IPAddress.Parse("8.8.8.8")], policy, lines.Enqueue, routes);
         try
         {
-            resolver.Start();
-        }
-        catch (InvalidOperationException ex)
-        {
-            Console.WriteLine($"  SKIP  {ex.Message}");
-            await resolver.DisposeAsync();
-            return true;
-        }
-
-        try
-        {
-            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            await socket.SendToAsync(DnsWire.BuildQuery(7, name), SocketFlags.None,
-                new IPEndPoint(LocalResolver.ListenAddress, 53), limit.Token);
-            var buffer = new byte[DnsWire.MaxUdpMessage];
-            await socket.ReceiveFromAsync(buffer, SocketFlags.None, new IPEndPoint(IPAddress.Any, 0), limit.Token);
+            await resolver.AnswerAsync(DnsWire.BuildQuery(7, name), limit.Token);
         }
         finally
         {
@@ -257,9 +243,16 @@ internal static partial class Program
 
         foreach (var line in lines) Console.WriteLine($"        {line}");
 
+        if (pubg.RoutesThroughTunnel(name))
+        {
+            Check($"{name} is listed, so it was handed to the tunnel without asking the line", routes.Names.Contains(name),
+                "a listed name was answered from the line");
+            return true;
+        }
+
         if (!lines.Any(l => l.Contains($"the line cuts {name} by name", StringComparison.Ordinal)))
         {
-            Check($"{name} stays off the tunnel - this line lets it through{(pubg.RoutesThroughTunnel(name) ? ", listed or not" : "")}",
+            Check($"{name} is not listed and this line lets it through, so it stays off the tunnel",
                 routes.Names.IsEmpty, $"routed for {string.Join(", ", routes.Names.Distinct())}");
             return false;
         }

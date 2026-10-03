@@ -224,7 +224,7 @@ internal sealed class UnblockDns : IAsyncDisposable
     /// <summary>Everything about a policy that changes what the machine does, as one string.</summary>
     private static string Signature(UnblockPolicy policy) =>
         string.Join("|", policy.Apps.Select(a =>
-            $"{a.Id}:{string.Join(",", a.Scope)}:{string.Join(",", a.Excluded)}:{a.Canary}:{string.Join(",", a.Tunnel ?? [])}:{string.Join(",", a.Refuse ?? [])}"));
+            $"{a.Id}:{string.Join(",", a.Scope)}:{string.Join(",", a.Excluded)}:{a.Canary}:{string.Join(",", a.Tunnel ?? [])}"));
 
     /// <summary>Returns null when it worked, or a sentence for the user when it did not.</summary>
     public async Task<string?> EnableAsync(CancellationToken ct)
@@ -373,7 +373,7 @@ internal sealed class UnblockDns : IAsyncDisposable
                 .Concat(policy.Apps.Select(a => a.Canary))
                 .Concat(policy.Apps.SelectMany(a => a.Tunnel ?? []))
                 .Select(n => n.Trim().TrimEnd('.').ToLowerInvariant())
-                .Where(n => n.Contains('.') && policy.ClaimedBy(n) is not null && policy.RefusedBy(n) is null)
+                .Where(n => n.Contains('.') && policy.ClaimedBy(n) is not null)
                 .Distinct(StringComparer.Ordinal)
                 .Take(MaxWarm)
                 .ToList();
