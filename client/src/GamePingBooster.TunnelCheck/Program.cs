@@ -64,6 +64,7 @@ internal static partial class Program
             ("Side by side: a match starting stops every relay", AStopReasonStopsEveryRelay),
             ("Side by side: a skipped way", ASkippedWayIsNotMeasured),
             ("Side by side: the budget", TheBudgetStillEndsIt),
+            ("Unblock: refused names are answered as not existing", RefusedNamesAreAnsweredAsNotExisting),
         };
 
         foreach (var (title, run) in scenarios)

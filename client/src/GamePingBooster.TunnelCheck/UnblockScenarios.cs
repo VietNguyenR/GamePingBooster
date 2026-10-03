@@ -36,6 +36,10 @@ internal static partial class Program
 {
     private static int UnblockMain(string[] args)
     {
+        Console.WriteLine("Refused names (offline):");
+        RefusedNamesAreAnsweredAsNotExisting().GetAwaiter().GetResult();
+
+        Console.WriteLine();
         Console.WriteLine("Cut by name, told from not TLS at all (offline):");
         CutByNameIsToldFromNoTls().GetAwaiter().GetResult();
 

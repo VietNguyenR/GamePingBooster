@@ -12,8 +12,16 @@ internal sealed record UnblockApp(
     IReadOnlyList<string> Scope,
     IReadOnlyList<string> Excluded,
     string Canary,
-    IReadOnlyList<string>? Tunnel = null)
+    IReadOnlyList<string>? Tunnel = null,
+    IReadOnlyList<string>? Refuse = null)
 {
+    /// <summary>
+    /// Whether the resolver answers <paramref name="name"/> "does not exist" at once - see ProfileUnblock.Refuse. Not
+    /// limited to claimed names: the name it was made for, prod-live-front.playbattlegrounds.com.cn, is under no
+    /// claimed suffix, and that is why its namespace joins <see cref="Namespaces"/>.
+    /// </summary>
+    public bool Refuses(string name) => (Refuse ?? []).Any(suffix => Matches(name, suffix));
+
     /// <summary>
     /// Whether <paramref name="name"/> is in the profile's tunnel list: claimed, and under one of its tunnel names.
     /// See ProfileUnblock.Tunnel.
@@ -52,7 +60,8 @@ internal sealed record UnblockApp(
         RoutesThroughTunnel(name) || (Claims(name) && !DownloadHosts.Any(host => Matches(name, host)));
 
     /// <summary>The namespaces the Windows policy is given. A leading dot is what NRPT expects for a suffix.</summary>
-    public IReadOnlyList<string> Namespaces => [.. Scope.Select(s => "." + s)];
+    /// Refused names are in it too: Windows has to ask this resolver about them for it to say they do not exist.
+    public IReadOnlyList<string> Namespaces => [.. Scope.Concat(Refuse ?? []).Select(s => "." + s).Distinct()];
 
     /// <summary>
     /// True when this service should answer the name over encrypted DNS rather than pass it to the
@@ -152,13 +161,23 @@ internal sealed record UnblockPolicy(IReadOnlyList<UnblockApp> Apps, string Sour
                 continue;
             }
 
+            // A refused canary would make the fix fail its own proof every time - the self-test asks for the canary and
+            // would be told it does not exist - and unblocking would never turn on. Dropped, and said.
+            var refuse = Clean(entry.Refuse ?? []);
+            foreach (var bad in refuse.Where(r => canary == r || canary.EndsWith("." + r, StringComparison.Ordinal)).ToList())
+            {
+                log($"Unblock: '{entry.Id}' refuses {bad}, which covers its canary {canary} - not refusing it.");
+                refuse.Remove(bad);
+            }
+
             apps.Add(new UnblockApp(
                 entry.Id.Trim(),
                 string.IsNullOrWhiteSpace(entry.Name) ? entry.Id.Trim() : entry.Name.Trim(),
                 scope,
                 Clean(entry.Excluded),
                 canary,
-                Clean(entry.Tunnel)));
+                Clean(entry.Tunnel),
+                refuse));
         }
 
         return apps.Count == 0
@@ -172,6 +191,17 @@ internal sealed record UnblockPolicy(IReadOnlyList<UnblockApp> Apps, string Sour
         foreach (var app in Apps)
         {
             if (app.Claims(name)) return app;
+        }
+
+        return null;
+    }
+
+    /// <summary>The service that refuses this name, or null.</summary>
+    public UnblockApp? RefusedBy(string name)
+    {
+        foreach (var app in Apps)
+        {
+            if (app.Refuses(name)) return app;
         }
 
         return null;

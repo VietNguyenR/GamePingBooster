@@ -79,6 +79,10 @@ internal sealed class LocalResolver : IAsyncDisposable
     private Task? _tcpLoop;
 
     private long _scoped;
+    private long _refused;
+
+    /// <summary>Refused names already said in the log, so a game asking twenty times leaves one line.</summary>
+    private readonly ConcurrentDictionary<string, byte> _refusedSaid = new();
     private long _forwarded;
     private long _failed;
 
@@ -110,6 +114,9 @@ internal sealed class LocalResolver : IAsyncDisposable
         _cut.TryGetValue(name, out var until) && until > DateTimeOffset.UtcNow;
 
     public long ScopedQueries => Interlocked.Read(ref _scoped);
+
+    /// <summary>Questions answered "does not exist" because the profile refuses the name.</summary>
+    public long RefusedQueries => Interlocked.Read(ref _refused);
 
     /// <summary>Addresses dropped for failing a TLS handshake - see <see cref="WorkingEdges"/>.</summary>
     public long RejectedEdges => _edges.Rejected;
@@ -276,9 +283,23 @@ internal sealed class LocalResolver : IAsyncDisposable
     /// classify something is not a reason to break it, and the ISP's resolver understands forms
     /// this code does not.
     /// </summary>
-    private async Task<byte[]> AnswerAsync(byte[] query, CancellationToken ct)
+    internal async Task<byte[]> AnswerAsync(byte[] query, CancellationToken ct)
     {
         var id = DnsWire.ReadId(query);
+
+        // Refused names first, and for every record type: "does not exist" for A but an answer for AAAA or HTTPS
+        // would send the game to the very address it was being kept from. See ProfileUnblock.Refuse.
+        if (DnsWire.TryReadQuestion(query, out var refusedName, out _) && _policy.RefusedBy(refusedName) is not null)
+        {
+            Interlocked.Increment(ref _refused);
+            if (_refusedSaid.TryAdd(refusedName, 0))
+            {
+                _log($"Unblock: {refusedName} is refused by the profile - answered as not existing, so the game uses another.");
+            }
+            var refusal = DnsWire.BuildFailure(query, 3);
+            DnsWire.WriteId(refusal, id);
+            return refusal;
+        }
 
         if (DnsWire.TryReadQuestion(query, out var name, out var type) && _policy.ClaimedBy(name) is { } app)
         {

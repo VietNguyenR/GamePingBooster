@@ -3,9 +3,15 @@
     Why a game or Steam will not load on a player's machine: DNS block, the unblock fix, or something else.
 
 .DESCRIPTION
-    Read-only. Changes nothing on the machine. Writes one text file to the Desktop to send back.
+    Changes one thing, for a few minutes: it turns on Windows' DNS client log (Microsoft-Windows-DNS-Client/Operational)
+    when it is off, and turns it back off once read. Nothing else on the machine is changed. Writes one text file to the
+    Desktop to send back.
 
-    Run it while the game sits on the black screen, or right after:
+    It first asks for the problem to be reproduced: open PUBG (again, when the log was off - its first questions are the
+    ones that matter), wait until it is stuck, press Enter. Then it reads the questions the game's own processes asked
+    and the game's TCP connections - never another program's. -NoWait skips the wait and reads whatever is there.
+
+    Run it while the game sits on the black screen or on "Initializing...", or right after:
 
         powershell -ExecutionPolicy Bypass -File Check-Unblock.ps1
 
@@ -24,11 +30,15 @@
         (rules with no listener make every name "No such host" - a dev service once left 17 behind)
       - whether the lobby's real edge completes a TLS handshake (SNI filtering) and its TCP 40002 connects
       - the app's own unblock lines from the service log
+      - added 2026-10-03, for PUBG stuck on "Initializing..." on FPT Ha Noi with every name above answering fine:
+        the names the GAME asked Windows (from the DNS client log), each one's ISP answer against encrypted DNS when
+        the app does not unblock it, and the game's TCP connections - which showed 17 of them to a Tencent Cloud CDN
+        node in Hebei, China, that no list here had ever named
 
-    It contains the machine's public IP and ISP, its DNS servers and the app's log lines about DNS. No password,
-    no licence token, no pre-shared key.
+    It contains the machine's public IP and ISP, its DNS servers, the app's log lines about DNS, and the names and
+    servers the game's processes used. No password, no licence token, no pre-shared key, no other program's traffic.
 #>
-param([string]$OutDir = [Environment]::GetFolderPath('Desktop'))
+param([string]$OutDir = [Environment]::GetFolderPath('Desktop'), [switch]$NoWait)
 
 $ErrorActionPreference = 'Continue'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -162,6 +172,94 @@ $others = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessN
     ForEach-Object { "$($_.ProcessName)($($_.Id))" }
 Say "Running: $($others -join ', ')"
 
+# ---------------------------------------------------------------- watching the game
+# The game's own questions and connections, caught while it is stuck. Read for these processes only: the DNS client
+# log holds every program's lookups, and a browser's are none of this file's business.
+$gameRx = '^(TslGame|TslGame_BE|ExecPubg|BEService|steam)$'
+$gamePids = @{}
+function Note-GamePids {
+    Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match $gameRx } |
+        ForEach-Object { $gamePids[[int]$_.Id] = $_.ProcessName }
+}
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
+$dnsLogName = 'Microsoft-Windows-DNS-Client/Operational'
+$dnsLogTurnedOn = $false
+$watchFrom = (Get-Date).AddMinutes(-15)
+if ($isAdmin) {
+    $dnsLog = Get-WinEvent -ListLog $dnsLogName -ErrorAction SilentlyContinue
+    if ($dnsLog -and -not $dnsLog.IsEnabled) {
+        wevtutil sl $dnsLogName /e:true 2>$null | Out-Null
+        $dnsLogTurnedOn = $true
+        $watchFrom = Get-Date
+    }
+}
+Note-GamePids
+if (-not $NoWait) {
+    Write-Host ''
+    if ($dnsLogTurnedOn) {
+        Write-Host 'Da bat nhat ky DNS cua Windows (se tat lai khi xong).' -ForegroundColor Yellow
+        Write-Host 'Bay gio: TAT PUBG neu dang mo, MO LAI, doi toi khi ket o "Initializing..." (hoac man den), roi bam Enter o cua so nay.' -ForegroundColor Yellow
+    } else {
+        Write-Host 'Mo PUBG (neu chua mo), doi toi khi ket o "Initializing..." (hoac man den), roi bam Enter o cua so nay.' -ForegroundColor Yellow
+    }
+    if (-not $isAdmin) {
+        Write-Host '(Cua so nay khong chay quyen Administrator - khong doc duoc nhat ky DNS. Nen chay lai bang "Run as administrator".)' -ForegroundColor Red
+    }
+    Write-Host '(Tu tiep tuc sau 5 phut.)'
+    $deadline = (Get-Date).AddMinutes(5)
+    $console = $true
+    while ((Get-Date) -lt $deadline) {
+        Note-GamePids
+        try {
+            if ([Console]::KeyAvailable -and [Console]::ReadKey($true).Key -eq 'Enter') { break }
+        } catch { $console = $false; break }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $console) { [void](Read-Host 'Bam Enter khi da ket'); Note-GamePids }
+
+    # 2026-10-03: the first run of this check was Entered with PUBG still open from before the log went on - and a
+    # black screen happens in the game's first seconds, so the section that would have shown it came back empty.
+    $fresh = @(Get-Process TslGame -ErrorAction SilentlyContinue | Where-Object { $_.StartTime -gt $watchFrom })
+    if ($dnsLogTurnedOn -and $fresh.Count -eq 0 -and $console) {
+        Write-Host 'PUBG chua duoc MO LAI sau khi bat nhat ky - phan ten mien se trong. Tat PUBG, mo lai, doi toi khi ket roi bam Enter (bam Enter ngay de bo qua).' -ForegroundColor Red
+        $deadline = (Get-Date).AddMinutes(5)
+        while ((Get-Date) -lt $deadline) {
+            Note-GamePids
+            try { if ([Console]::KeyAvailable -and [Console]::ReadKey($true).Key -eq 'Enter') { break } } catch { break }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    Write-Host 'Dang kiem tra, mat khoang 1-2 phut...'
+}
+
+# Twice, five seconds apart: a connection that is SynSent both times, or a local port that changed, is the game retrying.
+function Get-GameTcp {
+    $ids = @($gamePids.Keys | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    if ($ids.Count -eq 0) { return @() }
+    return @(Get-NetTCPConnection -OwningProcess $ids -ErrorAction SilentlyContinue |
+        Where-Object { $_.RemoteAddress -notin @('0.0.0.0', '::', '127.0.0.1', '::1') })
+}
+$tcpFirst = Get-GameTcp
+Start-Sleep -Seconds 5
+$tcpSecond = Get-GameTcp
+
+# The game's questions, from the log - event 3008 is a query completed: name, type, status, results.
+$gameQueries = New-Object System.Collections.Generic.List[object]
+if ($isAdmin) {
+    $events = @(Get-WinEvent -FilterHashtable @{ LogName = $dnsLogName; Id = 3008; StartTime = $watchFrom } -ErrorAction SilentlyContinue)
+    foreach ($e in $events) {
+        if (-not $gamePids.ContainsKey([int]$e.ProcessId)) { continue }
+        $d = @{}
+        foreach ($field in ([xml]$e.ToXml()).Event.EventData.Data) { $d[$field.Name] = $field.'#text' }
+        $gameQueries.Add([pscustomobject]@{
+            Time = $e.TimeCreated; Process = $gamePids[[int]$e.ProcessId]; Name = [string]$d['QueryName']
+            Type = [string]$d['QueryType']; Status = [string]$d['QueryStatus']; Results = [string]$d['QueryResults']
+        })
+    }
+}
+if ($dnsLogTurnedOn) { wevtutil sl $dnsLogName /e:false 2>$null | Out-Null }
+
 # ---------------------------------------------------------------- the line
 Section 'The line'
 $route = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1
@@ -288,6 +386,88 @@ if ((Test-Sinkhole $results['www.microsoft.com'].Win.Addresses)) {
     $hints.Add('Even www.microsoft.com does not resolve - DNS on this machine is broken in general, not blocked.')
 }
 
+# ---------------------------------------------------------------- what the game asked
+# Every name the game's processes looked up while it was reproduced. One the app unblocks is answered by it; one it
+# does not goes to the ISP's resolver as it always did - and is asked again here straight from the ISP and from
+# encrypted DNS, because a name the ISP lies about and nobody listed is exactly what this script could not see before.
+function Test-Claimed([string]$name) {
+    foreach ($r in $rules) {
+        $ns = [string]$r.Namespace
+        if ($ns.StartsWith('.') -and ($name -eq $ns.Substring(1) -or $name.EndsWith($ns))) { return $true }
+    }
+    return $false
+}
+$statusText = @{ '0' = 'ok'; '9003' = 'NXDOMAIN'; '9501' = 'no record'; '1460' = 'timed out'; '9002' = 'server failure'; '87' = 'no answer logged' }
+$ipName = @{}
+$procs = @($gamePids.Values | Sort-Object -Unique)
+Section "What the game asked Windows ($(if ($procs) { $procs -join ', ' } else { 'no game process seen' }))"
+if (-not $isAdmin) {
+    Say '  not read - the DNS client log needs PowerShell run as Administrator'
+} elseif ($gameQueries.Count -eq 0) {
+    Say "  no lookups by the game in the DNS client log since $($watchFrom.ToString('HH:mm:ss')) - was PUBG opened after the log was turned on?"
+} else {
+    foreach ($q in $gameQueries) {
+        foreach ($m in [regex]::Matches($q.Results, '(\d{1,3}\.){3}\d{1,3}')) { if (-not $ipName.ContainsKey($m.Value)) { $ipName[$m.Value] = $q.Name } }
+    }
+    $asked = 0
+    foreach ($g in ($gameQueries | Where-Object { $_.Type -in @('1', '28') } | Group-Object Name | Sort-Object Name)) {
+        # Windows answers both families in one go and logs the outcome on one of them - measured: the AAAA event
+        # carried the addresses (as ::ffff:a.b.c.d) and the NXDOMAIN, the A event only status 87 and nothing else.
+        $useful = @($g.Group | Where-Object { $_.Status -ne '87' } | Sort-Object Time)
+        $last = if ($useful.Count -gt 0) { $useful[-1] } else { @($g.Group | Sort-Object Time)[-1] }
+        $ips = @([regex]::Matches($last.Results, '(\d{1,3}\.){3}\d{1,3}') | ForEach-Object { $_.Value } | Select-Object -Unique)
+        $alias = [regex]::Match($last.Results, 'type:\s*5\s+([^;]+)').Groups[1].Value
+        $st = if ($statusText.ContainsKey($last.Status)) { $statusText[$last.Status] } else { "status $($last.Status)" }
+        $got = if ($ips.Count -gt 0) { $ips -join ',' } else { $st }
+        $claimed = Test-Claimed $g.Name
+        Say "  $($g.Name)  [$($last.Process), asked $($g.Count)x, $(if ($claimed) { 'unblocked by the app' } else { 'NOT unblocked' })] -> $got$(if ($alias) { "  (via $alias)" })"
+        if ($claimed -or $asked -ge 40) { continue }
+        $asked++
+        $ia = if ($isp) { Resolve-Isp $g.Name $isp } else { $null }
+        $da = Resolve-Doh $g.Name
+        if ($ia) { Say "      ISP $isp : $($ia.Text)   encrypted DNS: $($da.Text)" }
+        if ($ia -and (Test-Sinkhole $ia.Addresses) -and $da.Addresses.Count -gt 0) {
+            Say '      -> the ISP lies about this name, and the app does not unblock it'
+            $hints.Add("The game asked $($g.Name), which the ISP answers with $($ia.Text) and the app does not unblock - add its suffix to the PUBG unblock row.")
+        } elseif ((Test-Sinkhole $ips) -and $da.Addresses.Count -gt 0) {
+            Say "      -> Windows gave the game nothing usable ($got) while encrypted DNS has an address"
+        }
+    }
+}
+
+# ---------------------------------------------------------------- what the game is connected to
+Section 'What the game is connected to (TCP, two looks 5 s apart)'
+$tcpAll = @($tcpFirst) + @($tcpSecond)
+if ($tcpAll.Count -eq 0) {
+    Say '  no TCP connections from the game (not running?)'
+} else {
+    $owners = @{}
+    $remotes = @($tcpAll | ForEach-Object { $_.RemoteAddress } | Select-Object -Unique)
+    foreach ($ip in ($remotes | Select-Object -First 15)) {
+        try {
+            $o = Invoke-RestMethod -Uri "https://ipinfo.io/$ip/json" -TimeoutSec 5
+            $owners[$ip] = "$($o.org), $($o.city) $($o.country)"
+        } catch { $owners[$ip] = '?' }
+    }
+    foreach ($g in ($tcpAll | Group-Object RemoteAddress, RemotePort | Sort-Object Name)) {
+        $ip = $g.Group[0].RemoteAddress
+        $port = $g.Group[0].RemotePort
+        $one = @($tcpFirst | Where-Object { $_.RemoteAddress -eq $ip -and $_.RemotePort -eq $port })
+        $two = @($tcpSecond | Where-Object { $_.RemoteAddress -eq $ip -and $_.RemotePort -eq $port })
+        $states = { param($set) ($set | Group-Object State | ForEach-Object { "$($_.Count) $($_.Name)" }) -join ', ' }
+        $newPorts = @($two | Where-Object { $_.LocalPort -notin @($one | ForEach-Object { $_.LocalPort }) }).Count
+        $who = if ($ipName.ContainsKey($ip)) { $ipName[$ip] } else { '?' }
+        Say "  ${ip}:$port  first: $(& $states $one)  then: $(& $states $two)$(if ($newPorts) { "  ($newPorts new)" })"
+        Say "      name: $who   owner: $($owners[$ip])"
+        if (@($one | Where-Object State -eq 'SynSent').Count -gt 0 -and @($two | Where-Object State -eq 'SynSent').Count -gt 0) {
+            $hints.Add("The game keeps trying ${ip}:$port ($who) and gets no answer - SynSent on both looks.")
+        }
+        if ($owners[$ip] -match ' CN$' -and $two.Count -ge 3) {
+            $hints.Add("The game holds $($two.Count) connections to ${ip}:$port ($who, $($owners[$ip])) - a server in China, slow from Vietnam; a CDN that maps this line there would explain a long Initializing.")
+        }
+    }
+}
+
 # ---------------------------------------------------------------- the lobby's road
 Section 'PUBG lobby: does the real edge answer?'
 $frontIps = @()
@@ -334,6 +514,15 @@ if (Test-Path $log) {
     Get-Content $log -Tail 4000 -ErrorAction SilentlyContinue |
         Where-Object { $_ -match 'nblock|NRPT|poison|resolver|encrypted|Loaded the pushed profile|Profiles updated' } |
         Select-Object -Last 60 | ForEach-Object { Say "  $_" }
+    # 2026-10-03: a black screen with every name above fine was the client moving relay while the lobby loaded -
+    # connected for another game, PUBG started, home moved and the adapter was re-addressed under the lobby's flows.
+    Section 'Relay moves and game switches (last 400 log lines)'
+    $moves = @(Get-Content $log -Tail 400 -ErrorAction SilentlyContinue |
+        Where-Object { $_ -match 'is not used for|\bMoved from|moving the routes over|Detected .* running|configured the virtual adapter|Reconnect' })
+    if ($moves.Count -eq 0) { Say '  none' } else { $moves | Select-Object -Last 25 | ForEach-Object { Say "  $_" } }
+    if ($moves -match 'is not used for') {
+        $hints.Add('The app moved relay when the game started (the relay it connected with does not carry this game) - that cuts the lobby''s connections while it loads. Pick the game in the app before connecting, then reconnect.')
+    }
     Section 'The service log, last 120 lines as written'
     Get-Content $log -Tail 120 -ErrorAction SilentlyContinue | ForEach-Object { Say "  $_" }
 } else {
