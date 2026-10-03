@@ -64,6 +64,7 @@ internal static partial class Program
             ("Side by side: a match starting stops every relay", AStopReasonStopsEveryRelay),
             ("Side by side: a skipped way", ASkippedWayIsNotMeasured),
             ("Side by side: the budget", TheBudgetStillEndsIt),
+            ("The in-game ping measures the match, not the lobby", TheGameServerIsTheUdpOne),
         };
 
         foreach (var (title, run) in scenarios)

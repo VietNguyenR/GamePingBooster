@@ -158,6 +158,11 @@ internal sealed class GameServerTally
     /// over a session - 22361 then 26524 on the same host, in the 2026-09-10 capture - and three
     /// flows to one server must not lose to one flow somewhere else.
     ///
+    /// UDP only. Every game served plays its match over UDP, while the lobby's TCP rides the same
+    /// tunnel since lobby routes: on 2026-10-03 PUBG's lobby out-sent a quiet match, and the
+    /// in-game ping read the lobby front (80-90 ms) and the launcher API in the US (about 290 ms)
+    /// as "the game server". Null while only TCP is seen - in a lobby there is no match to measure.
+    ///
     /// Unlike <see cref="Format"/> this does not clear. It is read once a second, and a reader
     /// that emptied the tally would blind the 30-second log line that shares it.
     /// </summary>
@@ -172,6 +177,7 @@ internal sealed class GameServerTally
                 var byAddress = new Dictionary<uint, long>();
                 foreach (var (key, flow) in _flows)
                 {
+                    if (key.Protocol != 17) continue;
                     byAddress.TryGetValue(key.Address, out var running);
                     byAddress[key.Address] = running + flow.Packets;
                 }
