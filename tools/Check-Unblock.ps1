@@ -46,7 +46,46 @@ $out = Join-Path $OutDir "gpb-unblock-check-$stamp.txt"
 $lines = New-Object System.Collections.Generic.List[string]
 $hints = New-Object System.Collections.Generic.List[string]
 
-function Say([string]$text) { $lines.Add($text); Write-Host $text }
+# ---------------------------------------------------------------- sealing
+# Everything from the first domain name or IPv4 address in a line on is sealed for the operator - the same scheme as the
+# service log (client LogSeal.cs): a random 64-byte key (AES-256-CBC + HMAC-SHA256, mac cut to 16 bytes), wrapped with
+# RSA-OAEP (SHA-1) for the operator's public key below and written once as a [key:] line. CBC and SHA-1 because this
+# runs on Windows PowerShell 5.1, whose .NET Framework has neither AesGcm nor OAEP-SHA256. Only the operator can read
+# the names and addresses back; the rest of the report stays as it is.
+$sealModulus = 'zD+EArW9LeU6g9/o1JOuZ+M8nvZ969eFztqxzeij6Kw503pb13oB4bjMQgYaPYTolleBP08yo6n1f3gAURJgKQWEFVNvnZiNTx6tANRx5td5T/DkXk7xZhEOoJ59hGaEK4OX4gLMALzJ2/g340JZZq+c7k4uWy4uPrZMpyu4rAysmXBjcb4en4VXqQzRVcQ8CzJiTR2zqdJjyne5j8Bv1ajJmzyTjN9Zah3+Cjnat9O2Oe4KBB18nim0+pxY5eP1FUowTTE9jpLYQp+wiJeS4fVFWO2fkYR3jtWNOacIkoGLJkY9vOugryRLpQOLTA7N2IGq9iCoOoNMiz1o7/VW5bLs7JMNpRa8lStt66aQTnxCj4Hgb9vd3Mbg6o1yNVxYhbCey7ygwcTzTMQu+zZUpq+s3rQvM70WCJSXHAKl8NkG3AbulfDSFutmRXtfZeGEbWckXdVm5so3xgj4oPtsLv/iae1aFzPUz5EYzRmXRDK3gywHo4KCgzOVYRhxD4ut'
+$sealKey = New-Object byte[] 64
+[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($sealKey)
+$sealRsa = New-Object Security.Cryptography.RSACryptoServiceProvider
+$sealParams = New-Object Security.Cryptography.RSAParameters
+$sealParams.Modulus = [Convert]::FromBase64String($sealModulus)
+$sealParams.Exponent = [Convert]::FromBase64String('AQAB')
+$sealRsa.ImportParameters($sealParams)
+$sealWrapped = $sealRsa.Encrypt($sealKey, $true)
+$sealId = -join ([Security.Cryptography.SHA256]::Create().ComputeHash($sealWrapped)[0..3] | ForEach-Object { $_.ToString('x2') })
+$sealRx = New-Object Text.RegularExpressions.Regex('\b(?:\d{1,3}\.){3}\d{1,3}\b|\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{1,62}\b',
+    [Text.RegularExpressions.RegexOptions]'IgnoreCase, CultureInvariant')
+$sealNotNames = @('exe', 'dll', 'json', 'jsonl', 'log', 'txt', 'csv', 'ps1', 'cs', 'sys', 'config', 'xml', 'ini', 'dat', 'tmp', 'bak', 'md', 'pdb', 'msi', 'zip')
+function Seal-Text([string]$text) {
+    if (-not $text) { return $text }
+    $at = -1
+    foreach ($m in $sealRx.Matches($text)) {
+        $v = $m.Value
+        if ([char]::IsDigit($v[0]) -and ($v.Split('.').Count -eq 4)) { $at = $m.Index; break }
+        if ($sealNotNames -notcontains $v.Substring($v.LastIndexOf('.') + 1).ToLowerInvariant()) { $at = $m.Index; break }
+    }
+    if ($at -lt 0) { return $text }
+    $aes = [Security.Cryptography.Aes]::Create()
+    $aes.Key = [byte[]]$sealKey[0..31]
+    $aes.GenerateIV()
+    $plain = [Text.Encoding]::UTF8.GetBytes($text.Substring($at))
+    $body = $aes.CreateEncryptor().TransformFinalBlock($plain, 0, $plain.Length)
+    $head = [byte[]]($aes.IV + $body)
+    $mac = (New-Object Security.Cryptography.HMACSHA256 (, [byte[]]$sealKey[32..63])).ComputeHash($head)
+    $sealed = [byte[]]($head + $mac[0..15])
+    return $text.Substring(0, $at) + "[enc:${sealId}:" + [Convert]::ToBase64String($sealed) + ']'
+}
+
+function Say([string]$text) { $s = Seal-Text $text; $lines.Add($s); Write-Host $s }
 function Section([string]$title) { Say ''; Say "== $title"; }
 
 # A certificate callback in C#: a PowerShell script block cannot run on the thread SslStream calls it from.
@@ -157,6 +196,7 @@ function Test-Tcp([string]$ip, [int]$port) {
 }
 
 Say "Game Ping Booster unblock check - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')"
+Say "--- log key k=$sealId [key:$([Convert]::ToBase64String($sealWrapped))] ---"
 
 # ---------------------------------------------------------------- the app
 Section 'The app'
@@ -582,6 +622,11 @@ if (Test-Path $log) {
     if ($moves -match 'is not used for') {
         $hints.Add('The app moved relay when the game started (the relay it connected with does not carry this game) - that cuts the lobby''s connections while it loads. Pick the game in the app before connecting, then reconnect.')
     }
+    # The service seals its names and addresses too, under its own key per run; the lines quoted here may have come
+    # without the line carrying it, so every key the log holds travels with the report.
+    Section 'The service log''s keys'
+    $logKeys = @(Get-Content $log -ErrorAction SilentlyContinue | Where-Object { $_ -match '\[key:' } | Select-Object -Last 20)
+    if ($logKeys.Count -eq 0) { Say '  none (a client before sealing)' } else { $logKeys | ForEach-Object { Say "  $_" } }
     Section 'The service log, last 120 lines as written'
     Get-Content $log -Tail 120 -ErrorAction SilentlyContinue | ForEach-Object { Say "  $_" }
 } else {

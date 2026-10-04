@@ -88,11 +88,25 @@ public static class Program
         // Console mode writes to both: the terminal for the developer watching it now, and the
         // file so a session can still be read back afterwards.
         using var fileLog = new FileLog();
+#if DEBUG
+        // A developer's build shows the terminal in the clear - `./gpb dev`. The file is sealed either way.
         void Log(string message)
         {
             Console.WriteLine(message);
             fileLog.Write(message);
         }
+#else
+        // A release build can be run with --console by anyone with admin rights, so the terminal is sealed like the
+        // file (LogSeal) - otherwise --console would be the way round it.
+        var consoleSeal = new LogSeal();
+        Console.WriteLine(consoleSeal.KeyLine);
+        void Log(string message)
+        {
+            Console.WriteLine(consoleSeal.Seal(message));
+            if (consoleSeal.KeyLineDue()) Console.WriteLine(consoleSeal.KeyLine);
+            fileLog.Write(message);
+        }
+#endif
 
         if (fileLog.Path is not null) Console.WriteLine($"Logging to {fileLog.Path}");
 

@@ -101,9 +101,17 @@ internal sealed class LocalResolver : IAsyncDisposable
         {
             // Routed before they are probed, so the probe crosses the tunnel the way the program's connection will.
             _tunnelEdges = new WorkingEdges(_doh, log, beforeProbe: (name, addresses) => routes.Route(name, addresses),
-                preferPlayersNetwork: true, memory: memory?.Tunnel, background: _stopping.Token);
+                preferPlayersNetwork: true, memory: memory?.Tunnel, background: _stopping.Token,
+                keepFresh: TunnelKeepFresh, keepFreshFor: name => _policy.ClaimedBy(name)?.RoutesThroughTunnel(name) == true);
         }
     }
+
+    /// <summary>
+    /// How old an answer for a name on the profile's tunnel list may get - and its TTL. Thirty seconds: the edges such a
+    /// name has (PUBG's mainland China lobby mirror above all) can stop answering within minutes, and a game handed a
+    /// dead one waits on it for seconds before trying the next. See WorkingEdges._keepFresh.
+    /// </summary>
+    internal static readonly TimeSpan TunnelKeepFresh = TimeSpan.FromSeconds(30);
 
     /// <summary>Sent through the tunnel for a cut a short while ago - see <see cref="_cut"/>.</summary>
     private bool TunnelledForCut(string name) =>
@@ -336,7 +344,7 @@ internal sealed class LocalResolver : IAsyncDisposable
                 if (edges is not null)
                 {
                     Interlocked.Increment(ref _scoped);
-                    var built = DnsWire.BuildAnswer(query, edges, WorkingEdges.AnswerTtlSeconds);
+                    var built = DnsWire.BuildAnswer(query, edges, viaTunnel ? _tunnelEdges!.AnswerTtl : WorkingEdges.AnswerTtlSeconds);
                     DnsWire.WriteId(built, id);
                     return built;
                 }

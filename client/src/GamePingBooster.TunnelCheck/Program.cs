@@ -65,6 +65,8 @@ internal static partial class Program
             ("Side by side: a skipped way", ASkippedWayIsNotMeasured),
             ("Side by side: the budget", TheBudgetStillEndsIt),
             ("The in-game ping measures the match, not the lobby", TheGameServerIsTheUdpOne),
+            ("Unblock: tunnel names are kept fresh", OnlyAskedListedNamesAreKeptFresh),
+            ("The log seals names and addresses", NamesAndAddressesAreSealed),
         };
 
         foreach (var (title, run) in scenarios)

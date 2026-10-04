@@ -157,9 +157,36 @@ internal sealed class WorkingEdges
     /// </summary>
     private readonly bool _preferPlayersNetwork;
 
+    /// <summary>
+    /// Set on the tunnel's instance: how fresh a verdict for a name <see cref="_keepFreshFor"/> accepts is kept, by
+    /// probing it again in the background before it ages, whether or not anything asks. Null keeps the plain
+    /// <see cref="Lifetime"/> and probes only when asked.
+    ///
+    /// Why: PUBG asks prod-live-front.playbattlegrounds.com.cn only when a match ends, so the verdict it got was as old
+    /// as the match, answered stale (see <see cref="UsableFor"/>), and Tencent's mainland edges come and go within
+    /// minutes. Viettel, 2026-10-04: handed a 4-minute-old edge that no longer answered, the game sat on SynSent for
+    /// 12 s before trying the next address - the whole of a 10-15 s wait after every match.
+    /// </summary>
+    private readonly TimeSpan? _keepFresh;
+
+    /// <summary>Which names are kept fresh - the profile's tunnel list, read per pass because the policy can change.</summary>
+    private readonly Func<string, bool>? _keepFreshFor;
+
+    /// <summary>When a client last asked for each name: a name nobody asked for in <see cref="KeepFreshAfterAsked"/> is let age.</summary>
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _lastAsked = new();
+
+    /// <summary>Longer than a match, so the name the game asks only when a match ends is still being kept fresh then.</summary>
+    private static readonly TimeSpan KeepFreshAfterAsked = TimeSpan.FromMinutes(60);
+
+    private readonly TimeSpan _lifetime;
+
+    /// <summary>The TTL for an answer from this instance: a verdict kept fresh is no use if Windows caches it longer.</summary>
+    public uint AnswerTtl => _keepFresh is { } fresh ? (uint)fresh.TotalSeconds : AnswerTtlSeconds;
+
     public WorkingEdges(DohUpstream doh, Action<string> log, Action<string, IReadOnlyList<IPAddress>>? beforeProbe = null,
         Action<string>? onFiltered = null, Func<string, bool>? tunnelFirst = null, bool inCountry = false,
-        bool preferPlayersNetwork = false, Memory? memory = null, CancellationToken background = default)
+        bool preferPlayersNetwork = false, Memory? memory = null, CancellationToken background = default,
+        TimeSpan? keepFresh = null, Func<string, bool>? keepFreshFor = null)
     {
         memory ??= new Memory();
         _known = memory.Known;
@@ -173,6 +200,56 @@ internal sealed class WorkingEdges
         _beforeProbe = beforeProbe;
         _onFiltered = onFiltered;
         _tunnelFirst = tunnelFirst;
+        _keepFresh = keepFreshFor is null ? null : keepFresh;
+        _keepFreshFor = keepFreshFor;
+        _lifetime = _keepFresh ?? Lifetime;
+        if (_keepFresh is { } every && background.CanBeCanceled) _ = Task.Run(() => KeepFreshAsync(every, background));
+    }
+
+    /// <summary>
+    /// Every third of <paramref name="every"/>: each listed name a client asked for within the hour, whose verdict is
+    /// about to age, is probed again quietly - so the next answer is never much older than <paramref name="every"/>.
+    /// Says so only when the edge handed out first changes, which is the one the game would have tried.
+    /// </summary>
+    private async Task KeepFreshAsync(TimeSpan every, CancellationToken ct)
+    {
+        var tick = every / 3;
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(tick, ct).ConfigureAwait(false);
+                KeepFreshPass(tick, ct);
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    /// <summary>One pass of <see cref="KeepFreshAsync"/>; returns how many names it started probing. Internal for TunnelCheck.</summary>
+    internal int KeepFreshPass(TimeSpan tick, CancellationToken ct)
+    {
+        var started = 0;
+        var now = DateTimeOffset.UtcNow;
+        foreach (var (name, entry) in _known)
+        {
+            if (entry.Addresses.Length == 0 || entry.Expires - now > tick) continue;
+            if (!_lastAsked.TryGetValue(name, out var asked) || now - asked > KeepFreshAfterAsked) continue;
+            if (_keepFreshFor?.Invoke(name) != true || _inFlight.ContainsKey(name)) continue;
+
+            var was = entry.Addresses;
+            var task = _inFlight.GetOrAdd(name, key => Task.Run(() => ProbeAsync(key, null, ct, quiet: true)));
+            started++;
+            _ = task.ContinueWith(t =>
+            {
+                _inFlight.TryRemove(new KeyValuePair<string, Task<IPAddress[]>>(name, task));
+                if (t.Status != TaskStatus.RanToCompletion) { _ = t.Exception; return; }
+                if (t.Result.Length > 0 && !t.Result[0].Equals(was[0]))
+                {
+                    _log($"Unblock: kept {name} fresh - {was[0]} no longer leads, now {string.Join(", ", t.Result.Select(a => a.ToString()))}.");
+                }
+            }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        }
+        return started;
     }
 
     public long Probed => Interlocked.Read(ref _probed);
@@ -199,6 +276,7 @@ internal sealed class WorkingEdges
     /// </param>
     public async Task<IPAddress[]?> ForAsync(string name, string? sibling, CancellationToken ct)
     {
+        if (_keepFresh is not null) _lastAsked[name] = DateTimeOffset.UtcNow;
         if (_known.TryGetValue(name, out var entry))
         {
             var now = DateTimeOffset.UtcNow;
@@ -240,9 +318,10 @@ internal sealed class WorkingEdges
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
-    private async Task<IPAddress[]> ProbeAsync(string name, string? sibling, CancellationToken ct)
+    private async Task<IPAddress[]> ProbeAsync(string name, string? sibling, CancellationToken ct, bool quiet = false)
     {
         var clock = Stopwatch.StartNew();
+        Action<string> say = quiet ? _ => { } : _log;
 
         // Every upstream, not the first one that answers. The whole failure this fixes was one
         // resolver naming a filtered edge while another named a clean one, so asking only the
@@ -271,7 +350,7 @@ internal sealed class WorkingEdges
 
         if (tried.Length == 0)
         {
-            _log($"Unblock: no encrypted resolver returned an address for {name}.");
+            say($"Unblock: no encrypted resolver returned an address for {name}.");
             return [];
         }
 
@@ -375,7 +454,7 @@ internal sealed class WorkingEdges
             var preferred = EdgeRanking.PreferPlayersNetwork(usable, a => a.Address, playersNetwork);
             if (preferred.Count < usable.Length)
             {
-                _log($"Unblock: {name} through the tunnel - kept {string.Join(", ", preferred.Select(a => a.Address))}, " +
+                say($"Unblock: {name} through the tunnel - kept {string.Join(", ", preferred.Select(a => a.Address))}, " +
                      $"named for this network, over {usable.Length - preferred.Count} edge(s) named for somewhere else.");
                 usable = [.. preferred];
             }
@@ -404,7 +483,7 @@ internal sealed class WorkingEdges
                 : tunnelFirst
                     ? $"{tried.Length} from the resolvers, none borrowed - the tunnel can carry its own"
                     : $"{tried.Length} from the resolvers, {borrowed.Length} borrowed, {_pool.Count} in the pool";
-            _log($"Unblock: no address for {name} completed a handshake ({clock.ElapsedMilliseconds} ms) - " +
+            say($"Unblock: no address for {name} completed a handshake ({clock.ElapsedMilliseconds} ms) - " +
                  $"{why}. Relaying the upstream answer unchanged for {NoEdgeLifetime.TotalMinutes:0} min.");
             var until = DateTimeOffset.UtcNow.Add(NoEdgeLifetime);
             _known[name] = new Entry([], until, DateTimeOffset.UtcNow.Add(UsableFor));
@@ -424,14 +503,14 @@ internal sealed class WorkingEdges
 
         if (!good.Any(tried.Contains) && inCountry.Length == 0)
         {
-            _log($"Unblock: no address the upstreams gave for {name} worked in time on this line; " +
+            say($"Unblock: no address the upstreams gave for {name} worked in time on this line; " +
                  $"answering with {good.Length} edge(s) proven for another name of the same service " +
                  $"({clock.ElapsedMilliseconds} ms).");
         }
 
         if (bad > 0 || abandoned > 0 || slower > 0)
         {
-            _log($"Unblock: {name} -> {string.Join(", ", good.Select(a => a.ToString()))} " +
+            say($"Unblock: {name} -> {string.Join(", ", good.Select(a => a.ToString()))} " +
                  $"({bad} address(es) dropped for failing a TLS handshake, {abandoned} still pending " +
                  $"and abandoned, {slower} working but clearly slower than the fastest " +
                  $"({usable.Min(a => a.Task.Result.Elapsed).TotalMilliseconds:0} ms handshake), {clock.ElapsedMilliseconds} ms).");
@@ -439,7 +518,7 @@ internal sealed class WorkingEdges
 
         // Every working edge goes in the pool, slower ones included: the pool is a shortlist for
         // other names to probe, and they are ranked again for the name that borrows them.
-        var expires = DateTimeOffset.UtcNow.Add(Lifetime);
+        var expires = DateTimeOffset.UtcNow.Add(_lifetime);
         foreach (var a in working) _pool[a.Address] = expires;
 
         _known[name] = new Entry(good, expires, DateTimeOffset.UtcNow.Add(UsableFor));

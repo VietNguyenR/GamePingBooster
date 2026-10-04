@@ -40,6 +40,15 @@ internal sealed class FileLog : IDisposable
     private int _dropped;
     private bool _disposed;
 
+    /// <summary>
+    /// Seals the names and addresses in each line - see <see cref="LogSeal"/>. On the writer thread, never the caller's:
+    /// a regex and an AES block are cheap, but the pump threads log too and must not pay for it.
+    /// </summary>
+    private readonly LogSeal _seal = new();
+
+    /// <summary>The key line goes in before the next line: at the top of a run, of a rolled-over file, and every few hundred sealed lines.</summary>
+    private bool _keyLineDue = true;
+
     /// <summary>Where the log is being written, for the startup banner. Null if unavailable.</summary>
     public string? Path { get; }
 
@@ -107,7 +116,7 @@ internal sealed class FileLog : IDisposable
                       $"the log queue filled up{Environment.NewLine}{line}"
                     : line;
 
-                Append(text);
+                Append(SealLine(text));
             }
         }
         catch (Exception)
@@ -117,13 +126,37 @@ internal sealed class FileLog : IDisposable
         }
     }
 
+    /// <summary>
+    /// Each line's message - what follows the timestamp - sealed from its first name or address on. A line made of two
+    /// (the dropped-lines warning) is sealed line by line.
+    /// </summary>
+    private string SealLine(string text)
+    {
+        const int stamp = 25;   // "yyyy-MM-dd HH:mm:ss.fff" and two spaces
+        var lines = text.Split(Environment.NewLine);
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            lines[i] = line.Length > stamp && line[stamp - 2] == ' ' && line[stamp - 1] == ' '
+                ? line[..stamp] + _seal.Seal(line[stamp..])
+                : _seal.Seal(line);
+        }
+        if (_seal.KeyLineDue()) _keyLineDue = true;
+        return string.Join(Environment.NewLine, lines);
+    }
+
     private void Append(string text)
     {
         try
         {
-            RotateIfNeeded();
+            if (RotateIfNeeded()) _keyLineDue = true;
             using var stream = new FileStream(_currentPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
             using var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            if (_keyLineDue)
+            {
+                writer.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}  {_seal.KeyLine}");
+                _keyLineDue = false;
+            }
             writer.WriteLine(text);
             // Flush to the OS after every batch so a crashed or killed service still leaves the
             // lines that led up to it - which are the only ones anybody ever wants.
@@ -140,12 +173,12 @@ internal sealed class FileLog : IDisposable
     /// Rolls the file over once it grows past the cap, keeping a few generations. Without this a
     /// reconnect loop on a bad night would fill the user's disk.
     /// </summary>
-    private void RotateIfNeeded()
+    private bool RotateIfNeeded()
     {
         try
         {
             var info = new FileInfo(_currentPath);
-            if (!info.Exists || info.Length < MaxFileBytes) return;
+            if (!info.Exists || info.Length < MaxFileBytes) return false;
 
             var oldest = System.IO.Path.Combine(_directory, $"gpb-service.{KeepFiles}.log");
             if (File.Exists(oldest)) File.Delete(oldest);
@@ -157,11 +190,13 @@ internal sealed class FileLog : IDisposable
                 if (File.Exists(from)) File.Move(from, to, overwrite: true);
             }
             File.Move(_currentPath, System.IO.Path.Combine(_directory, "gpb-service.1.log"), overwrite: true);
+            return true;
         }
         catch (IOException)
         {
             // Someone has the file open (the user reading it, most likely). Keep appending to the
             // current one; it will roll over on a later attempt.
+            return false;
         }
     }
 
