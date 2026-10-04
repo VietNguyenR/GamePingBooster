@@ -209,7 +209,7 @@ internal sealed class WorkingEdges
     /// <summary>
     /// Every third of <paramref name="every"/>: each listed name a client asked for within the hour, whose verdict is
     /// about to age, is probed again quietly - so the next answer is never much older than <paramref name="every"/>.
-    /// Says so only when the edge handed out first changes, which is the one the game would have tried.
+    /// Says so only when an edge is dropped - see <see cref="KeepAsync"/>.
     /// </summary>
     private async Task KeepFreshAsync(TimeSpan every, CancellationToken ct)
     {
@@ -237,19 +237,51 @@ internal sealed class WorkingEdges
             if (_keepFreshFor?.Invoke(name) != true || _inFlight.ContainsKey(name)) continue;
 
             var was = entry.Addresses;
-            var task = _inFlight.GetOrAdd(name, key => Task.Run(() => ProbeAsync(key, null, ct, quiet: true)));
+            var task = _inFlight.GetOrAdd(name, key => Task.Run(() => KeepAsync(key, was, ct)));
             started++;
             _ = task.ContinueWith(t =>
             {
                 _inFlight.TryRemove(new KeyValuePair<string, Task<IPAddress[]>>(name, task));
-                if (t.Status != TaskStatus.RanToCompletion) { _ = t.Exception; return; }
-                if (t.Result.Length > 0 && !t.Result[0].Equals(was[0]))
-                {
-                    _log($"Unblock: kept {name} fresh - {was[0]} no longer leads, now {string.Join(", ", t.Result.Select(a => a.ToString()))}.");
-                }
+                _ = t.Exception;   // observed: a pass cut short by the resolver stopping is not an error
             }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
         return started;
+    }
+
+    /// <summary>
+    /// Keeps a verdict by checking ITS addresses again, in the order they were handed out, and dropping only the ones
+    /// that stopped answering. A whole new probe - new addresses from the resolvers - only when none of them answers.
+    ///
+    /// Why not a new probe every time: each one asks the resolvers again, and a CDN names different edges on every ask;
+    /// each new edge is routed before it is probed, and unblock routes are never taken back mid-connection (a program
+    /// may still hold a connection through one). On 2026-10-04 the first version did exactly that every 30 s, reached
+    /// RouteManager.MaxUnblockRoutes eleven minutes after connect, and from then on PUBG's lobby front was answered
+    /// with an edge that could not be routed and left over the player's own line - "Initializing..." for a minute.
+    /// Re-ordering by a few milliseconds also flipped the first edge every pass for nothing. The addresses checked here
+    /// are already routed, so a kept verdict adds no route.
+    /// </summary>
+    private async Task<IPAddress[]> KeepAsync(string name, IPAddress[] was, CancellationToken ct)
+    {
+        var checks = was.Select(a => EdgeProber.WorksAsync(a, name, ct)).ToArray();
+        var works = await Task.WhenAll(checks).ConfigureAwait(false);
+        IPAddress[] still = [.. was.Where((_, i) => works[i])];
+
+        if (still.Length > 0)
+        {
+            var now = DateTimeOffset.UtcNow;
+            _known[name] = new Entry(still, now.Add(_lifetime), now.Add(UsableFor));
+            if (still.Length < was.Length)
+            {
+                _log($"Unblock: kept {name} fresh - dropped {string.Join(", ", was.Except(still))}, which stopped answering; " +
+                     $"still {string.Join(", ", still.Select(a => a.ToString()))}.");
+            }
+            return still;
+        }
+
+        var fresh = await ProbeAsync(name, null, ct, quiet: true).ConfigureAwait(false);
+        _log($"Unblock: kept {name} fresh - none of {string.Join(", ", was.Select(a => a.ToString()))} answered any more; " +
+             (fresh.Length > 0 ? $"now {string.Join(", ", fresh.Select(a => a.ToString()))}." : "nothing else did either, relaying the upstream answer."));
+        return fresh;
     }
 
     public long Probed => Interlocked.Read(ref _probed);

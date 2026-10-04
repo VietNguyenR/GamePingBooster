@@ -73,6 +73,9 @@ internal sealed class RouteManager
     /// </summary>
     public const int MaxUnblockRoutes = 128;
 
+    private int _unblockRefused;
+    private long _unblockRefusedSaidAt = -1;
+
     // Every /32 pinned to the physical adapter - the home relay, every way into a relay a tunnel is on, the other
     // tunnels' relays - and who wants each. One address is often several of these at once (vn-1 home and the entry
     // vn-1-sg), and it stays pinned until the last of them lets go. See PinLedger.
@@ -418,7 +421,16 @@ internal sealed class RouteManager
                 if (_lobbyPrefixes.Contains(prefix) || _installedPrefixes.Contains(prefix)) continue;
                 if (_unblockPrefixes.Count + fresh.Count >= MaxUnblockRoutes)
                 {
-                    _log?.Invoke($"Routing: {MaxUnblockRoutes} unblock routes already - {prefix} stays on the normal path.");
+                    // Said the first time and then every few minutes with the count: on 2026-10-04 it was said 327 times
+                    // in 40 minutes and buried the lines around it.
+                    _unblockRefused++;
+                    var nowMs = Environment.TickCount64;
+                    if (_unblockRefusedSaidAt < 0 || nowMs - _unblockRefusedSaidAt > 300_000)
+                    {
+                        _log?.Invoke($"Routing: {MaxUnblockRoutes} unblock routes already - {prefix} stays on the normal path " +
+                                     $"({_unblockRefused} address(es) left off so far this connection).");
+                        _unblockRefusedSaidAt = nowMs;
+                    }
                     break;
                 }
                 fresh.Add(prefix);
@@ -441,6 +453,8 @@ internal sealed class RouteManager
             Timed($"removed {_unblockPrefixes.Count} unblock route(s)",
                 () => DeleteRoutes(_unblockPrefixes, tunInterfaceIndex));
             _unblockPrefixes.Clear();
+            _unblockRefused = 0;
+            _unblockRefusedSaidAt = -1;
         }
     }
 
