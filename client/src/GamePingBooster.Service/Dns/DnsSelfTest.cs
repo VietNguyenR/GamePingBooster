@@ -193,7 +193,7 @@ internal static class DnsSelfTest
 
             Console.WriteLine($"  {host,-24} {string.Join(", ", parsed.Addresses.Take(3))}  ({route})");
 
-            if (expectScoped && parsed.Addresses.Any(IPAddress.IsLoopback))
+            if (expectScoped && parsed.Addresses.Any(a => IPAddress.IsLoopback(a) && !SplitProxy.IsOurs(a)))
             {
                 Console.Error.WriteLine($"  {host,-24} came back as loopback - that is the ISP's answer, not DoH's");
                 return 1;

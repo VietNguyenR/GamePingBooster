@@ -66,6 +66,15 @@ internal static partial class Program
             ("Side by side: the budget", TheBudgetStillEndsIt),
             ("The in-game ping measures the match, not the lobby", TheGameServerIsTheUdpOne),
             ("Unblock: tunnel names are kept fresh", OnlyAskedListedNamesAreKeptFresh),
+            ("Split: the hello is two records of the same hello", () => { TheSplitHelloIsTwoRecordsOfTheSameHello(); return Task.CompletedTask; }),
+            ("Split: a filter reading the first record is passed", TheSplitHelloPassesAFilterThatReadsTheFirstRecord),
+            ("Split: a filter that reassembles sends it through the tunnel", AFilterThatReassemblesSendsTheConnectionThroughTheTunnel),
+            ("Split: the resolver answers a listed name with the proxy", TheResolverAnswersAListedSplitNameWithTheProxy),
+            ("Unblock: a line answer leaves out addresses routed into the tunnel", () => { ALineAnswerLeavesOutTunnelledAddresses(); return Task.CompletedTask; }),
+            ("Unblock: a tunnel route leaves out addresses the line is using", ARouteAskedLaterLeavesTheLinesAddressesAlone),
+            ("Split: a connection over the line that stops is ended", () => { AStoppedPathIsToldFromAThinkingServer(); return Task.CompletedTask; }),
+            ("Split: a reset while the game waits sends the name to the relay", AResetWhileTheGameWaitsSendsTheNameToTheRelay),
+            ("A move closes what rode the old relay", ConnectionsFromTheOldAddressAreFoundAndClosed),
             ("The log seals names and addresses", NamesAndAddressesAreSealed),
         };
 

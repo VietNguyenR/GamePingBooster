@@ -655,6 +655,8 @@ internal sealed class UnblockDns : IAsyncDisposable
 
         foreach (var address in addresses)
         {
+            // The split's own address is our answer, not a sinkhole - see SplitProxy.
+            if (SplitProxy.IsOurs(address)) return false;
             if (IPAddress.IsLoopback(address)) continue;
             if (address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any)) continue;
 

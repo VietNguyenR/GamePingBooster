@@ -5,6 +5,7 @@ using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Paths;
 using GamePingBooster.Core.Profiles;
 using GamePingBooster.Core.Quality;
+using GamePingBooster.Service.Native;
 using GamePingBooster.Service.Network;
 
 namespace GamePingBooster.Service.Tunnel;
@@ -21,8 +22,10 @@ namespace GamePingBooster.Service.Tunnel;
 /// score since 2026-09-29: a path losing packets counts <see cref="RelayLoss.PenaltyMs"/> slower, so a relay the
 /// line has started losing packets into is left for a clean one, and a clean one is never left for a lossy one.
 ///
-/// What the move costs: the lobby's TCP connection, which leaves through the new relay's address and has to
-/// be opened again. The owner disconnects and reconnects in the PUBG lobby daily and it comes back by itself.
+/// What the move costs: every TCP connection that rode the old relay - the lobby's, Steam's - which cannot go on
+/// through another relay's address and has to be opened again. They are closed on purpose right after the swap
+/// (<see cref="CloseWhatRodeIt"/>): left alone they fail silently, and on 2026-10-06 PUBG sat on "Initializing..."
+/// for over two minutes after a move made 5 s after a training match ended.
 ///
 /// THE WORST CASE is the next match starting while the tunnel is being swapped, and three things keep it
 /// away. The move is made only if the tunnel has carried NO game UDP since the gap began, checked again right
@@ -416,6 +419,9 @@ internal sealed partial class TunnelEngine
             LogGameDestinations(old);
             var previousIp = old.Session.ClientIp;
 
+            // Read before the swap, while they are still the old relay's: closed once the new tunnel runs.
+            var riding = TcpConnections.From(previousIp);
+
             // The new relay's /32 goes in BEFORE the old tunnel stops, while nothing depends on it yet. It
             // replaces the old relay's pin, which is harmless now: the old tunnel sends one Disconnect and no more.
             routes.PinRelayRoute(ParseEndpoint(target.Endpoint).Address);
@@ -426,6 +432,7 @@ internal sealed partial class TunnelEngine
             StopUplink();
             _tunnel = null;
             old.Dispose();
+            var closedNote = CloseWhatRodeIt(riding);
 
             _relay = target;
             _path = path is null ? null : new PathMeasurement(path.RegionName, Math.Max(0, nowMs - chosen.LegOneMs), path.Landmark);
@@ -454,7 +461,7 @@ internal sealed partial class TunnelEngine
                 FallBackToAutomatic(previous.Name, gameName);
                 _log($"Moved from {previous.Name} [{previous.Id}], which is not used for {gameName}, to {target.Name} " +
                      $"[{target.Id}] in {swapMs:F0} ms - {nowMs:F0} ms {(path is null ? "to the relay" : $"to {path.RegionName}")}. " +
-                     "The lobby reconnects on its own.");
+                     closedNote);
                 SetState(TunnelState.Connected, new StatusText("svc.movedForGame",
                     $"Connected to {target.Name} - {previous.Name} is not used for {gameName}",
                     target.Name, previous.Name, gameName));
@@ -463,7 +470,7 @@ internal sealed partial class TunnelEngine
 
             var saved = was - nowMs;
             _log($"Between matches: moved from {previous.Name} [{previous.Id}] to {target.Name} [{target.Id}] in {swapMs:F0} ms - " +
-                 $"{nowMs:F0} ms against {was:F0} ms to {path!.RegionName}, {saved:F0} ms faster. The lobby reconnects on its own.");
+                 $"{nowMs:F0} ms against {was:F0} ms to {path!.RegionName}, {saved:F0} ms faster. {closedNote}");
             SetState(TunnelState.Connected, new StatusText("svc.rescanMoved",
                 $"Connected to {target.Name} - moved from {previous.Name} between matches, {saved:F0} ms faster",
                 target.Name, previous.Name, saved.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)));
@@ -478,6 +485,24 @@ internal sealed partial class TunnelEngine
             await ReconnectAsync(ct).ConfigureAwait(false);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Closes the TCP connections that rode the relay just left, so each program sees its connection fail now and opens a
+    /// new one through the new relay - instead of waiting out timeouts on a path that no longer exists. Says what it did,
+    /// for the move's log line. See the class summary for the evening this was missing.
+    /// </summary>
+    /// <remarks>
+    /// Called after the old tunnel stops and BEFORE the adapter is given the new relay's address. The first version
+    /// closed them after, and on 2026-10-06 20:05 (owner's PC, sg-4 to sg-3) Windows closed none of the two - most
+    /// likely because their local address no longer existed. The error is now in the line, so the next one says why.
+    /// </remarks>
+    private static string CloseWhatRodeIt(List<TcpConnections.Row> riding)
+    {
+        if (riding.Count == 0) return "No TCP connection rode the old relay.";
+        var (closed, error) = TcpConnections.Close(riding);
+        return $"Closed {closed} of {riding.Count} TCP connection(s) that rode the old relay (the lobby, Steam), so they " +
+               "are opened again at once through the new one" + (error == 0 ? "." : $" (Windows refused the rest: error {error}).");
     }
 
     /// <summary>

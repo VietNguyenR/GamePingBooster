@@ -1,5 +1,6 @@
 using System.Net;
 using GamePingBooster.Core.Ipc;
+using GamePingBooster.Core.Native;
 using GamePingBooster.Core.Profiles;
 using GamePingBooster.Service.Dns;
 
@@ -58,6 +59,13 @@ internal sealed partial class TunnelEngine : IUnblockRoutes
             return false;
         }
     }
+
+    /// <summary>
+    /// Asks the live routing table rather than this engine's own /32 sets, which would miss game ranges and region
+    /// routes. RouteManager.GetRouteTo is no use here: it only ever names a physical gateway.
+    /// </summary>
+    public bool Tunnelled(IPAddress address) =>
+        Ready && _adapter is { } adapter && IpHelperInterop.BestInterfaceFor(address) == adapter.InterfaceIndex;
 
     /// <summary>The relays and every entry in front of them, as InstallLobbyRoutes keeps them off the tunnel.</summary>
     private List<string> RelayEndpointsToKeepOff(ProfileBundle profile)

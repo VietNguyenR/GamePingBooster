@@ -192,7 +192,10 @@ internal sealed class UnblockReporter : IDisposable
             limit.CancelAfter(TimeSpan.FromSeconds(5));
             var addresses = await System.Net.Dns.GetHostAddressesAsync(name, System.Net.Sockets.AddressFamily.InterNetwork, limit.Token)
                 .ConfigureAwait(false);
-            return addresses.Length == 0 || addresses.All(a => System.Net.IPAddress.IsLoopback(a) || a.Equals(System.Net.IPAddress.Any));
+            // The split's address is loopback and works - see SplitProxy. On 2026-10-06 a hosts line pointing the lobby at
+            // the test proxy was reported as a black screen while the lobby loaded.
+            return addresses.Length == 0 || addresses.All(a =>
+                (System.Net.IPAddress.IsLoopback(a) && !SplitProxy.IsOurs(a)) || a.Equals(System.Net.IPAddress.Any));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

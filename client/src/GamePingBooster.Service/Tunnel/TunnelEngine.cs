@@ -2786,6 +2786,11 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         var previousIp = _tunnel?.Session.ClientIp;
         var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
 
+        // The TCP connections riding this relay, read before it is let go: if the tunnel comes back on ANOTHER relay
+        // they cannot continue, and are closed so the programs open them again (CloseWhatRodeIt). Not with several
+        // tunnels - the adapter's address is theirs too, and their connections are fine.
+        List<TcpConnections.Row> riding = previousIp is null || _paths is not null ? [] : TcpConnections.From(previousIp);
+
         // Flush before the relay changes underneath it: a destinations line naming the wrong
         // relay is worse than no line, because the whole point is comparing one against another.
         if (_tunnel is not null) LogGameDestinations(_tunnel);
@@ -2905,6 +2910,12 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
 
                     // A failover to another relay brings other ways in with it, and leaves the old ones behind.
                     PinDoors();
+
+                    // Before the adapter changes address - see CloseWhatRodeIt.
+                    if (riding.Count > 0 && !RelayPaths.RelayIdOf(relay).Equals(RelayPaths.RelayIdOf(previous), StringComparison.OrdinalIgnoreCase))
+                    {
+                        _log($"Reconnecting on another relay than {previous.Name}. {CloseWhatRodeIt(riding)}");
+                    }
 
                     if (previousIp is not null && session.ClientIp.Equals(previousIp))
                     {

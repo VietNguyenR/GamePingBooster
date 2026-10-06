@@ -237,7 +237,8 @@ internal static class UnblockDiagnosis
             foreach (var a in addresses)
             {
                 if (candidates.Count >= EdgesPerName) return;
-                if (a.AddressFamily != AddressFamily.InterNetwork || Sinkhole([a])) continue;
+                // The split's address is ours, not an edge: handshaking it only reaches the proxy.
+                if (a.AddressFamily != AddressFamily.InterNetwork || Sinkhole([a]) || SplitProxy.IsOurs(a)) continue;
                 if (candidates.Any(c => c.Address.Equals(a))) continue;
                 candidates.Add((a, from));
             }
@@ -305,6 +306,7 @@ internal static class UnblockDiagnosis
         if (addresses.Count == 0) return true;
         foreach (var address in addresses)
         {
+            if (SplitProxy.IsOurs(address)) return false;
             if (IPAddress.IsLoopback(address) || address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any)) continue;
             var b = address.GetAddressBytes();
             if (b.Length == 4 && (b[0] == 10 || (b[0] == 172 && b[1] is >= 16 and <= 31) || (b[0] == 192 && b[1] == 168))) continue;

@@ -49,6 +49,9 @@ internal sealed class LocalResolver : IAsyncDisposable
     /// Null when the service runs without a tunnel to offer (the self-test).
     /// </summary>
     private readonly IUnblockRoutes? _routes;
+
+    /// <summary>The same routes, guarded: _routes is this whenever a tunnel was given. See LineGuard.</summary>
+    private readonly LineGuard? _guard;
     private readonly WorkingEdges? _tunnelEdges;
 
     /// <summary>
@@ -57,6 +60,19 @@ internal sealed class LocalResolver : IAsyncDisposable
     /// time.
     /// </summary>
     private readonly ConcurrentDictionary<string, DateTimeOffset> _cut;
+
+    /// <summary>Names, and name + address, already logged by KeepOffTheTunnel.</summary>
+    private readonly ConcurrentDictionary<string, byte> _keptOff = new();
+
+    /// <summary>
+    /// The profile's tunnel names over the line with the hello split, where the line cuts them and the split passes -
+    /// see <see cref="SplitProxy"/>. Null without a tunnel: the names it serves are the tunnel's, and the tunnel is its
+    /// fallback.
+    /// </summary>
+    private readonly SplitProxy? _split;
+
+    /// <summary>TunnelCheck only: the split, to start it without the DNS sockets.</summary>
+    internal SplitProxy? Split => _split;
 
     /// <summary>What this network taught earlier resolvers - see <see cref="EdgeMemory"/>. Null for a one-off.</summary>
     private readonly EdgeMemory? _memory;
@@ -83,8 +99,12 @@ internal sealed class LocalResolver : IAsyncDisposable
     private long _failed;
 
     public LocalResolver(IReadOnlyList<IPAddress> upstream, UnblockPolicy policy, Action<string> log,
-        IUnblockRoutes? routes = null, Action<string>? filtered = null, EdgeMemory? memory = null)
+        IUnblockRoutes? routes = null, Action<string>? filtered = null, EdgeMemory? memory = null, bool split = true,
+        Func<IReadOnlySet<IPAddress>>? openRemotes = null)
     {
+        // Every route this resolver and its split proxy ask for goes through the guard - see LineGuard.
+        if (routes is not null) routes = _guard = new LineGuard(routes, log, openRemotes);
+
         _memory = memory;
         _cut = memory?.Cut ?? new ConcurrentDictionary<string, DateTimeOffset>();
         _upstream = upstream;
@@ -103,6 +123,7 @@ internal sealed class LocalResolver : IAsyncDisposable
             _tunnelEdges = new WorkingEdges(_doh, log, beforeProbe: (name, addresses) => routes.Route(name, addresses),
                 preferPlayersNetwork: true, memory: memory?.Tunnel, background: _stopping.Token,
                 keepFresh: TunnelKeepFresh, keepFreshFor: name => _policy.ClaimedBy(name)?.RoutesThroughTunnel(name) == true);
+            if (split) _split = new SplitProxy(_doh, routes, log, memory?.Split);
         }
     }
 
@@ -165,6 +186,9 @@ internal sealed class LocalResolver : IAsyncDisposable
                 $"Could not listen on {endpoint} ({ex.SocketErrorCode}). Another DNS server is " +
                 "probably bound to port 53 on this machine.", ex);
         }
+
+        // After the DNS sockets: a split that cannot listen only leaves the tunnel names on the relay.
+        _split?.Start();
 
         _udpLoop = Task.Run(() => ServeUdpAsync(_stopping.Token));
         _tcpLoop = Task.Run(() => ServeTcpAsync(_stopping.Token));
@@ -306,6 +330,20 @@ internal sealed class LocalResolver : IAsyncDisposable
             // Without a tunnel, every name is answered exactly as before.
             if (type == DnsWire.TypeA && _memory is { } seen && seen.Seen.Count < MaxSeen) seen.Seen.TryAdd(name, 0);
 
+            // The profile's tunnel names: over the line through the proxy rather than the relay - split where the line
+            // cuts them whole, whole where it does not filter them - see SplitProxy for the order and why. A records name the proxy; AAAA is answered
+            // empty while they do, or a game preferring IPv6 would go round it, straight into the line's filter.
+            if (_split is not null && app.RoutesThroughTunnel(name) && _split.Answers(name))
+            {
+                if (type == DnsWire.TypeA || type == DnsWire.TypeAaaa)
+                {
+                    Interlocked.Increment(ref _scoped);
+                    var built = DnsWire.BuildAnswer(query, type == DnsWire.TypeA ? [SplitProxy.ListenAddress] : [], SplitProxy.AnswerTtl);
+                    DnsWire.WriteId(built, id);
+                    return built;
+                }
+            }
+
             var tunnelReady = type == DnsWire.TypeA && _routes is { Ready: true } && _tunnelEdges is not null;
             var viaTunnel = tunnelReady && (app.RoutesThroughTunnel(name) || TunnelledForCut(name));
 
@@ -339,7 +377,18 @@ internal sealed class LocalResolver : IAsyncDisposable
                 }
 
                 // Again on every answer, cached or not: a verdict outlives a reconnect, and the routes do not.
-                if (edges is not null && viaTunnel) _routes!.Route(name, edges);
+                // Some edges may be kept off the tunnel by the guard (another name uses them on the line); the answer
+                // then names only the routed ones, or this name's connection would take the line it was sent away from.
+                if (edges is not null && viaTunnel && _routes!.Route(name, edges)) edges = KeepInTheTunnel(edges, _routes!);
+
+                // Answered for the line: never with an address that routes into the tunnel now, while the name has
+                // others. CDN edges are shared - VNPT 2026-10-07, accounts.pubg.com's warm-up /32 caught cfentry's
+                // CloudFront HAN address and 12 MB of lobby rode the relay at its cap. Filtered on every answer, cached
+                // or not, because routes come and go; routes are never withdrawn here, which could cut a live flow.
+                if (edges is not null && !viaTunnel && _routes is { Ready: true } routes) edges = KeepOffTheTunnel(name, edges, routes);
+
+                // And remembered, so a tunnel name asked next does not route them - see LineGuard.
+                if (edges is not null && !viaTunnel) _guard?.AnsweredForLine(name, edges);
 
                 if (edges is not null)
                 {
@@ -354,10 +403,15 @@ internal sealed class LocalResolver : IAsyncDisposable
             }
 
             var answer = await _doh.ResolveAsync(query, query.Length, ct).ConfigureAwait(false);
-            if (answer is not null && viaTunnel)
+            if (answer is not null && (viaTunnel || _guard is not null))
             {
-                // Relayed as the upstream said it - so its addresses are the ones to route.
-                try { _routes!.Route(name, [.. DnsWire.Parse(answer, answer.Length).Addresses]); }
+                // Relayed as the upstream said it - so its addresses are the ones to route, or to remember for the line.
+                try
+                {
+                    var addresses = DnsWire.Parse(answer, answer.Length).Addresses;
+                    if (viaTunnel) _routes!.Route(name, [.. addresses]);
+                    else _guard!.AnsweredForLine(name, [.. addresses]);
+                }
                 catch (FormatException) { }
             }
             if (answer is not null)
@@ -385,6 +439,44 @@ internal sealed class LocalResolver : IAsyncDisposable
 
         Interlocked.Increment(ref _failed);
         return DnsWire.BuildFailure(query, 2);
+    }
+
+    /// <summary>
+    /// <paramref name="edges"/> without the addresses that route into the tunnel, unless that is all of them - then
+    /// unchanged: an answer through the relay still works, and none would not. Said once per name and address.
+    /// </summary>
+    /// <summary>
+    /// A tunnel answer without the addresses left on the line, while some are routed; unchanged when none is (nothing
+    /// routed at all - a refused or failed route - is answered as before).
+    /// </summary>
+    private static IPAddress[] KeepInTheTunnel(IPAddress[] edges, IUnblockRoutes routes)
+    {
+        var routed = edges.Where(routes.Tunnelled).ToArray();
+        return routed.Length is 0 || routed.Length == edges.Length ? edges : routed;
+    }
+
+    internal IPAddress[] KeepOffTheTunnel(string name, IPAddress[] edges, IUnblockRoutes routes)
+    {
+        var tunnelled = edges.Where(routes.Tunnelled).ToArray();
+        if (tunnelled.Length == 0) return edges;
+
+        if (tunnelled.Length == edges.Length)
+        {
+            if (_keptOff.Count < MaxSeen && _keptOff.TryAdd(name, 0))
+            {
+                _log($"Unblock: every address for {name} routes into the tunnel - answered as is.");
+            }
+            return edges;
+        }
+
+        foreach (var address in tunnelled)
+        {
+            if (_keptOff.Count < MaxSeen && _keptOff.TryAdd($"{name} {address}", 0))
+            {
+                _log($"Unblock: {name} - left out {address}, which routes into the tunnel (another name's edge).");
+            }
+        }
+        return [.. edges.Except(tunnelled)];
     }
 
     private async Task<byte[]?> ForwardAsync(byte[] query, CancellationToken ct)
@@ -446,6 +538,7 @@ internal sealed class LocalResolver : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await _stopping.CancelAsync().ConfigureAwait(false);
+        if (_split is not null) await _split.DisposeAsync().ConfigureAwait(false);
 
         _udp?.Dispose();
         _tcp?.Dispose();

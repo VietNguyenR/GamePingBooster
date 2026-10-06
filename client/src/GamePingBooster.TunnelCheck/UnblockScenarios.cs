@@ -275,5 +275,7 @@ internal static partial class Program
             Names.Add(name);
             return true;
         }
+
+        public bool Tunnelled(IPAddress address) => false;
     }
 }

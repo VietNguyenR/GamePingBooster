@@ -143,13 +143,20 @@ internal static class EdgeProber
     /// answered is a filter, not the server.
     /// </summary>
     /// <param name="port">443 always, except for TunnelCheck's servers on loopback.</param>
+    /// <param name="source">
+    /// The local address to send from - the physical adapter's, so the handshake crosses the line even where the
+    /// address is routed into the tunnel (see SplitProxy.LineSource). Null leaves it to the routing table.
+    /// </param>
+    /// <param name="split">The hello as two records - see <see cref="SplitHello"/>.</param>
     public static async Task<(string Outcome, long Ms)> HandshakeAsync(IPAddress address, string sni,
-        TimeSpan connectTimeout, TimeSpan handshakeTimeout, CancellationToken ct, int port = Port)
+        TimeSpan connectTimeout, TimeSpan handshakeTimeout, CancellationToken ct, int port = Port,
+        IPAddress? source = null, bool split = false)
     {
         var clock = Stopwatch.StartNew();
         using var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
         try
         {
+            if (source is not null) socket.Bind(new IPEndPoint(source, 0));
             using (var connect = CancellationTokenSource.CreateLinkedTokenSource(ct))
             {
                 connect.CancelAfter(connectTimeout);
@@ -173,7 +180,7 @@ internal static class EdgeProber
         try
         {
             using var network = new NetworkStream(socket, ownsSocket: false);
-            using var tls = new SslStream(network, leaveInnerStreamOpen: true, (_, _, _, e) =>
+            using var tls = new SslStream(split ? new SplitHelloStream(network) : network, leaveInnerStreamOpen: true, (_, _, _, e) =>
             {
                 errors = e;
                 return true;

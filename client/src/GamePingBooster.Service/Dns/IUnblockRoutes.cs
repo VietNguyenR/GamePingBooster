@@ -26,4 +26,12 @@ internal interface IUnblockRoutes
     /// tunnel, or every address refused (a relay's own, a landmark, a private one).
     /// </summary>
     bool Route(string name, IReadOnlyList<IPAddress> addresses);
+
+    /// <summary>
+    /// True when a connection to <paramref name="address"/> would go through the tunnel right now - another name's
+    /// /32, the lobby's, a game range, a region route. Asked for names answered for the line: CDN edges are shared
+    /// (cfentry and accounts.pubg.com on the same CloudFront HAN addresses, VNPT 2026-10-07), so an address routed for
+    /// one name would carry another name's 12 MB through the relay.
+    /// </summary>
+    bool Tunnelled(IPAddress address);
 }
