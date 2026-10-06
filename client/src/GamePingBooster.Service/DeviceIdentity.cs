@@ -175,9 +175,7 @@ internal sealed class DeviceIdentity : IDisposable
 
             // Via a temporary file and a replace, for the same reason ServiceConfig.Save does
             // it: a half-written device key is a device that has to be registered again.
-            var tmp = path + ".tmp";
-            File.WriteAllBytes(tmp, blob);
-            File.Move(tmp, path, overwrite: true);
+            AtomicFile.WriteAllBytes(path, blob);
             return true;
         }
         catch (Exception ex)

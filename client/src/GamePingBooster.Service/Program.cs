@@ -131,6 +131,7 @@ public static class Program
     internal static async Task RunAsync(Action<string> log, CancellationToken ct)
     {
         var config = ServiceConfig.Load();
+        if (ServiceConfig.LoadProblem is { } loadProblem) log(loadProblem);
         log($"Configuration loaded. Default game: {config.DefaultGameId}, adapter: {config.AdapterName}");
 
         await using var engine = new TunnelEngine(config, log);

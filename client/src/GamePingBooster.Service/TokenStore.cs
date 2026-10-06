@@ -1,4 +1,4 @@
-using System.Buffers.Binary;
+﻿using System.Buffers.Binary;
 using System.Security.Cryptography;
 using GamePingBooster.Core.Protocol;
 
@@ -79,9 +79,7 @@ internal static class TokenStore
 
             // Temporary file then replace, as everything else here does: a half-written token is
             // a client that cannot connect until it signs in again.
-            var tmp = Path + ".tmp";
-            File.WriteAllBytes(tmp, blob);
-            File.Move(tmp, Path, overwrite: true);
+            AtomicFile.WriteAllBytes(Path, blob);
             return true;
         }
         catch (Exception ex)

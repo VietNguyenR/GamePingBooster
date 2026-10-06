@@ -335,16 +335,16 @@ public sealed class LicenceClient : IDisposable
                     .ConfigureAwait(false);
                 if (string.IsNullOrWhiteSpace(body?.Envelope))
                 {
-                    throw new LicenceException(Loc.T("licenceErr.emptyGameList"));
+                    throw new LicenceException(Loc.Vi("licenceErr.emptyGameList"));
                 }
                 return body;
             }
 
             throw await ErrorAsync(response, t, new()
             {
-                [System.Net.HttpStatusCode.Unauthorized] = Loc.T("licenceErr.profileUnauthorized"),
-                [System.Net.HttpStatusCode.PaymentRequired] = Loc.T("licenceErr.noSubscription"),
-                [System.Net.HttpStatusCode.TooManyRequests] = Loc.T("licenceErr.tooOften"),
+                [System.Net.HttpStatusCode.Unauthorized] = Loc.Vi("licenceErr.profileUnauthorized"),
+                [System.Net.HttpStatusCode.PaymentRequired] = Loc.Vi("licenceErr.noSubscription"),
+                [System.Net.HttpStatusCode.TooManyRequests] = Loc.Vi("licenceErr.tooOften"),
             }).ConfigureAwait(false);
         });
 
@@ -375,15 +375,15 @@ public sealed class LicenceClient : IDisposable
                 var body = await response.Content
                     .ReadFromJsonAsync(LicenceJsonContext.Default.ProfilesResult, t)
                     .ConfigureAwait(false);
-                if (body is null || body.Profiles is null) throw new LicenceException(Loc.T("licenceErr.emptyGameList"));
+                if (body is null || body.Profiles is null) throw new LicenceException(Loc.Vi("licenceErr.emptyGameList"));
                 return body;
             }
 
             throw await ErrorAsync(response, t, new()
             {
-                [System.Net.HttpStatusCode.Unauthorized] = Loc.T("licenceErr.profileUnauthorized"),
-                [System.Net.HttpStatusCode.PaymentRequired] = Loc.T("licenceErr.noSubscription"),
-                [System.Net.HttpStatusCode.TooManyRequests] = Loc.T("licenceErr.tooOften"),
+                [System.Net.HttpStatusCode.Unauthorized] = Loc.Vi("licenceErr.profileUnauthorized"),
+                [System.Net.HttpStatusCode.PaymentRequired] = Loc.Vi("licenceErr.noSubscription"),
+                [System.Net.HttpStatusCode.TooManyRequests] = Loc.Vi("licenceErr.tooOften"),
             }).ConfigureAwait(false);
         });
 
@@ -400,12 +400,12 @@ public sealed class LicenceClient : IDisposable
                 return await response.Content
                     .ReadFromJsonAsync(LicenceJsonContext.Default.AccountResult, t)
                     .ConfigureAwait(false)
-                    ?? throw new LicenceException(Loc.T("licenceErr.emptyAnswer"));
+                    ?? throw new LicenceException(Loc.Vi("licenceErr.emptyAnswer"));
             }
 
             throw await ErrorAsync(response, t, new()
             {
-                [System.Net.HttpStatusCode.Unauthorized] = Loc.T("licenceErr.accountExpired"),
+                [System.Net.HttpStatusCode.Unauthorized] = Loc.Vi("licenceErr.accountExpired"),
             }).ConfigureAwait(false);
         });
 
@@ -445,7 +445,7 @@ public sealed class LicenceClient : IDisposable
         {
             return new LicenceException(message, response.StatusCode);
         }
-        return new LicenceException(Loc.F("licenceErr.status", (int)response.StatusCode),
+        return new LicenceException(Loc.ViF("licenceErr.status", (int)response.StatusCode),
             response.StatusCode);
     }
 
@@ -463,7 +463,7 @@ public sealed class LicenceClient : IDisposable
         if (response.IsSuccessStatusCode)
         {
             var value = await response.Content.ReadFromJsonAsync(type, ct).ConfigureAwait(false);
-            if (value is null) throw new LicenceException(Loc.T("licenceErr.emptyAnswer"));
+            if (value is null) throw new LicenceException(Loc.Vi("licenceErr.emptyAnswer"));
             return value;
         }
 
@@ -483,10 +483,10 @@ public sealed class LicenceClient : IDisposable
         {
             // No password is ever sent from here, so a 401 can only mean the sign-in itself is no
             // longer accepted - an expired or revoked refresh token, or a one-time code already spent.
-            System.Net.HttpStatusCode.Unauthorized => Loc.T("licenceErr.signInInvalid"),
-            System.Net.HttpStatusCode.Forbidden => Loc.T("licenceErr.deviceLimit"),
-            System.Net.HttpStatusCode.NotFound => Loc.T("licenceErr.notFound"),
-            _ => Loc.F("licenceErr.status", (int)response.StatusCode),
+            System.Net.HttpStatusCode.Unauthorized => Loc.Vi("licenceErr.signInInvalid"),
+            System.Net.HttpStatusCode.Forbidden => Loc.Vi("licenceErr.deviceLimit"),
+            System.Net.HttpStatusCode.NotFound => Loc.Vi("licenceErr.notFound"),
+            _ => Loc.ViF("licenceErr.status", (int)response.StatusCode),
         }, response.StatusCode);
     }
 }
@@ -515,7 +515,7 @@ public sealed class LicenceException(string message, System.Net.HttpStatusCode? 
 /// licence - it is a network failure, and every caller already has a catch for those.
 /// </summary>
 public sealed class LicenceTimeoutException(TimeSpan waited)
-    : TimeoutException(Loc.F("licenceErr.timeout", $"{waited.TotalSeconds:F0}"))
+    : TimeoutException(Loc.ViF("licenceErr.timeout", $"{waited.TotalSeconds:F0}"))
 {
     /// <summary>The deadline that ran out - 10 or 30 seconds depending on the call.</summary>
     public TimeSpan Waited { get; } = waited;

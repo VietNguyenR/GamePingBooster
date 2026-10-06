@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
 
@@ -33,20 +32,21 @@ public static class Loc
 {
     private static readonly IReadOnlyDictionary<string, string> English = StringsEn.Values;
 
-    private static IReadOnlyDictionary<string, string> _current = English;
+    private static IReadOnlyDictionary<string, string> _current = StringsVi.Values;
     private static ResourceDictionary? _applied;
 
     /// <summary>The language in use. Changing it goes through <see cref="Set"/>.</summary>
-    public static AppLanguage Current { get; private set; } = AppLanguage.English;
+    public static AppLanguage Current { get; private set; } = AppLanguage.Vietnamese;
 
     /// <summary>Raised after the language changed, on whichever thread changed it (the UI one).</summary>
     public static event Action? Changed;
 
     /// <summary>
-    /// Applies the saved language, or - on a machine that has never chosen one - the language
-    /// Windows itself is in. Called once, before the first window exists.
+    /// Applies the saved language, or - on a machine that has never chosen one - Vietnamese, which
+    /// is who the customers are (owner's call, 2026-10-06; it used to follow the language Windows is
+    /// in). Called once, before the first window exists.
     /// </summary>
-    public static void Initialize(Application app) => Apply(app, LanguageStore.Load() ?? WindowsLanguage());
+    public static void Initialize(Application app) => Apply(app, LanguageStore.Load() ?? AppLanguage.Vietnamese);
 
     /// <summary>Switches language and remembers the choice for next time.</summary>
     public static void Set(AppLanguage language)
@@ -84,6 +84,28 @@ public static class Loc
         : English.TryGetValue(key, out var fallback) ? fallback
         : key;
 
+    /// <summary>
+    /// The Vietnamese string for <paramref name="key"/>, whatever language the UI is in. For errors
+    /// that come back from the licence server: those are always Vietnamese (the server words its
+    /// own that way), and a fallback worded locally must not be the one English line among them.
+    /// </summary>
+    public static string Vi(string key) =>
+        StringsVi.Values.TryGetValue(key, out var value) ? value : T(key);
+
+    /// <summary><see cref="Vi"/> with {0}, {1}... filled in, as <see cref="F"/> does.</summary>
+    public static string ViF(string key, params object?[] args)
+    {
+        var format = Vi(key);
+        try
+        {
+            return string.Format(CultureInfo.InvariantCulture, format, args);
+        }
+        catch (FormatException)
+        {
+            return format;
+        }
+    }
+
     /// <summary>Whether this build has words for <paramref name="key"/> at all.</summary>
     public static bool Has(string key) => English.ContainsKey(key);
 
@@ -105,29 +127,4 @@ public static class Loc
             return format;
         }
     }
-
-    /// <summary>
-    /// What language Windows itself is in, reduced to what this app has. Vietnamese Windows gets a
-    /// Vietnamese app on first run; everything else gets English.
-    ///
-    /// The Win32 call rather than CultureInfo.CurrentUICulture: with InvariantGlobalization the
-    /// framework reports the invariant culture whatever the machine is set to.
-    /// </summary>
-    private static AppLanguage WindowsLanguage()
-    {
-        try
-        {
-            // The low 10 bits of a LANGID are the primary language. 0x2A is Vietnamese.
-            return (GetUserDefaultUILanguage() & 0x3FF) == 0x2A ? AppLanguage.Vietnamese : AppLanguage.English;
-        }
-        catch (Exception)
-        {
-            return AppLanguage.English;
-        }
-    }
-
-    // DllImport rather than LibraryImport: the generated marshalling code for LibraryImport needs
-    // AllowUnsafeBlocks, and this call has nothing to marshal - no arguments and a blittable return.
-    [DllImport("kernel32.dll")]
-    private static extern ushort GetUserDefaultUILanguage();
 }

@@ -227,19 +227,22 @@ public sealed class ServiceConfig
     /// <summary>
     /// Writes the configuration back, atomically.
     ///
-    /// Via a temporary file and a replace, because the alternative is a half-written config.json
-    /// if the machine loses power mid-save - and a service that cannot parse its own
-    /// configuration does not start, which turns a settings change into a dead installation.
+    /// Via a flushed temporary file and a replace (AtomicFile), because the alternative is a half-written
+    /// or zero-filled config.json if the machine loses power mid-save. Load survives that now, but only by
+    /// throwing the settings away.
     /// </summary>
     public void Save()
     {
         Directory.CreateDirectory(DefaultDirectory);
         var json = JsonSerializer.Serialize(this, ServiceConfigJsonContext.Default.ServiceConfig);
-
-        var tmp = FilePath + ".tmp";
-        File.WriteAllText(tmp, json);
-        File.Move(tmp, FilePath, overwrite: true);
+        AtomicFile.WriteAllText(FilePath, json);
     }
+
+    /// <summary>
+    /// What Load had to do about an unreadable config.json, for the caller to log - Load runs before there
+    /// is a log to write to. Null when the file was fine or absent.
+    /// </summary>
+    public static string? LoadProblem { get; private set; }
 
     /// <summary>The licence server a new installation is pointed at. See <see cref="LicenceUrl"/>.</summary>
     public const string DefaultLicenceUrl = "https://gamepingbooster.com";
@@ -263,9 +266,37 @@ public sealed class ServiceConfig
             return new ServiceConfig { LicenceUrl = DefaultLicenceUrl };
         }
 
-        var json = File.ReadAllText(path);
-        return JsonSerializer.Deserialize(json, ServiceConfigJsonContext.Default.ServiceConfig)
-               ?? throw new InvalidOperationException($"config.json at {path} is not valid.");
+        LoadProblem = null;
+        try
+        {
+            var json = File.ReadAllText(path);
+            var config = JsonSerializer.Deserialize(json, ServiceConfigJsonContext.Default.ServiceConfig);
+            if (config is not null) return config;
+            LoadProblem = "it reads as null";
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        {
+            LoadProblem = ex.Message;
+        }
+
+        // Unreadable: start as a new installation would rather than not at all. Throwing here was Windows
+        // error 1067 on every start, with nothing the player could do about it - a customer's file was all
+        // 0x00 after a power cut (2026-10-05). The sign-in token and the device key live in files of their
+        // own, so what is lost is this machine's settings, and the player is still signed in.
+        //
+        // The bad file is kept beside it, not deleted, so it can still be looked at.
+        var kept = path + "." + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + ".unreadable";
+        try
+        {
+            File.Move(path, kept);
+            LoadProblem = $"config.json was unreadable ({LoadProblem}). Kept as {kept}; starting with the defaults.";
+        }
+        catch (Exception moveEx)
+        {
+            LoadProblem = $"config.json was unreadable ({LoadProblem}) and could not be set aside ({moveEx.Message}); " +
+                          "starting with the defaults.";
+        }
+        return new ServiceConfig { LicenceUrl = DefaultLicenceUrl };
     }
 }
 

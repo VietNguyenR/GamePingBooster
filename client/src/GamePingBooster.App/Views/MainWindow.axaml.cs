@@ -21,7 +21,52 @@ public partial class MainWindow : SurfaceWindow
 
     private PipeClient? _pipe;
 
-    public void Attach(PipeClient pipe) => _pipe = pipe;
+    public void Attach(PipeClient pipe)
+    {
+        _pipe = pipe;
+
+        // Subscribed after the view model's own handler (App builds the view model first), and both
+        // post to the UI thread in order, so by the time this runs the status has been applied.
+        pipe.StatusReceived += _ => Dispatcher.UIThread.Post(OfferSignIn);
+    }
+
+    /// <summary>The sign-in window has been put up on its own once this run. The menu item is always there for the rest.</summary>
+    private bool _offeredSignIn;
+
+    /// <summary>
+    /// Opens the sign-in window by itself when the app starts without a sign-in, so a new install
+    /// lands on the one thing it needs instead of on a screen whose button does nothing
+    /// (owner's call, 2026-10-06). The menu's Sign in stays: this only saves the click.
+    ///
+    /// Once per run, so closing it means "not now" and is respected. Waits - rather than skipping -
+    /// for a window that is still hidden in the tray, and for the update window, because a dialog
+    /// taking focus while a game is full screen minimises it, and two dialogs at once is noise. Both
+    /// call this again when they are done.
+    /// </summary>
+    private void OfferSignIn()
+    {
+        if (_offeredSignIn || _updateOpen || !_hasOpened || !IsVisible) return;
+        if (DataContext is not MainViewModel vm || _pipe is null) return;
+
+        // Same preconditions as the menu item: nothing to sign in to until the service has said
+        // which licence server and which device key.
+        if (vm.HasToken || string.IsNullOrWhiteSpace(vm.LicenceUrl) || string.IsNullOrWhiteSpace(vm.DevicePublicKey))
+        {
+            return;
+        }
+
+        _offeredSignIn = true;
+        _ = ShowSignInAsync(vm);
+    }
+
+    private async Task ShowSignInAsync(MainViewModel vm)
+    {
+        var dialog = new LoginWindow
+        {
+            DataContext = new LoginViewModel(vm.LicenceUrl!, vm.DevicePublicKey!, _pipe!, _profileSync),
+        };
+        await dialog.ShowDialog(this);
+    }
 
     private ProfileSync? _profileSync;
 
@@ -111,11 +156,7 @@ public partial class MainWindow : SurfaceWindow
             return;
         }
 
-        var dialog = new LoginWindow
-        {
-            DataContext = new LoginViewModel(vm.LicenceUrl, vm.DevicePublicKey, _pipe, _profileSync),
-        };
-        await dialog.ShowDialog(this);
+        await ShowSignInAsync(vm);
     }
 
     /// <summary>
@@ -221,6 +262,7 @@ public partial class MainWindow : SurfaceWindow
     {
         base.OnOpened(e);
         _hasOpened = true;
+        Dispatcher.UIThread.Post(OfferSignIn);
         if (!_offerWhenOpened) return;
         _offerWhenOpened = false;
         // Posted, so the dialog's owner is fully on screen first.
@@ -240,6 +282,7 @@ public partial class MainWindow : SurfaceWindow
         finally
         {
             _updateOpen = false;
+            OfferSignIn();
         }
     }
 
@@ -334,6 +377,7 @@ public partial class MainWindow : SurfaceWindow
 
         // Brought back from the tray is opened: a newer release known is offered again. See OfferUpdate.
         OfferUpdate();
+        OfferSignIn();
     }
 
     // ------------------------------------------------------------ closing

@@ -316,9 +316,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         {
             Directory.CreateDirectory(SealedProfileDirectory);
             var path = SealedProfilePathFor(game.Id);
-            var tmp = path + ".tmp";
-            await File.WriteAllBytesAsync(tmp, envelope, ct).ConfigureAwait(false);
-            File.Move(tmp, path, overwrite: true);
+            await AtomicFile.WriteAllBytesAsync(path, envelope, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

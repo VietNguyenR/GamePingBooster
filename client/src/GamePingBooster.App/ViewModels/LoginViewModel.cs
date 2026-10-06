@@ -175,7 +175,7 @@ public sealed class LoginViewModel : INotifyPropertyChanged
         {
             // Only the window closing cancels this, so in practice nobody reads it. Kept so the
             // catch below never has to guess.
-            Error = Loc.T("login.cancelled");
+            Error = Loc.Vi("login.cancelled");
         }
         catch (LicenceTimeoutException ex)
         {
@@ -185,13 +185,13 @@ public sealed class LoginViewModel : INotifyPropertyChanged
             // before the exchange. The message has to say so, or the person goes looking for the
             // problem in the wrong place. Its own text carries the deadline that ran out, which
             // is 30 seconds for the exchange and 10 for the token call after it.
-            Error = Loc.F("login.retryBrowserOk", ex.Message);
+            Error = Loc.ViF("login.retryBrowserOk", ex.Message);
         }
         catch (Exception ex)
         {
             // A browser that will not open, a port that cannot be claimed, a proxy in the way.
             // There is no other way in any more, so the only honest next step is another attempt.
-            Error = Loc.F("login.retry", ex.Message);
+            Error = Loc.ViF("login.retry", ex.Message);
         }
         finally
         {
