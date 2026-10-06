@@ -1,0 +1,259 @@
+<views:SurfaceWindow xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:GamePingBooster.App.ViewModels"
+        xmlns:views="using:GamePingBooster.App.Views"
+        x:Class="GamePingBooster.App.Views.UpgradeWindow"
+        x:DataType="vm:UpgradeViewModel"
+        Title="{DynamicResource upgrade.title}"
+        Width="520" SizeToContent="Height"
+        MinWidth="520"
+        WindowStartupLocation="CenterOwner"
+        CanResize="False">
+
+  <views:SurfaceWindow.Styles>
+    <Style Selector="TextBlock.label">
+      <Setter Property="Foreground" Value="#787878" />
+      <Setter Property="FontSize" Value="11" />
+    </Style>
+    <Style Selector="TextBlock.value">
+      <Setter Property="Foreground" Value="#e5e5e5" />
+      <Setter Property="FontSize" Value="13" />
+    </Style>
+    <Style Selector="TextBlock.hint">
+      <Setter Property="Foreground" Value="#787878" />
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style Selector="Button">
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="16,8" />
+    </Style>
+    <Style Selector="Button.card">
+      <Setter Property="Background" Value="#1a1a1a" />
+      <Setter Property="BorderBrush" Value="#2e2e2e" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="12" />
+      <Setter Property="Padding" Value="14,12" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+    </Style>
+    <Style Selector="Button.card.selected">
+      <Setter Property="Background" Value="#14233f" />
+      <Setter Property="BorderBrush" Value="#2563EB" />
+    </Style>
+    <Style Selector="Button.tab">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="#ababab" />
+      <Setter Property="Padding" Value="10,6" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.tab.selected">
+      <Setter Property="Background" Value="#2563EB" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="Button.copy">
+      <Setter Property="Background" Value="#242424" />
+      <Setter Property="Foreground" Value="#ababab" />
+      <Setter Property="Padding" Value="10,4" />
+      <Setter Property="FontSize" Value="11" />
+    </Style>
+  </views:SurfaceWindow.Styles>
+
+  <Grid RowDefinitions="Auto,Auto">
+
+    <!-- A spacer, not a title bar - see SurfaceWindow. -->
+    <Border Grid.Row="0" Height="34" Background="Transparent"
+            PointerPressed="OnTitleBarPressed" />
+
+    <StackPanel Grid.Row="1" Margin="24,4,24,24" Spacing="16">
+
+      <StackPanel Spacing="2">
+        <TextBlock Text="{DynamicResource upgrade.title}" Foreground="#ababab" FontSize="18" FontWeight="SemiBold" />
+        <TextBlock Classes="hint" Text="{DynamicResource upgrade.sub}" />
+      </StackPanel>
+
+      <TextBlock Classes="label" Text="{DynamicResource account.loading}" IsVisible="{Binding IsLoading}" />
+
+      <!-- ============================================================ choose a plan -->
+      <StackPanel Spacing="12" IsVisible="{Binding IsChoose}">
+
+        <Border Background="#111111" BorderBrush="#2e2e2e" BorderThickness="1" CornerRadius="10" Padding="4">
+          <ItemsControl ItemsSource="{Binding Tabs}">
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate>
+                <UniformGrid Rows="1" />
+              </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:MonthTab">
+                <Button Classes="tab" Classes.selected="{Binding IsSelected}" Click="OnTabClick" Margin="2,0">
+                  <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
+                    <TextBlock Text="{Binding Label}" FontSize="13" VerticalAlignment="Center" />
+                    <Border Background="#1f3a1f" CornerRadius="6" Padding="5,1" IsVisible="{Binding HasSaving}" VerticalAlignment="Center">
+                      <TextBlock Text="{Binding SavingText}" FontSize="10" Foreground="#a3e635" />
+                    </Border>
+                  </StackPanel>
+                </Button>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </Border>
+
+        <ItemsControl ItemsSource="{Binding Cards}">
+          <ItemsControl.ItemsPanel>
+            <ItemsPanelTemplate>
+              <UniformGrid Columns="2" />
+            </ItemsPanelTemplate>
+          </ItemsControl.ItemsPanel>
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="vm:PlanCard">
+              <Button Classes="card" Classes.selected="{Binding IsSelected}" Click="OnCardClick" Margin="0,0,8,8">
+                <StackPanel Spacing="4">
+                  <TextBlock Text="{Binding Name}" Foreground="White" FontSize="14" FontWeight="SemiBold" />
+                  <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBlock Text="{Binding PriceText}" Foreground="White" FontSize="18" FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding StrikeText}" IsVisible="{Binding HasStrike}" Foreground="#787878"
+                               FontSize="12" TextDecorations="Strikethrough" VerticalAlignment="Center" />
+                  </StackPanel>
+                  <TextBlock Text="{Binding MonthlyText}" IsVisible="{Binding HasMonthly}" Foreground="#a3e635" FontSize="11" />
+                  <TextBlock Text="{Binding DevicesText}" Foreground="#ababab" FontSize="11" />
+                  <TextBlock Text="{Binding SavingText}" IsVisible="{Binding HasSaving}" Foreground="#a3e635" FontSize="11" />
+                </StackPanel>
+              </Button>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
+        <Border Background="#14532D" CornerRadius="8" Padding="12,8" IsVisible="{Binding HasDiscount}">
+          <TextBlock Text="{Binding DiscountText}" Foreground="#bbf7d0" FontSize="12" TextWrapping="Wrap" />
+        </Border>
+
+        <Grid ColumnDefinitions="*,Auto">
+          <StackPanel Grid.Column="0" VerticalAlignment="Center">
+            <TextBlock Classes="label" Text="{DynamicResource upgrade.total}" />
+            <TextBlock Text="{Binding TotalText}" Foreground="White" FontSize="20" FontWeight="SemiBold" />
+          </StackPanel>
+          <Button Grid.Column="1" Content="{DynamicResource upgrade.pay}" Click="OnPayClick"
+                  IsEnabled="{Binding CanPay}" Padding="22,10"
+                  Background="#2563EB" Foreground="White" />
+        </Grid>
+
+        <TextBlock Classes="hint" Text="{DynamicResource upgrade.terms}" />
+      </StackPanel>
+
+      <!-- ============================================================ pay -->
+      <StackPanel Spacing="14" IsVisible="{Binding IsPay}">
+        <Grid ColumnDefinitions="Auto,*" ColumnSpacing="18">
+
+          <Border Grid.Column="0" Background="White" CornerRadius="12" Padding="10" Width="200" Height="200" VerticalAlignment="Top">
+            <Panel>
+              <Image Source="{Binding Qr}" IsVisible="{Binding HasQr}" Stretch="Uniform" />
+              <TextBlock Text="{DynamicResource upgrade.pay.qrLoading}" Foreground="#555555" FontSize="11"
+                         HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center"
+                         IsVisible="{Binding !HasQr}" />
+            </Panel>
+          </Border>
+
+          <StackPanel Grid.Column="1" Spacing="8">
+            <StackPanel>
+              <TextBlock Classes="label" Text="{DynamicResource upgrade.pay.plan}" />
+              <TextBlock Classes="value" Text="{Binding PlanName}" />
+            </StackPanel>
+            <StackPanel>
+              <TextBlock Classes="label" Text="{DynamicResource upgrade.pay.amount}" />
+              <Grid ColumnDefinitions="*,Auto">
+                <TextBlock Classes="value" Text="{Binding AmountText}" FontSize="16" FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center" />
+                <Button Grid.Column="1" Classes="copy" Content="{DynamicResource upgrade.copy}" Click="OnCopyAmountClick" />
+              </Grid>
+            </StackPanel>
+            <StackPanel>
+              <TextBlock Classes="label" Text="{DynamicResource upgrade.pay.bank}" />
+              <TextBlock Classes="value" Text="{Binding BankText}" />
+            </StackPanel>
+            <StackPanel>
+              <TextBlock Classes="label" Text="{DynamicResource upgrade.pay.account}" />
+              <Grid ColumnDefinitions="*,Auto">
+                <SelectableTextBlock Classes="value" Text="{Binding AccountNumber}" Foreground="#e5e5e5" FontSize="13" VerticalAlignment="Center" />
+                <Button Grid.Column="1" Classes="copy" Content="{DynamicResource upgrade.copy}" Click="OnCopyAccountClick" />
+              </Grid>
+              <TextBlock Classes="hint" Text="{Binding Holder}" />
+            </StackPanel>
+            <StackPanel>
+              <TextBlock Classes="label" Text="{DynamicResource upgrade.pay.memo}" />
+              <Grid ColumnDefinitions="*,Auto">
+                <SelectableTextBlock Text="{Binding Memo}" Foreground="#facc15" FontSize="14" FontWeight="SemiBold"
+                                     FontFamily="Consolas,monospace" VerticalAlignment="Center" />
+                <Button Grid.Column="1" Classes="copy" Content="{DynamicResource upgrade.copy}" Click="OnCopyMemoClick" />
+              </Grid>
+            </StackPanel>
+          </StackPanel>
+        </Grid>
+
+        <Border Background="#422006" CornerRadius="8" Padding="12,8">
+          <TextBlock Text="{DynamicResource upgrade.pay.memoWarning}" Foreground="#fde68a" FontSize="12" TextWrapping="Wrap" />
+        </Border>
+
+        <Border Background="#7F1D1D" CornerRadius="8" Padding="12,8" IsVisible="{Binding AmountMismatch}">
+          <TextBlock Text="{Binding MismatchText}" Foreground="#FECACA" FontSize="12" TextWrapping="Wrap" />
+        </Border>
+
+        <Border Background="#1E293B" CornerRadius="8" Padding="12,10">
+          <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
+            <ProgressBar Grid.Column="0" IsIndeterminate="True" Width="40" MinWidth="40" Height="4" VerticalAlignment="Center" />
+            <TextBlock Grid.Column="1" Text="{Binding WatchText}" Foreground="#cbd5e1" FontSize="12" TextWrapping="Wrap" />
+          </Grid>
+        </Border>
+
+        <Grid ColumnDefinitions="Auto,*,Auto">
+          <TextBlock Grid.Column="0" Classes="hint" VerticalAlignment="Center">
+            <Run Text="{DynamicResource upgrade.pay.order}" />
+            <Run Text="{Binding InvoiceNumber}" />
+          </TextBlock>
+          <Button Grid.Column="2" Content="{DynamicResource upgrade.pay.cancel}" Click="OnCancelOrderClick"
+                  IsEnabled="{Binding NotBusy}"
+                  Background="#242424" Foreground="#ababab" />
+        </Grid>
+        <TextBlock Classes="hint" Text="{DynamicResource upgrade.pay.closeHint}" />
+      </StackPanel>
+
+      <!-- ============================================================ paid -->
+      <StackPanel Spacing="12" IsVisible="{Binding IsPaid}">
+        <Border Background="#14532D" CornerRadius="10" Padding="16">
+          <StackPanel Spacing="6">
+            <TextBlock Text="{DynamicResource upgrade.paid.title}" Foreground="White" FontSize="16" FontWeight="SemiBold" />
+            <TextBlock Text="{Binding PaidText}" Foreground="#bbf7d0" FontSize="13" TextWrapping="Wrap" />
+          </StackPanel>
+        </Border>
+        <TextBlock Classes="hint" Text="{DynamicResource upgrade.paid.hint}" />
+      </StackPanel>
+
+      <!-- ============================================================ closed / blocked / failed -->
+      <Border Background="#242424" CornerRadius="8" Padding="12" IsVisible="{Binding IsClosed}">
+        <TextBlock Text="{Binding Message}" Foreground="#ababab" FontSize="12" TextWrapping="Wrap" />
+      </Border>
+      <Border Background="#242424" CornerRadius="8" Padding="12" IsVisible="{Binding IsBlocked}">
+        <TextBlock Text="{Binding Message}" Foreground="#ababab" FontSize="12" TextWrapping="Wrap" />
+      </Border>
+      <Border Background="#7F1D1D" CornerRadius="8" Padding="12" IsVisible="{Binding IsFailed}">
+        <TextBlock Text="{Binding Message}" Foreground="#FECACA" FontSize="12" TextWrapping="Wrap" />
+      </Border>
+
+      <Border Background="#7F1D1D" CornerRadius="8" Padding="12,8" IsVisible="{Binding HasError}">
+        <TextBlock Text="{Binding Error}" Foreground="#FECACA" FontSize="12" TextWrapping="Wrap" />
+      </Border>
+
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+        <Button Content="{DynamicResource upgrade.startOver}" Click="OnStartOverClick"
+                IsVisible="{Binding IsClosed}"
+                Background="#2563EB" Foreground="White" />
+        <Button Content="{DynamicResource upgrade.retry}" Click="OnStartOverClick"
+                IsVisible="{Binding IsFailed}"
+                Background="#2563EB" Foreground="White" />
+        <Button Content="{DynamicResource common.close}" Click="OnCloseClick"
+                Background="#111111" Foreground="#ababab" />
+      </StackPanel>
+
+    </StackPanel>
+  </Grid>
+</views:SurfaceWindow>

@@ -14,6 +14,7 @@ public partial class App : Application
     private PipeClient? _pipe;
     private TokenRefresher? _refresher;
     private ProfileSync? _profileSync;
+    private PurchaseWatcher? _purchases;
     private QualityUploader? _quality;
     private UpdateChecker? _updates;
     private SystemTray? _tray;
@@ -72,6 +73,15 @@ public partial class App : Application
                 message => Dispatcher.UIThread.Post(() => vm.LicenceNotice = message),
                 OnUpgradeRequired);
             window.AttachProfileSync(_profileSync);
+
+            // Buying a plan in the app: watches an open order until the server says it is paid,
+            // then renews the licence at once - so the plan is in force without signing in again,
+            // even when the upgrade window was closed before the transfer landed.
+            _purchases = new PurchaseWatcher(
+                RefreshTokenStore.Load,
+                () => _refresher.RenewNow(),
+                action => Dispatcher.UIThread.Post(action));
+            window.AttachPurchases(_purchases);
 
             // One attempt shortly after the service has had time to report its configuration.
             // Not on the first status push: that arrives before the pipe has settled, and a
@@ -196,6 +206,7 @@ public partial class App : Application
             // Before the shutdown, not after: the process ending does not clear the notification
             // area on its own, and the icon left behind is one the user can click.
             _tray?.Dispose();
+            _purchases?.Dispose();
 
             if (_refresher is not null) await _refresher.DisposeAsync();
             if (_quality is not null) await _quality.DisposeAsync();

@@ -42,5 +42,16 @@ public partial class AccountWindow : SurfaceWindow
         if (vm.SignedOut) Close();
     }
 
+    private async void OnUpgradeClick(object? sender, RoutedEventArgs e)
+    {
+        if (DataContext is not AccountViewModel { Purchases: { } purchases } vm) return;
+
+        var upgrade = new UpgradeViewModel(vm.LicenceUrl, purchases, vm.RefreshToken);
+        await new UpgradeWindow { DataContext = upgrade }.ShowDialog(this);
+
+        // A plan bought - or one whose transfer is still landing - shows here on the way back.
+        if (upgrade.Purchased && !_cts.IsCancellationRequested) await vm.LoadAsync(_cts.Token);
+    }
+
     private void OnCloseClick(object? sender, RoutedEventArgs e) => Close();
 }

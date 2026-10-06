@@ -223,6 +223,77 @@ public sealed class LicenceClient : IDisposable
             return await ReadAsync(response, LicenceJsonContext.Default.QualityUploadResult, t).ConfigureAwait(false);
         });
 
+    // ------------------------------------------------------------- buying a plan in the app
+    //
+    // GET /app/plans, POST /app/orders, GET /app/orders/{invoice}, POST .../cancel - see web-service
+    // app/lib/app-checkout.server.ts. The server prices, owns and confirms everything: what goes up
+    // is a plan code and nothing else, and nothing here can make an order PAID. Only SePay's webhook
+    // to the server does that.
+
+    /// <summary>The plans the upgrade screen offers, priced for this account.</summary>
+    public Task<PlansResult> FetchPlansAsync(string refreshToken, string lang, CancellationToken ct) =>
+        WithDeadline(RequestTimeout, ct, async t =>
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"app/plans?lang={Uri.EscapeDataString(lang)}");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshToken);
+            using var response = await _http.SendAsync(request, t).ConfigureAwait(false);
+            return await ReadAsync(response, LicenceJsonContext.Default.PlansResult, t).ConfigureAwait(false);
+        });
+
+    /// <summary>
+    /// The order to pay for <paramref name="planCode"/> - a new one, or the one already open for that
+    /// plan, so a retry after a timeout never leaves two QR codes for one purchase.
+    /// </summary>
+    public Task<OrderResult> CreateOrderAsync(string refreshToken, string planCode, string lang, CancellationToken ct) =>
+        WithDeadline(RequestTimeout, ct, async t =>
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"app/orders?lang={Uri.EscapeDataString(lang)}")
+            {
+                Content = JsonContent.Create(new OrderRequest { Plan = planCode }, LicenceJsonContext.Default.OrderRequest),
+            };
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshToken);
+            using var response = await _http.SendAsync(request, t).ConfigureAwait(false);
+            return await ReadAsync(response, LicenceJsonContext.Default.OrderResult, t).ConfigureAwait(false);
+        });
+
+    /// <summary>One order's state, read from the server. Polled while an order is open.</summary>
+    public Task<OrderResult> FetchOrderAsync(string refreshToken, string invoice, string lang, CancellationToken ct) =>
+        WithDeadline(RequestTimeout, ct, async t =>
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get,
+                $"app/orders/{Uri.EscapeDataString(invoice)}?lang={Uri.EscapeDataString(lang)}");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshToken);
+            using var response = await _http.SendAsync(request, t).ConfigureAwait(false);
+            return await ReadAsync(response, LicenceJsonContext.Default.OrderResult, t).ConfigureAwait(false);
+        });
+
+    /// <summary>
+    /// Cancels an open order. A 409 still carries the order - it was paid or closed in the meantime -
+    /// and that is returned rather than thrown, because "it is paid" is the answer the caller wants.
+    /// </summary>
+    public Task<OrderResult> CancelOrderAsync(string refreshToken, string invoice, string lang, CancellationToken ct) =>
+        WithDeadline(RequestTimeout, ct, async t =>
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post,
+                $"app/orders/{Uri.EscapeDataString(invoice)}/cancel?lang={Uri.EscapeDataString(lang)}");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshToken);
+            using var response = await _http.SendAsync(request, t).ConfigureAwait(false);
+            if (response.StatusCode == System.Net.HttpStatusCode.Conflict)
+            {
+                try
+                {
+                    var conflict = await response.Content
+                        .ReadFromJsonAsync(LicenceJsonContext.Default.OrderResult, t).ConfigureAwait(false);
+                    if (conflict?.Order is not null) return conflict;
+                }
+                catch (Exception)
+                {
+                    // Not the server's shape. Falls through to the ordinary error below.
+                }
+            }
+            return await ReadAsync(response, LicenceJsonContext.Default.OrderResult, t).ConfigureAwait(false);
+        });
+
     public void Dispose() => _http.Dispose();
 
     /// <summary>
@@ -468,11 +539,13 @@ public sealed class LicenceClient : IDisposable
         }
 
         string? serverMessage = null;
+        string? serverCode = null;
         try
         {
             var error = await response.Content
                 .ReadFromJsonAsync(LicenceJsonContext.Default.ErrorResponse, ct).ConfigureAwait(false);
             serverMessage = error?.Error;
+            serverCode = error?.Code;
         }
         catch (Exception)
         {
@@ -487,7 +560,7 @@ public sealed class LicenceClient : IDisposable
             System.Net.HttpStatusCode.Forbidden => Loc.Vi("licenceErr.deviceLimit"),
             System.Net.HttpStatusCode.NotFound => Loc.Vi("licenceErr.notFound"),
             _ => Loc.ViF("licenceErr.status", (int)response.StatusCode),
-        }, response.StatusCode);
+        }, response.StatusCode, serverCode);
     }
 }
 
@@ -499,11 +572,14 @@ public sealed class LicenceClient : IDisposable
 /// retrying, and "this account has no subscription", which is not and which should drop the
 /// licence rather than keep presenting it. Every other caller still reads only Message.
 /// </summary>
-public sealed class LicenceException(string message, System.Net.HttpStatusCode? status = null)
+public sealed class LicenceException(string message, System.Net.HttpStatusCode? status = null, string? code = null)
     : Exception(message)
 {
     /// <summary>The HTTP status behind it, or null when the request never got an answer.</summary>
     public System.Net.HttpStatusCode? StatusCode { get; } = status;
+
+    /// <summary>The server's machine-readable reason ("rate_limited", "creator"...), when it sent one.</summary>
+    public string? Code { get; } = code;
 }
 
 /// <summary>
@@ -627,6 +703,110 @@ public sealed class AccountResult
 public sealed class ErrorResponse
 {
     [JsonPropertyName("error")] public string? Error { get; set; }
+    [JsonPropertyName("code")] public string? Code { get; set; }
+}
+
+// ------------------------------------------------------------------- buying a plan in the app
+
+/// <summary>GET /app/plans.</summary>
+public sealed class PlansResult
+{
+    [JsonPropertyName("purchasable")] public bool Purchasable { get; set; }
+
+    /// <summary>"creator" or "suspended" when <see cref="Purchasable"/> is false.</summary>
+    [JsonPropertyName("blockedReason")] public string? BlockedReason { get; set; }
+
+    [JsonPropertyName("currency")] public string Currency { get; set; } = "VND";
+    [JsonPropertyName("discount")] public PlanDiscount? Discount { get; set; }
+    [JsonPropertyName("currentPlanCode")] public string? CurrentPlanCode { get; set; }
+    [JsonPropertyName("groups")] public List<PlanGroup> Groups { get; set; } = [];
+}
+
+public sealed class PlanDiscount
+{
+    [JsonPropertyName("code")] public string Code { get; set; } = "";
+    [JsonPropertyName("percent")] public int Percent { get; set; }
+    [JsonPropertyName("amountMinor")] public long AmountMinor { get; set; }
+}
+
+public sealed class PlanGroup
+{
+    [JsonPropertyName("months")] public int Months { get; set; }
+    [JsonPropertyName("bestSaving")] public int? BestSaving { get; set; }
+    [JsonPropertyName("plans")] public List<PlanOffer> Plans { get; set; } = [];
+}
+
+public sealed class PlanOffer
+{
+    [JsonPropertyName("code")] public string Code { get; set; } = "";
+    [JsonPropertyName("name")] public string Name { get; set; } = "";
+    [JsonPropertyName("description")] public string? Description { get; set; }
+    [JsonPropertyName("tier")] public string Tier { get; set; } = "";
+    [JsonPropertyName("months")] public int Months { get; set; }
+    [JsonPropertyName("periodDays")] public int PeriodDays { get; set; }
+    [JsonPropertyName("deviceLimit")] public int DeviceLimit { get; set; }
+    [JsonPropertyName("priceMinor")] public long PriceMinor { get; set; }
+
+    /// <summary>What the order will be for - below the price when a referral discount applies.</summary>
+    [JsonPropertyName("amountMinor")] public long AmountMinor { get; set; }
+
+    [JsonPropertyName("monthlyMinor")] public long MonthlyMinor { get; set; }
+    [JsonPropertyName("savingPercent")] public int? SavingPercent { get; set; }
+}
+
+public sealed class OrderRequest
+{
+    [JsonPropertyName("plan")] public string Plan { get; set; } = "";
+}
+
+/// <summary>Every /app/orders answer: the order, and for a create whether it was an open one reused.</summary>
+public sealed class OrderResult
+{
+    [JsonPropertyName("order")] public OrderInfo? Order { get; set; }
+    [JsonPropertyName("reused")] public bool Reused { get; set; }
+}
+
+public sealed class OrderInfo
+{
+    [JsonPropertyName("invoiceNumber")] public string InvoiceNumber { get; set; } = "";
+
+    /// <summary>PENDING, PAID, FAILED or CANCELLED. Anything else is treated as still pending.</summary>
+    [JsonPropertyName("status")] public string Status { get; set; } = "";
+
+    [JsonPropertyName("plan")] public OrderPlan? Plan { get; set; }
+    [JsonPropertyName("amountMinor")] public long AmountMinor { get; set; }
+    [JsonPropertyName("paidAmountMinor")] public long? PaidAmountMinor { get; set; }
+    [JsonPropertyName("currency")] public string Currency { get; set; } = "VND";
+    [JsonPropertyName("createdAt")] public long CreatedAt { get; set; }
+
+    /// <summary>Unix seconds the plan now runs to, once paid.</summary>
+    [JsonPropertyName("activeUntil")] public long? ActiveUntil { get; set; }
+
+    /// <summary>A transfer arrived for the wrong amount; the order is still open.</summary>
+    [JsonPropertyName("amountMismatch")] public bool AmountMismatch { get; set; }
+
+    /// <summary>Where to send the money. Only while the order can still be paid.</summary>
+    [JsonPropertyName("transfer")] public OrderTransfer? Transfer { get; set; }
+
+    [JsonIgnore] public bool IsPaid => Status == "PAID";
+    [JsonIgnore] public bool IsClosed => Status is "CANCELLED" or "FAILED";
+}
+
+public sealed class OrderPlan
+{
+    [JsonPropertyName("code")] public string Code { get; set; } = "";
+    [JsonPropertyName("name")] public string Name { get; set; } = "";
+    [JsonPropertyName("periodDays")] public int PeriodDays { get; set; }
+    [JsonPropertyName("deviceLimit")] public int DeviceLimit { get; set; }
+}
+
+public sealed class OrderTransfer
+{
+    [JsonPropertyName("bankCode")] public string BankCode { get; set; } = "";
+    [JsonPropertyName("accountNumber")] public string AccountNumber { get; set; } = "";
+    [JsonPropertyName("holder")] public string Holder { get; set; } = "";
+    [JsonPropertyName("memo")] public string Memo { get; set; } = "";
+    [JsonPropertyName("qrUrl")] public string QrUrl { get; set; } = "";
 }
 
 /// <summary>
@@ -672,4 +852,7 @@ public sealed class QualityUploadResult
 [JsonSerializable(typeof(DiagnosticRequest))]
 [JsonSerializable(typeof(DiagnosticResult))]
 [JsonSerializable(typeof(QualityUploadResult))]
+[JsonSerializable(typeof(PlansResult))]
+[JsonSerializable(typeof(OrderRequest))]
+[JsonSerializable(typeof(OrderResult))]
 public partial class LicenceJsonContext : JsonSerializerContext;

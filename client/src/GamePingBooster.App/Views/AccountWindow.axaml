@@ -77,6 +77,13 @@
       </StackPanel>
     </Border>
 
+    <!-- Buying a plan, in the app. Same order and same webhook as the website's checkout; the
+         account this machine is signed in to is the one that is upgraded, without signing in again. -->
+    <Button Content="{DynamicResource account.upgrade}" Click="OnUpgradeClick"
+            IsVisible="{Binding CanUpgrade}"
+            HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+            Background="#2563EB" Foreground="White" FontWeight="SemiBold" />
+
     <Border Background="#7F1D1D" CornerRadius="8" Padding="12,8" IsVisible="{Binding HasError}">
       <TextBlock Text="{Binding Error}" Foreground="#FECACA" FontSize="12" TextWrapping="Wrap" />
     </Border>

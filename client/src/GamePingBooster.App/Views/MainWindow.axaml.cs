@@ -73,6 +73,11 @@ public partial class MainWindow : SurfaceWindow
     /// <summary>The sign-in window fetches the game list as soon as it has a credential.</summary>
     public void AttachProfileSync(ProfileSync sync) => _profileSync = sync;
 
+    private PurchaseWatcher? _purchases;
+
+    /// <summary>The in-app purchase watcher, handed to the account screen. Absent leaves the upgrade button out.</summary>
+    public void AttachPurchases(PurchaseWatcher purchases) => _purchases = purchases;
+
     /// <summary>Pings the relays again this often while their list is open, so the numbers move.</summary>
     private static readonly TimeSpan RelayPingInterval = TimeSpan.FromMilliseconds(2500);
 
@@ -146,11 +151,14 @@ public partial class MainWindow : SurfaceWindow
             return;
         }
 
-        if (vm.HasToken)
+        // Signed in but holding no licence is the account screen too, not the sign-in: that is a
+        // trial that ran out (the 402 clears the token), and that person's next step is the upgrade
+        // button there. Sending them to sign in again would be a dead end with a password at it.
+        if (vm.HasToken || RefreshTokenStore.Exists())
         {
             var account = new AccountWindow
             {
-                DataContext = new AccountViewModel(vm.LicenceUrl, vm.DevicePublicKey, _pipe),
+                DataContext = new AccountViewModel(vm.LicenceUrl, vm.DevicePublicKey, _pipe, _purchases),
             };
             await account.ShowDialog(this);
             return;

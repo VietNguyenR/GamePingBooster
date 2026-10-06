@@ -163,6 +163,26 @@ public sealed class TokenRefresher : IAsyncDisposable
     }
 
     /// <summary>
+    /// Asks for a new licence token now, whether or not the one held is still good. Called when a
+    /// plan bought in the app has been confirmed paid.
+    ///
+    /// <see cref="Nudge"/> is not enough there, and that is the reason this exists: Nudge does
+    /// nothing while the token is valid, and the token names the TIER and is clamped to the end of
+    /// the subscription. Somebody on a trial with two hours left who buys a month would otherwise
+    /// keep the trial's token - trial tier, two hours - until the next half-life renewal, or until
+    /// it ran out. Through the loop rather than a call of its own, so it can never run alongside a
+    /// renewal already in progress.
+    ///
+    /// Grants nothing by itself, like Nudge: the licence server decides what the new token says.
+    /// </summary>
+    public void RenewNow()
+    {
+        if (!RefreshTokenStore.Exists()) return;
+        _due = DateTimeOffset.UtcNow;
+        try { _wake.Release(); } catch (SemaphoreFullException) { }
+    }
+
+    /// <summary>
     /// Called on every status push. Only a CHANGED expiry wakes the loop - the service pushes a
     /// status once a second, and re-arming a timer at 1 Hz would be silly.
     /// </summary>

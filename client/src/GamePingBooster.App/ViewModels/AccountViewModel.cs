@@ -18,14 +18,33 @@ public sealed class AccountViewModel : INotifyPropertyChanged
     private readonly string _devicePublicKey;
     private readonly PipeClient _pipe;
 
-    public AccountViewModel(string licenceUrl, string devicePublicKey, PipeClient pipe)
+    private readonly Func<string?> _refreshToken;
+
+    public AccountViewModel(string licenceUrl, string devicePublicKey, PipeClient pipe,
+        PurchaseWatcher? purchases = null, Func<string?>? refreshToken = null)
     {
         _licenceUrl = licenceUrl;
         _devicePublicKey = devicePublicKey;
         _pipe = pipe;
+        Purchases = purchases;
+        _refreshToken = refreshToken ?? RefreshTokenStore.Load;
     }
 
+    /// <summary>Where the screen reads the credential from; the upgrade screen asks the same place.</summary>
+    public Func<string?> RefreshToken => _refreshToken;
+
     public string ServerText => _licenceUrl;
+
+    /// <summary>
+    /// Buying in the app. Null leaves the button out - this window only exists with a licence
+    /// server, so a self-hosted installation never reaches it, but nothing here assumes that.
+    /// </summary>
+    public PurchaseWatcher? Purchases { get; }
+
+    /// <summary>The upgrade button: signed in, loaded, and an account that may buy.</summary>
+    public bool CanUpgrade => Purchases is not null && Ready && !HasError && !SignedOut;
+
+    public string LicenceUrl => _licenceUrl;
 
     public string DeviceText => _devicePublicKey.Length >= 10
         ? $"{Environment.MachineName} - {_devicePublicKey[..10]}..."
@@ -35,7 +54,7 @@ public sealed class AccountViewModel : INotifyPropertyChanged
     public bool Loading
     {
         get => _loading;
-        private set { if (Set(ref _loading, value)) Raise(nameof(Ready)); }
+        private set { if (Set(ref _loading, value)) { Raise(nameof(Ready)); Raise(nameof(CanUpgrade)); } }
     }
 
     public bool Ready => !Loading;
@@ -59,7 +78,7 @@ public sealed class AccountViewModel : INotifyPropertyChanged
     public string? Error
     {
         get => _error;
-        private set { if (Set(ref _error, value)) Raise(nameof(HasError)); }
+        private set { if (Set(ref _error, value)) { Raise(nameof(HasError)); Raise(nameof(CanUpgrade)); } }
     }
 
     public bool HasError => !string.IsNullOrEmpty(Error);
@@ -73,7 +92,7 @@ public sealed class AccountViewModel : INotifyPropertyChanged
         Error = null;
         try
         {
-            var refreshToken = RefreshTokenStore.Load();
+            var refreshToken = _refreshToken();
             if (refreshToken is null)
             {
                 Error = Loc.T("account.notSignedIn");
