@@ -252,6 +252,22 @@
       "azureRegions": [],
       "asns": [],
       "note": "Captured 2026-09-29 from Hanoi with ./gpb capture aniimo all, four sessions: NO UDP AT ALL - observed-aniimo.txt was never written. The game is TCP. Gameplay is TCP 20000, one long connection per server, to Alibaba Cloud Singapore (AS45102):\n  47.237.210.48   34808 / 606 s = 57/s\n  43.106.7.69     31312 / 586 s = 53/s (also 12550 / 182 s = 69/s)\n  47.237.216.175   6399 / 172 s = 37/s\n  47.84.93.165     5082 / 149 s = 34/s\n  47.245.126.28    2197 /  90 s = 24/s\nFive servers in four different /16s (43.106/16, 47.237/16, 47.84/17, 47.245/19): Alibaba hands out addresses per instance, so a /20 around one server says nothing about the next. 8.219.197.133 TCP 10000 (~0.4/s, open the whole session) is the gateway; 47.253.108.56, 47.90.219.239, 8.214.x, 47.89.139.22, 100.2x.x.x, 43.152-153.x are HTTPS 443 - never route those. None of the servers answer ICMP. TCP connect RTT from the capture PC, min of 5: every one 43.3-44.5 ms, the gateway 44.1 - all Singapore. The cross-check stays empty because the pipeline is UDP-only end to end: capture writes only UDP to observed, the client's discovery (GameDestinationRecorder) listens to UDP only, and rescan-between-matches reads 10 s of zero game UDP as 'match over' - which a TCP game is all the time. Decide TCP support before building a profile."
+    },
+
+    "fc27": {
+      "name": "FC27",
+      "watchProcess": "FC27_Showcase",
+      "probePort": null,
+      "observedPath": "observed-fc27.txt",
+      "landmarkPath": null,
+      "tcpSessionsPath": "tcp-sessions-fc27.txt",
+      "unverifiedPath": "observed-fc27-unverified.txt",
+      "manualCidrPath": "manual-cidrs-fc27.txt",
+      "profilePath": "../../profiles/fc27-vn.json",
+      "awsRegions": ["ap-east-1"],
+      "azureRegions": [],
+      "asns": [],
+      "note": "Captured 2026-10-05, one session: gameplay is UDP 21144 to a single address, 18.166.237.178 (16100 pkts / 538 s = 30/s), AWS ap-east-1 (Hong Kong, 18.166.0.0/15). Declared as ap-east-1 only; no ASN on purpose (AS16509 would admit every Amazon region). TCP seen but never routed: 3.40.136.182:15223, 99.81.255.166:11000, 54.229.157.171:10010 are eu-west-1 (Ireland), 98.85.38.9:8095/9000 us-east-1 - backend/telemetry, not gameplay; 125.235.36.x and 171.236.61.21 are Vietnamese CDN. Only one match captured: capture more matches before trusting the /20 around it."
     }
   }
 }

@@ -102,3 +102,6 @@ profiles/deltaforce-regions-import.json
 profiles/apex-vn.json.bak-20260927
 profiles/naraka-regions-import.json.bak-20260926
 profiles/naraka-regions-import.json.bak-20260926-with-jp
+profiles/fc27-vn.json
+tools/Check-Steam.ps1
+tools/Probe-SniSplit.ps1
