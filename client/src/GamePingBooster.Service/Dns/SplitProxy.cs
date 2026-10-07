@@ -58,10 +58,17 @@ internal sealed class SplitProxy : IAsyncDisposable
     private static readonly TimeSpan UsableFor = TimeSpan.FromMinutes(30);
 
     /// <summary>After a split connection was cut live, the name stays on the relay this long.</summary>
-    private static readonly TimeSpan FailedFor = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan FailedFor = TimeSpan.FromMinutes(3);
 
     /// <summary>Edges probed per name: whole, control and split on each, all at once.</summary>
     private const int ProbedEdges = 3;
+
+    /// <summary>
+    /// Edges that may stay silent after the hello before the name goes to the relay. One slow edge is not the line: PUBG's
+    /// mainland .cn mirror answers in 0.5-1 s and now and then takes 6 s, and on 2026-10-07 one such edge sent the whole
+    /// lobby through the relay's cap. Two silent edges are the line.
+    /// </summary>
+    private const int MaxSilentEdges = 2;
 
     private static readonly TimeSpan ProbeConnect = TimeSpan.FromMilliseconds(1500);
 
@@ -444,6 +451,7 @@ internal sealed class SplitProxy : IAsyncDisposable
         var how = whole ? "whole" : "split";
         var clock = Stopwatch.StartNew();
         string? why = null;
+        var silent = 0;
         foreach (var address in edges.Take(ProbedEdges))
         {
             if (_source(address) is not { } source) { why = "no way out over the line"; break; }
@@ -490,12 +498,14 @@ internal sealed class SplitProxy : IAsyncDisposable
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
                 why = $"{address} did not answer the {how} hello in {FirstReplyTimeout.TotalSeconds:0} s";
+                // Silence is an edge that is slow or down as often as a filter (a filter resets): try the next one.
+                if (++silent < MaxSilentEdges) continue;
             }
             catch (SocketException ex)
             {
                 why = $"{address} {(ex.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted ? "reset" : ex.SocketErrorCode.ToString())} the {how} hello";
             }
-            break;   // a cut after the hello is the line's, not the edge's: no point trying the next
+            break;   // a reset or close after the hello is the line's, not the edge's: no point trying the next
         }
 
         HoldOnRelay(name, $"the line cut it live ({how}): {why}");

@@ -117,6 +117,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
 
     private GameEntry? _game;
     private bool _gameCacheCleared;
+    private DateTime? _pubgStartedAt;
+    private static readonly TimeSpan SuspectRun = TimeSpan.FromMinutes(3);
     private RelayEntry? _relay;
     private volatile TunnelState _state = TunnelState.Disconnected;
     private volatile string _detail = "Not connected";
@@ -2784,6 +2786,13 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         var previous = _relay;
         if (previous is null || adapter is null || routes is null) return;
 
+        // The tunnel dropping while PUBG runs can leave its cache half-written.
+        if (_pubgStartedAt is not null)
+        {
+            GameCacheCleaner.MarkDirty("the tunnel dropped while the game was running");
+            _log("The tunnel dropped while PUBG was running - its cache is cleared at the next start.");
+        }
+
         var previousIp = _tunnel?.Session.ClientIp;
         var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
 
@@ -3047,7 +3056,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                 if (!_gameCacheCleared && detected.Id.Equals("pubg", StringComparison.OrdinalIgnoreCase))
                 {
                     _gameCacheCleared = true;
-                    _log(GameCacheCleaner.Clean());
+                    _pubgStartedAt = DateTime.UtcNow;
+                    if (GameCacheCleaner.CleanIfDirty() is { } cleaned) _log(cleaned);
                 }
 
                 // The game can start while the tunnel is down and the reconnect loop is sweeping
@@ -3069,6 +3079,13 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             {
                 _log("The game exited - removing routes, other traffic returns to the normal path.");
                 _gameCacheCleared = false;
+                // Closed within minutes of starting: the player most likely gave up on a black screen.
+                if (_pubgStartedAt is { } startedAt && DateTime.UtcNow - startedAt < SuspectRun)
+                {
+                    GameCacheCleaner.MarkDirty($"the game closed {(DateTime.UtcNow - startedAt).TotalSeconds:0} s after it started");
+                    _log("PUBG closed soon after it started - its cache is cleared at the next start.");
+                }
+                _pubgStartedAt = null;
                 _discovery?.GameStopped();
                 _presence.Set(null);
                 if (_adapter is not null) _routes?.RemoveGameRoutes(_adapter.InterfaceIndex);
