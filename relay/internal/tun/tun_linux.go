@@ -78,6 +78,14 @@ func indexZero(b []byte) int {
 	return -1
 }
 
+// FromFile adopts a TUN device that is already open, as handed over by the relayd process that
+// exec'd this one. The interface, its address and every route through it already exist - the
+// whole point is that they never stopped existing - so there is nothing to configure.
+func FromFile(f *os.File, name string) *Device { return &Device{file: f, name: name} }
+
+// SyscallConn exposes the descriptor so a hot restart can pass it on to the next binary.
+func (d *Device) SyscallConn() (syscall.RawConn, error) { return d.file.SyscallConn() }
+
 func (d *Device) Name() string                { return d.name }
 func (d *Device) Read(p []byte) (int, error)  { return d.file.Read(p) }
 func (d *Device) Write(p []byte) (int, error) { return d.file.Write(p) }

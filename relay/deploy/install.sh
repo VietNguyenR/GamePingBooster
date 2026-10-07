@@ -42,10 +42,24 @@
 # GPB_PSK is still honoured for the one case where it is reliable - running this as root
 # directly, with no sudo in between, which is what the deploy scripts do on a root account.
 
+#
+# Relays are never empty, and a restart drops everybody on them. To install only once a relay has
+# at most N clients, without anybody watching it:
+#   sudo ./install.sh --when-idle 0 [--deadline HOURS] <the usual options>
+# This copies the package aside, starts a background job on the VPS and returns at once. The job
+# waits for relayd's own session count to reach N, then runs this script with the usual options.
+# --deadline installs anyway after that many hours. Follow it: journalctl -u gpb-deploy-when-idle
+
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_SRC="${HERE}/../relayd"
+
+# Every option except the two that schedule, so the background job can run the same install.
+PASS_ARGS=()
+WHEN_IDLE=""
+WAIT_IDLE=""
+DEADLINE_H=0
 
 MAX_CLIENTS=0
 MIN_TIER=0
@@ -54,6 +68,7 @@ PSK_FILE=""
 LICENCE_KEY=""
 FORCE_PSK=no
 REPORT_URL=""
+ALL_ARGS=("$@")
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --max-clients)
@@ -84,9 +99,22 @@ while [[ $# -gt 0 ]]; do
       REPORT_URL="${2:-}"
       shift 2
       ;;
+    --when-idle)
+      WHEN_IDLE="${2:-}"
+      shift 2
+      ;;
+    --wait-idle)
+      # Internal: what the background job runs. --when-idle schedules, this waits.
+      WAIT_IDLE="${2:-}"
+      shift 2
+      ;;
+    --deadline)
+      DEADLINE_H="${2:-}"
+      shift 2
+      ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "usage: $0 [--max-clients N] [--min-tier N] [--listen PORT] [--psk-file PATH | --psk | --licence-key PATH] [--report-url URL]" >&2
+      echo "usage: $0 [--max-clients N] [--min-tier N] [--listen PORT] [--psk-file PATH | --psk | --licence-key PATH] [--report-url URL] [--when-idle N [--deadline HOURS]]" >&2
       exit 2
       ;;
   esac
@@ -181,6 +209,89 @@ fi
 if [[ ! -f "$BIN_SRC" ]]; then
   echo "No binary at $BIN_SRC - build it first with 'make build' and upload it." >&2
   exit 1
+fi
+
+for n in "$WHEN_IDLE" "$WAIT_IDLE"; do
+  if [[ -n "$n" ]] && ! [[ "$n" =~ ^[0-9]+$ ]]; then
+    echo "--when-idle takes a number of clients, got '${n}'" >&2
+    exit 2
+  fi
+done
+if ! [[ "$DEADLINE_H" =~ ^[0-9]+$ ]]; then
+  echo "--deadline takes a whole number of hours, got '${DEADLINE_H}'" >&2
+  exit 2
+fi
+
+# The options minus the scheduling ones, for the job to hand back to this script.
+skip=no
+for a in "${ALL_ARGS[@]}"; do
+  if [[ $skip == yes ]]; then skip=no; continue; fi
+  case "$a" in --when-idle|--wait-idle|--deadline) skip=yes; continue ;; esac
+  PASS_ARGS+=("$a")
+done
+
+IDLE_UNIT=gpb-deploy-when-idle
+if [[ -n "$WHEN_IDLE" ]]; then
+  # Copied out of the staging directory, because the next deploy unpacks over that one while this
+  # job may still be waiting. A newer scheduled deploy replaces an older one: the binary being
+  # waited on should always be the latest.
+  PENDING=/var/lib/gpb/pending
+  if systemctl is-active --quiet "$IDLE_UNIT"; then
+    echo "==> Replacing the deploy that was already waiting on this relay"
+    systemctl stop "$IDLE_UNIT" || true
+  fi
+  systemctl reset-failed "$IDLE_UNIT" 2>/dev/null || true
+  rm -rf "$PENDING"
+  install -d -m 0700 "$PENDING"
+  cp -a "${HERE}/../." "$PENDING/"
+
+  # A transient unit, not nohup: it survives this ssh session ending and logs to the journal.
+  # Through bash -c with a cd, because --licence-key ../licence.pub is relative to deploy/, and
+  # --working-directory needs a newer systemd than the oldest VPS this supports.
+  cmd="cd ${PENDING}/deploy && exec ./install.sh --wait-idle ${WHEN_IDLE} --deadline ${DEADLINE_H}"
+  for a in "${PASS_ARGS[@]}"; do cmd+=" $(printf '%q' "$a")"; done
+  systemd-run --unit="$IDLE_UNIT" --description="Install relayd once at most ${WHEN_IDLE} clients are on it" \
+    /bin/bash -c "$cmd" >/dev/null
+
+  echo "==> Scheduled: relayd will be installed once at most ${WHEN_IDLE} client(s) are connected"
+  if (( DEADLINE_H > 0 )); then
+    echo "    or after ${DEADLINE_H} hour(s), whichever comes first"
+  fi
+  echo "    Follow it:  journalctl -u ${IDLE_UNIT} -f"
+  echo "    Cancel it:  sudo systemctl stop ${IDLE_UNIT}"
+  exit 0
+fi
+
+# The live session count, from the stats line relayd logs every 30 s. Prints nothing when there is
+# no recent line to go on, which is "do not know", not zero.
+relay_sessions() {
+  journalctl -u relayd --since "$(date -d '-90 sec' '+%Y-%m-%d %H:%M:%S')" -o cat --no-pager 2>/dev/null |
+    grep -o 'msg=stats sessions=[0-9]*' | tail -1 | grep -o '[0-9]*$' || true
+}
+
+if [[ -n "$WAIT_IDLE" ]]; then
+  started=$(date +%s)
+  last=""
+  echo "==> Waiting until at most ${WAIT_IDLE} client(s) are on this relay"
+  while :; do
+    if ! systemctl is-active --quiet relayd; then
+      echo "==> relayd is not running, nobody to drop: installing now"
+      break
+    fi
+    n=$(relay_sessions)
+    if [[ -n "$n" ]]; then
+      if [[ "$n" != "$last" ]]; then echo "    ${n} client(s) connected"; last=$n; fi
+      if (( n <= WAIT_IDLE )); then
+        echo "==> ${n} client(s) connected: installing now"
+        break
+      fi
+    fi
+    if (( DEADLINE_H > 0 && $(date +%s) - started >= DEADLINE_H * 3600 )); then
+      echo "==> Deadline of ${DEADLINE_H} hour(s) reached with ${n:-an unknown number of} client(s) connected: installing anyway"
+      break
+    fi
+    sleep 15
+  done
 fi
 
 echo "==> Installing the binary to /usr/local/bin/relayd"
@@ -381,7 +492,12 @@ if [[ "$AUTH_MODE" == token ]]; then
   echo "   Authentication          :  licence tokens, verified offline against /etc/gpb/licence.pub"
 else
   echo "   Authentication          :  pre-shared key"
-  echo "   PSK (keep it secret)    :  $(cat /etc/gpb/psk)"
+  if [[ -n "$WAIT_IDLE" ]]; then
+    # This run's output is kept in the journal, so the key stays out of it.
+    echo "   PSK                     :  unchanged, in /etc/gpb/psk"
+  else
+    echo "   PSK (keep it secret)    :  $(cat /etc/gpb/psk)"
+  fi
 fi
 
 if [[ -s /etc/gpb/relayd.env ]]; then

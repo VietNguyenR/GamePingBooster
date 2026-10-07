@@ -22,15 +22,27 @@
 .EXAMPLE
     .\deploy.ps1 -RemoteHost sg
 
+.PARAMETER WhenIdle
+    Do not restart now. Leave the package on the relay with a job that installs it once at most
+    this many clients are connected. The wait runs on the VPS, so this returns at once.
+
+.PARAMETER DeadlineHours
+    With -WhenIdle: install anyway after this many hours. 0, the default, waits as long as it takes.
+
 .EXAMPLE
     .\deploy.ps1 -RemoteHost sg -PackageOnly
+
+.EXAMPLE
+    .\deploy.ps1 -RemoteHost sg -WhenIdle 0
 #>
 
 [CmdletBinding()]
 param(
     [string]$RemoteHost,
     [ValidateSet('amd64', 'arm64')][string]$Arch = 'amd64',
-    [switch]$PackageOnly
+    [switch]$PackageOnly,
+    [int]$WhenIdle = -1,
+    [int]$DeadlineHours = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -178,6 +190,7 @@ function Get-RelayInstallArgs {
         $args += ' --psk'
     }
     if ($Relay.ReportUrl) { $args += " --report-url $($Relay.ReportUrl)" }
+    if ($WhenIdle -ge 0) { $args += " --when-idle $WhenIdle --deadline $DeadlineHours" }
     return $args
 }
 
@@ -267,6 +280,12 @@ try {
     Remove-Item $payload -Force -ErrorAction SilentlyContinue
     if ($packageDir) { Remove-Item $packageDir -Recurse -Force -ErrorAction SilentlyContinue }
     Disable-GpbAskpass -Helper $askpass
+}
+
+if ($WhenIdle -ge 0) {
+    Write-Host ""
+    Write-Host "Waiting on $($relay.Name). Check it with:  .\gpb.ps1 relay pending $($relay.Name)" -ForegroundColor Green
+    return
 }
 
 # The two values install.sh just printed go to two different places, and putting the endpoint in

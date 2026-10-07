@@ -535,14 +535,46 @@ function Invoke-RelayDeploy($target, $extra) {
     # client cap and the report URL for this relay are declared, and a deploy that contradicted
     # it would be undone by the next one that did not.
     $wantMode = $null
-    foreach ($a in $extra) {
-        switch ($a) {
-            '--psk' { $wantMode = 'psk' }
-            '--token' { $wantMode = 'token' }
-            default { throw "unknown option '$a'. Usage: .\gpb.ps1 relay deploy [name] [--psk|--token]" }
+    $whenIdle = -1
+    $deadline = 0
+    $usage = ".\gpb.ps1 relay deploy [name|all] [--psk|--token] [--when-idle [N]] [--deadline HOURS]"
+    $list = @($extra | Where-Object { $null -ne $_ })
+    for ($i = 0; $i -lt $list.Count; $i++) {
+        $a = [string]$list[$i]
+        switch -Regex ($a) {
+            '^--psk$' { $wantMode = 'psk' }
+            '^--token$' { $wantMode = 'token' }
+            '^--when-idle=(\d+)$' { $whenIdle = [int]$Matches[1] }
+            '^--when-idle$' {
+                # The count is optional: on its own it means an empty relay.
+                $whenIdle = 0
+                if ($i + 1 -lt $list.Count -and [string]$list[$i + 1] -match '^\d+$') { $i++; $whenIdle = [int]$list[$i] }
+            }
+            '^--deadline=(\d+)$' { $deadline = [int]$Matches[1] }
+            '^--deadline$' {
+                if ($i + 1 -ge $list.Count -or [string]$list[$i + 1] -notmatch '^\d+$') { throw "--deadline takes a whole number of hours" }
+                $i++; $deadline = [int]$list[$i]
+            }
+            default { throw "unknown option '$a'. Usage: $usage" }
         }
     }
+    if ($whenIdle -lt 0 -and $deadline -gt 0) { throw "--deadline only means something with --when-idle" }
 
+    # Every relay at once is only offered with --when-idle: without it, it is a restart that drops
+    # every player on every relay in the same minute.
+    if ($target -eq 'all') {
+        if ($whenIdle -lt 0) { throw "'all' restarts every relay; add --when-idle so each waits until it is empty" }
+        foreach ($n in Get-GpbRelayNames -RepoRoot $root) {
+            Say "--- $n"
+            try { Invoke-RelayDeployOne $n $wantMode $whenIdle $deadline }
+            catch { Warn "deploy to $n failed - the others carry on: $_" }
+        }
+        return
+    }
+    Invoke-RelayDeployOne $target $wantMode $whenIdle $deadline
+}
+
+function Invoke-RelayDeployOne($target, $wantMode, $whenIdle, $deadline) {
     $r = Resolve-Relay $target
     if (-not $r) { return }
 
@@ -557,7 +589,7 @@ function Invoke-RelayDeploy($target, $extra) {
     Push-Location $relayDir
     try {
         # deploy.ps1 resolves the name from gpb.conf itself, so it stays usable on its own.
-        & (Join-Path $relayDir 'deploy.ps1') -RemoteHost $r.Name
+        & (Join-Path $relayDir 'deploy.ps1') -RemoteHost $r.Name -WhenIdle $whenIdle -DeadlineHours $deadline
         if ($LASTEXITCODE -ne 0) { throw "deploy failed" }
     } finally { Pop-Location }
 }
@@ -1092,6 +1124,22 @@ switch ($Verb.ToLowerInvariant()) {
                     Disable-GpbAskpass -Helper $askpass
                 }
             }
+            'pending' {
+                # Where a --when-idle deploy has got to: still waiting, and on how many clients,
+                # or installed.
+                $names = if ($Arg2 -eq 'all') { @(Get-GpbRelayNames -RepoRoot $root) } else { @($Arg2) }
+                foreach ($n in $names) {
+                    $host2 = Resolve-Relay $n
+                    if (-not $host2) { continue }
+                    Say "--- $($host2.Name)"
+                    $askpass = Enable-GpbAskpass -Password $host2.Password
+                    try {
+                        & ssh @($host2.SshArgs) 'systemctl is-active gpb-deploy-when-idle; journalctl -u gpb-deploy-when-idle -n 6 -o cat --no-pager'
+                    } finally {
+                        Disable-GpbAskpass -Helper $askpass
+                    }
+                }
+            }
             'test' {
                 Push-Location $relayDir
                 try { & go test -count=1 ./... } finally { Pop-Location }
@@ -1102,6 +1150,10 @@ switch ($Verb.ToLowerInvariant()) {
                 Write-Host "  relay deploy [name]    build, upload and install; the mode comes from"
                 Write-Host "                         gpb.conf, and --psk or --token asserts it"
                 Write-Host "  relay logs [name]      follow journalctl"
+                Write-Host "  relay deploy all --when-idle [N] [--deadline H]"
+                Write-Host "                         every relay, each once it has at most N clients"
+                Write-Host "                         (default 0); the wait runs on the VPS, not here"
+                Write-Host "  relay pending [name|all]  where a --when-idle deploy has got to"
                 Write-Host "  relay test             Go tests"
                 Write-Host "  relay setup            first-time setup, explained"
             }

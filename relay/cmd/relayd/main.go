@@ -215,6 +215,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Before server.New: a process started by a hot restart must adopt the socket and the TUN
+	// device it was handed, not try to open them again while they are still held.
+	inherit, err := inheritedFromParent()
+	if err != nil {
+		log.Error("hot restart: could not take over from the previous binary", "err", err)
+		os.Exit(1)
+	}
+
 	srv, err := server.New(server.Config{
 		Listen:        *listen,
 		TunName:       *tunName,
@@ -235,6 +243,7 @@ func main() {
 		ReportURL:       reportTo,
 		ReportInterval:  *reportEvery,
 		Version:         version,
+		Inherit:         inherit,
 		Log:             log,
 	})
 	if err != nil {
@@ -244,11 +253,18 @@ func main() {
 
 	done := make(chan struct{})
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sig, append([]os.Signal{os.Interrupt, syscall.SIGTERM}, hotRestartSignals...)...)
 	go func() {
-		s := <-sig
-		log.Info("shutdown signal received, closing", "signal", s.String())
-		close(done)
+		for s := range sig {
+			if isHotRestartSignal(s) {
+				// Returns only if the new binary could not be exec'd; this one carries on.
+				hotRestart(srv, log)
+				continue
+			}
+			log.Info("shutdown signal received, closing", "signal", s.String())
+			close(done)
+			return
+		}
 	}()
 
 	if err := srv.Run(done); err != nil {

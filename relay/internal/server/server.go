@@ -101,6 +101,11 @@ type Config struct {
 	// running last month's binary. Cosmetic.
 	Version string
 
+	// Inherit is set when this process was exec'd by a relayd handing over to a new binary: the
+	// socket, the TUN device and the session table come from it instead of being made fresh. Nil
+	// is a normal cold start. See handoff.go.
+	Inherit *Inherited
+
 	Log *slog.Logger
 }
 
@@ -254,6 +259,10 @@ func New(cfg Config) (*Server, error) {
 			"max_clients", cfg.MaxClients, "pool", len(s.freeIPs), "subnet", cfg.Subnet.String())
 	}
 
+	if cfg.Inherit != nil {
+		return s.adopt(cfg.Inherit)
+	}
+
 	dev, err := tun.Open(cfg.TunName)
 	if err != nil {
 		return nil, err
@@ -282,7 +291,12 @@ func New(cfg Config) (*Server, error) {
 	_ = conn.SetReadBuffer(4 << 20)
 	_ = conn.SetWriteBuffer(4 << 20)
 	s.conn = conn
+	s.logReady()
+	return s, nil
+}
 
+func (s *Server) logReady() {
+	cfg, conn, dev := s.cfg, s.conn, s.dev
 	s.log.Info("relay ready",
 		"listen", conn.LocalAddr().String(),
 		"tun", dev.Name(),
@@ -292,7 +306,6 @@ func New(cfg Config) (*Server, error) {
 		"pool", len(s.freeIPs),
 		"max_clients", cfg.MaxClients,
 		"rate_kbps", cfg.RateBytesPerSec/1024)
-	return s, nil
 }
 
 func isBroadcast(ip netip.Addr, p netip.Prefix) bool {

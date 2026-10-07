@@ -209,7 +209,8 @@ relay_install_args() {
     esac
     url=$(relay_report_url "$1")
     [ -z "$url" ] || args="$args --report-url $url"
-    printf '%s' "$args"
+    # --when-idle / --deadline from the command line, the same for every relay in one deploy.
+    printf '%s%s' "$args" "${install_schedule:-}"
 }
 
 
@@ -787,18 +788,51 @@ relay_deploy() {
     # it would be undone by the next one that did not.
     want_mode=
     name=
+    when_idle=
+    deadline=0
+    usage_line="./gpb relay deploy [name|all] [--psk|--token] [--when-idle [N]] [--deadline HOURS]"
     while [ $# -gt 0 ]; do
         case "$1" in
             --psk)   want_mode=psk ;;
             --token) want_mode=token ;;
-            -*)      die "unknown option '$1'. Usage: ./gpb relay deploy [name] [--psk|--token]" ;;
+            --when-idle=*) when_idle=${1#*=} ;;
+            --when-idle)
+                # The count is optional: on its own it means an empty relay.
+                when_idle=0
+                case "${2:-}" in ''|*[!0-9]*) ;; *) when_idle=$2; shift ;; esac
+                ;;
+            --deadline=*) deadline=${1#*=} ;;
+            --deadline) deadline=${2:-}; shift ;;
+            -*)      die "unknown option '$1'. Usage: $usage_line" ;;
             *)
-                [ -z "$name" ] || die "name the relay once: ./gpb relay deploy [name] [--psk|--token]"
+                [ -z "$name" ] || die "name the relay once: $usage_line"
                 name=$1
                 ;;
         esac
         shift
     done
+    case "$when_idle" in *[!0-9]*) die "--when-idle takes a number of clients, got '$when_idle'" ;; esac
+    case "$deadline" in ''|*[!0-9]*) die "--deadline takes a whole number of hours, got '$deadline'" ;; esac
+    [ -n "$when_idle" ] || [ "$deadline" = 0 ] || die "--deadline only means something with --when-idle"
+    install_schedule=
+    [ -z "$when_idle" ] || install_schedule=" --when-idle $when_idle --deadline $deadline"
+
+    # Every relay at once is only offered with --when-idle: without it, it is a restart that drops
+    # every player on every relay in the same minute.
+    if [ "$name" = all ]; then
+        [ -n "$when_idle" ] || die "'all' restarts every relay; add --when-idle so each waits until it is empty"
+        for r in $(relay_names); do
+            say "--- $r"
+            ( relay_deploy_one "$r" "$want_mode" ) || warn "deploy to $r failed - the others carry on"
+        done
+        return 0
+    fi
+    relay_deploy_one "$name" "$want_mode"
+}
+
+relay_deploy_one() {
+    name=$1
+    want_mode=$2
 
     pick_relay "$name"
     target=$picked
@@ -872,6 +906,11 @@ relay_deploy() {
         91) die "the account on $target is not root and has no sudo. Deploy as root, or install sudo there." ;;
         *)  die "deploy failed - see the output above" ;;
     esac
+
+    if [ -n "${install_schedule:-}" ]; then
+        say "Waiting on $target. Check it with:  ./gpb relay pending $target"
+        return 0
+    fi
 
     endpoint=$(relay_endpoint "$target")
     say "Done. Follow it with:  ./gpb relay logs $target"
@@ -1190,6 +1229,17 @@ case "$verb" in
                 arm_askpass "$(relay_password "$host")"
                 relay_ssh "$host" 'journalctl -u relayd -f'
                 ;;
+            pending)
+                # Where a --when-idle deploy has got to: still waiting, and on how many clients,
+                # or installed.
+                need ssh "Install OpenSSH."
+                if [ "${1:-}" = all ]; then hosts=$(relay_names); else pick_relay "${1:-}"; hosts=$picked; fi
+                for host in $hosts; do
+                    say "--- $host"
+                    arm_askpass "$(relay_password "$host")"
+                    relay_ssh "$host" 'systemctl is-active gpb-deploy-when-idle; journalctl -u gpb-deploy-when-idle -n 6 -o cat --no-pager' || true
+                done
+                ;;
             setup)  relay_setup ;;
             *)
                 printf '  relay build            cross-compile relayd for Linux\n'
@@ -1198,6 +1248,10 @@ case "$verb" in
                 printf '  relay deploy [name]    build, upload and install; the mode comes from\n'
                 printf '                         gpb.conf, and --psk or --token asserts it\n'
                 printf '  relay logs [name]      follow journalctl\n'
+                printf '  relay deploy all --when-idle [N] [--deadline H]\n'
+                printf '                         every relay, each once it has at most N clients\n'
+                printf '                         (default 0); the wait runs on the VPS, not here\n'
+                printf '  relay pending [name|all]  where a --when-idle deploy has got to\n'
                 printf '  relay setup            first-time setup, explained\n'
                 ;;
         esac
