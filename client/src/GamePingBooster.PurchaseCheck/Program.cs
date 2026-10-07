@@ -68,6 +68,7 @@ internal static class Program
         await Formatting();
         await PlansAndChoosing();
         await ExpiredTrialPaysAndGetsALicence();
+        await ExpiredSignInOpensThePlans();
         await LiveTrialTokenMovesAtOnce();
         await ClosingTheWindowDoesNotStopTheUpgrade();
         await ReopeningShowsTheSameOrder();
@@ -166,6 +167,60 @@ internal static class Program
         watcher.Dispose();
     }
 
+    private static async Task ExpiredSignInOpensThePlans()
+    {
+        Section("sign-in to an expired account: signed in, no licence, plans open with the reason");
+        var acct = Create("expired-signin", "--expired");
+        var key = DeviceKey();
+        using var client = new LicenceClient(LicenceUrl);
+
+        var refused = await Catch(() => client.FetchTokenAsync(acct.Token, key, "check", default));
+        Check("the server codes the refusal", refused?.Code, "expired");
+        Check("which reads as the app's own sentence", refused is null ? null : UpgradeViewModel.NoticeFor(refused),
+            GamePingBooster.App.Services.Localization.Loc.T("upgrade.expired"));
+        Check("a refusal from a server without codes reads the same",
+            UpgradeViewModel.NoticeFor(new LicenceException("server text", HttpStatusCode.PaymentRequired)),
+            GamePingBooster.App.Services.Localization.Loc.T("upgrade.expired"));
+        Check("an uncoded-for reason keeps the server's sentence",
+            UpgradeViewModel.NoticeFor(new LicenceException("verify first", HttpStatusCode.PaymentRequired, "unverified")),
+            "verify first");
+
+        // A PipeClient that is never started: on a 402 nothing is sent to the service.
+        string? saved = null;
+        var login = new LoginViewModel(LicenceUrl, key, new PipeClient(), saveRefreshToken: t => saved = t);
+        await login.FinishWithRefreshTokenAsync(acct.Token, default);
+        Check("the sign-in counts as done", login.Succeeded, true);
+        Check("and is not shown as an error", login.HasError, false);
+        Check("the refresh token is kept", saved, acct.Token);
+        Check("the plans are asked for, with the reason", login.NeedsPlan, GamePingBooster.App.Services.Localization.Loc.T("upgrade.expired"));
+
+        var (vm, watcher, paid) = NewVm(acct.Token);
+        var plans = new UpgradeViewModel(LicenceUrl, watcher, () => acct.Token) { Notice = login.NeedsPlan };
+        Check("the notice shows while loading", plans.HasNotice, true);
+        await plans.LoadAsync(default);
+        Check("the kept token loads the plans", plans.Current, UpgradeViewModel.Screen.Choose);
+        Check("the notice shows over the plans", plans.HasNotice, true);
+
+        Check("terms not ticked: Pay is off", plans.CanPay, false);
+        await plans.PayAsync(default);
+        Check("and pressing it anyway makes no order", plans.Current, UpgradeViewModel.Screen.Choose);
+        Check("terms link is the site's page", plans.TermsUrl, new Uri(LicenceUrl).GetLeftPart(UriPartial.Authority) + "/terms-of-service");
+        Check("refund link is the site's page", plans.RefundUrl, new Uri(LicenceUrl).GetLeftPart(UriPartial.Authority) + "/refund-policy");
+        plans.Agreed = true;
+        Check("ticked: Pay is on", plans.CanPay, true);
+        await plans.PayAsync(default);
+        Check("and is gone once there is an order", plans.HasNotice, false);
+
+        Pay(plans.InvoiceNumber);
+        await WaitFor(() => plans.IsPaid, "the screen to turn paid");
+        var token = await client.FetchTokenAsync(acct.Token, key, "check", default);
+        Check("paid: the kept refresh token now gets a licence", token.Token.Length > 0, true);
+        plans.Detach();
+        vm.Detach();
+        watcher.Dispose();
+        Check("renewal triggered once", paid.Count, 1);
+    }
+
     private static async Task LiveTrialTokenMovesAtOnce()
     {
         Section("purchase: during a live trial the next token runs past the trial");
@@ -213,7 +268,7 @@ internal static class Program
         var invoice = vm.InvoiceNumber;
         vm.Detach();
 
-        var again = new UpgradeViewModel(LicenceUrl, watcher, () => acct.Token);
+        var again = new UpgradeViewModel(LicenceUrl, watcher, () => acct.Token) { Agreed = true };
         await again.LoadAsync(default);
         Check("straight to the pay screen", again.Current, UpgradeViewModel.Screen.Pay);
         Check("same invoice", again.InvoiceNumber, invoice);
@@ -363,12 +418,12 @@ internal static class Program
         var acct = Create("down", "--trial-hours", "1");
         var url = "http://127.0.0.1:59999";
         var watcher = new PurchaseWatcher(() => acct.Token, () => { }, a => a());
-        var vm = new UpgradeViewModel(url, watcher, () => acct.Token, _ => new LicenceClient(url));
+        var vm = new UpgradeViewModel(url, watcher, () => acct.Token, _ => new LicenceClient(url)) { Agreed = true };
         await vm.LoadAsync(default);
         Check("failed screen", vm.Current, UpgradeViewModel.Screen.Failed);
         Check("with a reason", vm.Message.Length > 10, true);
 
-        var vm2 = new UpgradeViewModel(LicenceUrl, watcher, () => acct.Token);
+        var vm2 = new UpgradeViewModel(LicenceUrl, watcher, () => acct.Token) { Agreed = true };
         await vm2.StartOverAsync(default);
         Check("retry against a live server: choose", vm2.Current, UpgradeViewModel.Screen.Choose);
         vm.Detach();
@@ -384,7 +439,7 @@ internal static class Program
         var paid = new List<int>();
         var watcher = new PurchaseWatcher(() => acct.Token, () => paid.Add(1), a => a(),
             _ => new LicenceClient(down ? "http://127.0.0.1:59999" : LicenceUrl));
-        var vm = new UpgradeViewModel(LicenceUrl, watcher, () => acct.Token);
+        var vm = new UpgradeViewModel(LicenceUrl, watcher, () => acct.Token) { Agreed = true };
         await vm.LoadAsync(default);
         await vm.PayAsync(default);
 
@@ -424,7 +479,7 @@ internal static class Program
         string? token = acct.Token;
         var paid = new List<int>();
         var watcher = new PurchaseWatcher(() => token, () => paid.Add(1), a => a());
-        var vm = new UpgradeViewModel(LicenceUrl, watcher, () => token);
+        var vm = new UpgradeViewModel(LicenceUrl, watcher, () => token) { Agreed = true };
         await vm.LoadAsync(default);
         await vm.PayAsync(default);
         token = null;
@@ -481,7 +536,7 @@ internal static class Program
     {
         var paid = new List<int>();
         var watcher = new PurchaseWatcher(() => token, () => { lock (paid) paid.Add(1); }, a => a());
-        return (new UpgradeViewModel(LicenceUrl, watcher, () => token), watcher, paid);
+        return (new UpgradeViewModel(LicenceUrl, watcher, () => token) { Agreed = true }, watcher, paid);
     }
 
     internal sealed record Account(string UserId, string Email, string Token);

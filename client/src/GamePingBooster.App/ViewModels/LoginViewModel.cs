@@ -31,14 +31,17 @@ public sealed class LoginViewModel : INotifyPropertyChanged
     private readonly PipeClient _pipe;
 
     private readonly ProfileSync? _profileSync;
+    private readonly Action<string> _saveRefreshToken;
 
+    /// <param name="saveRefreshToken">Where the refresh token goes. RefreshTokenStore unless a test says otherwise.</param>
     public LoginViewModel(string licenceUrl, string devicePublicKey, PipeClient pipe,
-        ProfileSync? profileSync = null)
+        ProfileSync? profileSync = null, Action<string>? saveRefreshToken = null)
     {
         _licenceUrl = licenceUrl;
         _devicePublicKey = devicePublicKey;
         _pipe = pipe;
         _profileSync = profileSync;
+        _saveRefreshToken = saveRefreshToken ?? RefreshTokenStore.Save;
     }
 
     /// <summary>Shown so somebody can tell which server they are about to hand a password to.</summary>
@@ -124,6 +127,12 @@ public sealed class LoginViewModel : INotifyPropertyChanged
     public bool Succeeded { get; private set; }
 
     /// <summary>
+    /// Set when the sign-in worked but the account holds no plan: the line the plans window opens
+    /// with. Null for an ordinary sign-in.
+    /// </summary>
+    public string? NeedsPlan { get; private set; }
+
+    /// <summary>
     /// Signs in through the person's own browser. See LoopbackAuth for how, and why loopback.
     ///
     /// FinishAsync is kept separate rather than folded in here. It was shared with the password
@@ -205,6 +214,16 @@ public sealed class LoginViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
+    /// The sign-in from a refresh token already in hand: what follows the browser. Exists for the
+    /// purchase harness, which has a refresh token and no browser; errors are thrown, not shown.
+    /// </summary>
+    public async Task FinishWithRefreshTokenAsync(string refreshToken, CancellationToken ct)
+    {
+        using var client = new LicenceClient(_licenceUrl);
+        await FinishAsync(client, refreshToken, ct).ConfigureAwait(true);
+    }
+
+    /// <summary>
     /// Everything that happens once a refresh token exists, whichever way it was obtained.
     ///
     /// These four steps have an order and a reason for it. Written out here rather than inline so
@@ -218,13 +237,33 @@ public sealed class LoginViewModel : INotifyPropertyChanged
         // over the limit signs in perfectly well and then cannot get a token - which is
         // deliberate: enforcement lives where the user cannot patch it out, and refusing the
         // sign-in would punish somebody with a desktop and a laptop.
-        var token = await client.FetchTokenAsync(refreshToken, _devicePublicKey,
-            Environment.MachineName, ct).ConfigureAwait(true);
+        TokenResult token;
+        try
+        {
+            token = await client.FetchTokenAsync(refreshToken, _devicePublicKey,
+                Environment.MachineName, ct).ConfigureAwait(true);
+        }
+        catch (LicenceException ex) when (ex.StatusCode == System.Net.HttpStatusCode.PaymentRequired)
+        {
+            // No plan: a trial that ran out, or one that never started. That is a signed-in account
+            // with nothing to connect with, not a failed sign-in - and since plans are sold in the
+            // app, the refresh token is exactly what buying one needs (/app/plans, /app/orders). So
+            // it is kept and the window closes onto the plans, rather than stopping here on an
+            // error that sends the person to the website. Connect stays refused by the server
+            // either way; nothing goes to the service, and TokenRefresher asks again once paid.
+            //
+            // Only 402. A device limit (403), a device bound to another account (409) or an
+            // outdated app (426) are not fixed by buying, and keep the old meaning of an error here.
+            _saveRefreshToken(refreshToken);
+            NeedsPlan = UpgradeViewModel.NoticeFor(ex);
+            Succeeded = true;
+            return;
+        }
 
         // Store the refresh token only after the token call succeeded. Keeping it after a
         // refused device would leave the app quietly retrying a sign-in that cannot produce
         // anything, and the user with no idea why.
-        RefreshTokenStore.Save(refreshToken);
+        _saveRefreshToken(refreshToken);
 
         await _pipe.SendAsync(new Core.Ipc.CommandMessage
         {

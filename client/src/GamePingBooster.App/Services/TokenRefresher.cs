@@ -132,12 +132,20 @@ public sealed class TokenRefresher : IAsyncDisposable
     /// <param name="upgradeRequired">
     /// Called, from the loop's thread, when the licence server refuses this version as too old (426).
     /// </param>
-    public TokenRefresher(PipeClient pipe, Action<string?> report, Action? upgradeRequired = null)
+    /// <param name="noPlan">
+    /// Called, from the loop's thread, when the account has no plan (402), with the sentence the
+    /// plans window should open with.
+    /// </param>
+    public TokenRefresher(PipeClient pipe, Action<string?> report, Action? upgradeRequired = null,
+        Action<string>? noPlan = null)
     {
         _pipe = pipe;
         _report = report;
         _upgradeRequired = upgradeRequired;
+        _noPlan = noPlan;
     }
+
+    private readonly Action<string>? _noPlan;
 
     public void Start() => _loop ??= Task.Run(() => LoopAsync(_cts.Token));
 
@@ -398,6 +406,14 @@ public sealed class TokenRefresher : IAsyncDisposable
             // the app is told, so it can put the update in front of the person instead of a footer line.
             var upgradeRequired = ex.StatusCode == System.Net.HttpStatusCode.UpgradeRequired;
             if (upgradeRequired) _upgradeRequired?.Invoke();
+
+            // No plan is something the app can now do something about: the plans are sold in it.
+            if (ex.StatusCode == System.Net.HttpStatusCode.PaymentRequired)
+            {
+                // Not verified, or no trial for this address, keep the server's sentence above.
+                if (ex.Code is null or "expired") _report(Loc.T("notice.noPlan"));
+                _noPlan?.Invoke(ViewModels.UpgradeViewModel.NoticeFor(ex));
+            }
 
             if (ex.StatusCode == System.Net.HttpStatusCode.PaymentRequired || upgradeRequired)
             {

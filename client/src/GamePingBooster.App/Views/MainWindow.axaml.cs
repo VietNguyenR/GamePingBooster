@@ -55,17 +55,80 @@ public partial class MainWindow : SurfaceWindow
             return;
         }
 
+        // Signed in already, holding no licence: not somebody to ask for a sign-in. When that is
+        // an account with no plan, TokenRefresher's 402 offers the plans instead - see OfferPlans.
+        if (RefreshTokenStore.Exists())
+        {
+            // A plans offer that arrived while this window could not take one goes now.
+            if (_pendingPlans is { } waiting) OfferPlans(waiting);
+            return;
+        }
+
         _offeredSignIn = true;
         _ = ShowSignInAsync(vm);
     }
 
     private async Task ShowSignInAsync(MainViewModel vm)
     {
-        var dialog = new LoginWindow
+        var login = new LoginViewModel(vm.LicenceUrl!, vm.DevicePublicKey!, _pipe!, _profileSync);
+        await new LoginWindow { DataContext = login }.ShowDialog(this);
+
+        // The menu and the banner follow at once rather than at the next status. Matters most for
+        // an account with no plan: no licence arrives to change anything else on screen.
+        vm.RefreshSignedIn();
+
+        // Signed in to an account with no plan: straight on to the plans, saying why. This is the
+        // sign-in that used to stop on "your trial has ended, buy at gamepingbooster.com".
+        if (login.NeedsPlan is { } notice)
         {
-            DataContext = new LoginViewModel(vm.LicenceUrl!, vm.DevicePublicKey!, _pipe!, _profileSync),
-        };
-        await dialog.ShowDialog(this);
+            _offeredPlans = true;
+            await ShowPlansAsync(notice);
+        }
+    }
+
+    /// <summary>The plans window has been put up on its own once this run - closing it is "not now".</summary>
+    private bool _offeredPlans;
+
+    /// <summary>A plans offer waiting for the window to be on screen and free of other dialogs.</summary>
+    private string? _pendingPlans;
+
+    /// <summary>A plans window is open, from any path. One at a time.</summary>
+    private bool _plansOpen;
+
+    /// <summary>
+    /// Opens the plans by themselves for an account with no plan - TokenRefresher calls this on a
+    /// 402, which on a signed-in machine is at every start while the account is lapsed. Once per
+    /// run, like the sign-in offer, and under the same conditions: never over the update window,
+    /// never into the tray, never while a game might be full screen in front of a hidden window.
+    /// </summary>
+    public void OfferPlans(string notice)
+    {
+        if (_offeredPlans || _plansOpen || _purchases is null) return;
+        if (_updateOpen || !_hasOpened || !IsVisible || OwnedWindows.Count > 0)
+        {
+            _pendingPlans = notice;
+            return;
+        }
+
+        _pendingPlans = null;
+        _offeredPlans = true;
+        _ = ShowPlansAsync(notice);
+    }
+
+    private async Task ShowPlansAsync(string? notice)
+    {
+        if (_purchases is null || DataContext is not MainViewModel vm || string.IsNullOrWhiteSpace(vm.LicenceUrl)) return;
+
+        _plansOpen = true;
+        try
+        {
+            var upgrade = new UpgradeViewModel(vm.LicenceUrl, _purchases) { Notice = notice };
+            await new UpgradeWindow { DataContext = upgrade }.ShowDialog(this);
+        }
+        finally
+        {
+            _plansOpen = false;
+        }
     }
 
     private ProfileSync? _profileSync;
@@ -161,6 +224,9 @@ public partial class MainWindow : SurfaceWindow
                 DataContext = new AccountViewModel(vm.LicenceUrl, vm.DevicePublicKey, _pipe, _purchases),
             };
             await account.ShowDialog(this);
+
+            // Signed out in there, perhaps: back to "Sign in" without waiting for the next status.
+            vm.RefreshSignedIn();
             return;
         }
 

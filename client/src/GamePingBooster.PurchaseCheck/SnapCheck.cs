@@ -75,6 +75,15 @@ internal static class SnapCheck
             await Until(() => vm.IsChoose);
             await Snap(window, "2-plans.png");
 
+            // The same window as a sign-in to an expired account opens it.
+            var expiredVm = new UpgradeViewModel(Program.LicenceUrl, watcher, () => account.Token) { Notice = Loc.T("upgrade.expired") };
+            var expiredWindow = OffScreen(new UpgradeWindow { DataContext = expiredVm });
+            expiredWindow.Show();
+            await Until(() => expiredVm.IsChoose);
+            await Snap(expiredWindow, "2b-plans-after-expired-sign-in.png");
+            expiredWindow.Close();
+
+            vm.Agreed = true;
             var longer = vm.Tabs.FirstOrDefault(t => t.Months == 3);
             if (longer is not null)
             {

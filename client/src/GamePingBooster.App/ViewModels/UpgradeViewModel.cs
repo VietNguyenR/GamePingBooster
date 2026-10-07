@@ -63,6 +63,7 @@ public sealed class UpgradeViewModel : INotifyPropertyChanged
             Raise(nameof(IsClosed));
             Raise(nameof(IsBlocked));
             Raise(nameof(IsFailed));
+            Raise(nameof(HasNotice));
         }
     }
 
@@ -94,6 +95,24 @@ public sealed class UpgradeViewModel : INotifyPropertyChanged
     /// <summary>The sentence of a blocked, closed or failed screen.</summary>
     public string Message { get => _message; private set => Set(ref _message, value); }
 
+    /// <summary>
+    /// Why this window opened by itself, shown above the plans: a sign-in that found the account
+    /// with no plan (see LoginViewModel.NeedsPlan). Null when somebody chose to open it.
+    /// </summary>
+    public string? Notice { get; init; }
+
+    /// <summary>Only while choosing: once an order exists, "your account has expired" is old news.</summary>
+    public bool HasNotice => !string.IsNullOrEmpty(Notice) && (IsLoading || IsChoose);
+
+    /// <summary>
+    /// The notice for a 402 from /auth/token. "expired" - and a server older than the codes - gets
+    /// the app's own sentence, because the server's sends people to the website from inside a
+    /// window that sells plans. Not verified, or an address that earns no trial, keep the server's:
+    /// it names the thing to do, and buying is still a way out of both.
+    /// </summary>
+    public static string NoticeFor(LicenceException refusal) =>
+        refusal.Code is null or "expired" ? Loc.T("upgrade.expired") : refusal.Message;
+
     // ------------------------------------------------------------------------ choosing
 
     private List<PlanGroup> _groups = [];
@@ -113,7 +132,28 @@ public sealed class UpgradeViewModel : INotifyPropertyChanged
 
     public PlanCard? Selected => Cards.FirstOrDefault(c => c.Code == _selectedCode);
     public string TotalText => Selected is { } c ? Money(c.AmountMinor) : "-";
-    public bool CanPay => Selected is not null && !Busy;
+    public bool CanPay => Selected is not null && !Busy && Agreed;
+
+    private bool _agreed;
+
+    /// <summary>
+    /// The terms and refund policy ticked, as on the web checkout. Not remembered: every new order
+    /// is agreed to afresh. An order already open was agreed to when it was made, so reopening the
+    /// window onto it does not ask again.
+    /// </summary>
+    public bool Agreed
+    {
+        get => _agreed;
+        set { if (Set(ref _agreed, value)) Raise(nameof(CanPay)); }
+    }
+
+    /// <summary>The licence server's site, where the terms live: gamepingbooster.com in production.</summary>
+    private string Site => Uri.TryCreate(_licenceUrl, UriKind.Absolute, out var u)
+        ? u.GetLeftPart(UriPartial.Authority)
+        : "https://gamepingbooster.com";
+
+    public string TermsUrl => Site + "/terms-of-service";
+    public string RefundUrl => Site + "/refund-policy";
 
     // ------------------------------------------------------------------------ paying
 
@@ -240,7 +280,7 @@ public sealed class UpgradeViewModel : INotifyPropertyChanged
     /// <summary>Asks the server for the order and shows its QR.</summary>
     public async Task PayAsync(CancellationToken ct)
     {
-        if (Selected is not { } plan || Busy) return;
+        if (Selected is not { } plan || Busy || !Agreed) return;
         var token = _refreshToken();
         if (token is null)
         {

@@ -52,6 +52,12 @@
       <Setter Property="Background" Value="#2563EB" />
       <Setter Property="Foreground" Value="White" />
     </Style>
+    <Style Selector="HyperlinkButton.inline">
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="Foreground" Value="#60A5FA" />
+    </Style>
     <Style Selector="Button.copy">
       <Setter Property="Background" Value="#242424" />
       <Setter Property="Foreground" Value="#ababab" />
@@ -72,6 +78,11 @@
         <TextBlock Text="{DynamicResource upgrade.title}" Foreground="#ababab" FontSize="18" FontWeight="SemiBold" />
         <TextBlock Classes="hint" Text="{DynamicResource upgrade.sub}" />
       </StackPanel>
+
+      <!-- Why the window opened by itself: signed in, but no plan. -->
+      <Border Background="#422006" CornerRadius="8" Padding="12,8" IsVisible="{Binding HasNotice}">
+        <TextBlock Text="{Binding Notice}" Foreground="#fde68a" FontSize="12" TextWrapping="Wrap" />
+      </Border>
 
       <TextBlock Classes="label" Text="{DynamicResource account.loading}" IsVisible="{Binding IsLoading}" />
 
@@ -129,6 +140,14 @@
           <TextBlock Text="{Binding DiscountText}" Foreground="#bbf7d0" FontSize="12" TextWrapping="Wrap" />
         </Border>
 
+        <!-- Ticked before Pay, as on the web checkout. The links open the site's own pages. -->
+        <CheckBox IsChecked="{Binding Agreed}" VerticalAlignment="Top">
+          <TextBlock FontSize="12" Foreground="#ababab" TextWrapping="Wrap">
+            <!-- One line on purpose: whitespace between inlines would be rendered as spaces. -->
+            <Run Text="{DynamicResource upgrade.agree.pre}" /><InlineUIContainer BaselineAlignment="TextBottom"><HyperlinkButton Classes="inline" Content="{DynamicResource upgrade.agree.terms}" Click="OnTermsClick" /></InlineUIContainer><Run Text="{DynamicResource upgrade.agree.and}" /><InlineUIContainer BaselineAlignment="TextBottom"><HyperlinkButton Classes="inline" Content="{DynamicResource upgrade.agree.refund}" Click="OnRefundClick" /></InlineUIContainer><Run Text="{DynamicResource upgrade.agree.post}" />
+          </TextBlock>
+        </CheckBox>
+
         <Grid ColumnDefinitions="*,Auto">
           <StackPanel Grid.Column="0" VerticalAlignment="Center">
             <TextBlock Classes="label" Text="{DynamicResource upgrade.total}" />
@@ -138,6 +157,7 @@
                   IsEnabled="{Binding CanPay}" Padding="22,10"
                   Background="#2563EB" Foreground="White" />
         </Grid>
+
 
         <TextBlock Classes="hint" Text="{DynamicResource upgrade.terms}" />
       </StackPanel>

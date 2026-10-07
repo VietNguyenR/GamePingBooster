@@ -2,6 +2,7 @@ using Avalonia.Controls;
 using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
+using GamePingBooster.App.Services;
 using GamePingBooster.App.ViewModels;
 
 namespace GamePingBooster.App.Views;
@@ -43,6 +44,18 @@ public partial class UpgradeWindow : SurfaceWindow
     private void OnCardClick(object? sender, RoutedEventArgs e)
     {
         if (DataContext is UpgradeViewModel vm && (sender as Control)?.DataContext is PlanCard card) vm.PickPlan(card.Code);
+    }
+
+    // Through BrowserLauncher, not the hyperlink's own NavigateUri: some PCs have no working https
+    // handler for the shell, and BrowserLauncher is what copes with that for the sign-in link too.
+    private void OnTermsClick(object? sender, RoutedEventArgs e)
+    {
+        if (DataContext is UpgradeViewModel vm) BrowserLauncher.TryOpen(vm.TermsUrl);
+    }
+
+    private void OnRefundClick(object? sender, RoutedEventArgs e)
+    {
+        if (DataContext is UpgradeViewModel vm) BrowserLauncher.TryOpen(vm.RefundUrl);
     }
 
     private async void OnPayClick(object? sender, RoutedEventArgs e)

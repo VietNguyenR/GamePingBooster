@@ -44,6 +44,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             if (!Set(ref _licenceUrl, value)) return;
             Raise(nameof(ShowLicence));
             Raise(nameof(SetupText));
+            Raise(nameof(ShowSetupBanner));
         }
     }
 
@@ -68,8 +69,32 @@ public sealed class MainViewModel : INotifyPropertyChanged
             Raise(nameof(LicenceText));
             Raise(nameof(AccountMenuText));
             Raise(nameof(SetupText));
+            Raise(nameof(ShowSetupBanner));
         }
     }
+
+    private bool _signedIn;
+
+    /// <summary>
+    /// Signed in on this machine: a licence token in the service, or a refresh token on disk. Not
+    /// the same as <see cref="HasToken"/> - an account with no plan is signed in and holds no
+    /// licence (the 402 clears it), and showing that person "Sign in" sends them round in a circle.
+    /// Re-read with every status, so a sign-in or sign-out shows within the second.
+    /// </summary>
+    public bool SignedIn
+    {
+        get => _signedIn;
+        private set
+        {
+            if (!Set(ref _signedIn, value)) return;
+            Raise(nameof(LicenceText));
+            Raise(nameof(AccountMenuText));
+            Raise(nameof(ShowSetupBanner));
+        }
+    }
+
+    /// <summary>Called right after a sign-in or sign-out, rather than waiting for the next status.</summary>
+    public void RefreshSignedIn() => SignedIn = HasToken || RefreshTokenStore.Exists();
 
     private DateTimeOffset? _tokenExpiresAt;
     public DateTimeOffset? TokenExpiresAt
@@ -129,7 +154,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool ShowLicenceLine => ShowLicence && LicenceText.Length > 0;
 
     /// <summary>What the menu item says. One entry, two states, no dead end either way.</summary>
-    public string AccountMenuText => Loc.T(HasToken ? "main.account.account" : "main.account.signIn");
+    public string AccountMenuText => Loc.T(SignedIn ? "main.account.account" : "main.account.signIn");
 
     // ------------------------------------------------------------ updates
 
@@ -206,7 +231,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
             }
             if (LicenceBlocked) return LicenceRefusal!;
             if (!string.IsNullOrEmpty(LicenceNotice)) return LicenceNotice!;
-            if (!HasToken) return Loc.T("licence.notSignedIn");
+            if (!SignedIn) return Loc.T("licence.notSignedIn");
+
+            // Signed in with no licence and nothing said about it yet: the first renewal is on its
+            // way, and its answer - "expired, buy a plan", usually - lands in LicenceNotice above.
+            if (!HasToken) return "";
 
             // A licence server that is set but has never sent a game list means the ranges are
             // whatever the installer carried. The tunnel works, so nothing else would say so.
@@ -284,12 +313,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             if (!Set(ref _configured, value)) return;
             Raise(nameof(NeedsSetup));
+            Raise(nameof(ShowSetupBanner));
             Raise(nameof(ShowStartHint));
             Raise(nameof(CanPressAction));
         }
     }
 
     public bool NeedsSetup => !Configured;
+
+    /// <summary>
+    /// The setup banner, except for an account that is signed in but holds no plan: the relays come
+    /// with a licence, so it is "not configured" too, and "sign in to begin" is wrong for somebody
+    /// who just did. Their next step is the plans, which open by themselves and are on the menu.
+    /// </summary>
+    public bool ShowSetupBanner => NeedsSetup && !(ShowLicence && !HasToken && SignedIn);
 
     /// <summary>
     /// What the setup banner asks for. With a licence server and no sign-in, that is signing in -
@@ -1280,6 +1317,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         QualitySharing = status.QualitySharing;
         DevicePublicKey = status.DevicePublicKey;
         HasToken = status.HasToken;
+        RefreshSignedIn();
         TokenExpiresAt = status.TokenExpiresAt is { } unix
             ? DateTimeOffset.FromUnixTimeSeconds(unix)
             : null;

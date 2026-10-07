@@ -60,7 +60,8 @@ public partial class App : Application
                 // PropertyChanged off the UI thread breaks Avalonia's bindings in ways that
                 // surface much later and somewhere else.
                 message => Dispatcher.UIThread.Post(() => vm.LicenceNotice = message),
-                OnUpgradeRequired);
+                OnUpgradeRequired,
+                notice => Dispatcher.UIThread.Post(() => window.OfferPlans(notice)));
             _pipe.StatusReceived += _refresher.OnStatus;
             // Coming back to the app - typically from the payment page - asks again at once when
             // there is no usable token, rather than waiting out the refusal backoff.
