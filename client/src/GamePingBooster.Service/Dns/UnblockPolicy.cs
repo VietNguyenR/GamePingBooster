@@ -12,8 +12,16 @@ internal sealed record UnblockApp(
     IReadOnlyList<string> Scope,
     IReadOnlyList<string> Excluded,
     string Canary,
-    IReadOnlyList<string>? Tunnel = null)
+    IReadOnlyList<string>? Tunnel = null,
+    IReadOnlyList<string>? Proxied = null)
 {
+    /// <summary>
+    /// Whether the name's connections go to the profile's lobby proxies first: on the tunnel list AND on the proxied
+    /// list. Only meaningful with proxies in the policy - see SplitProxy.
+    /// </summary>
+    public bool ViaLobbyProxy(string name) =>
+        RoutesThroughTunnel(name) && (Proxied ?? []).Any(suffix => Matches(name, suffix));
+
     /// <summary>
     /// Whether <paramref name="name"/> is in the profile's tunnel list: claimed, and under one of its tunnel names.
     /// See ProfileUnblock.Tunnel.
@@ -95,7 +103,8 @@ internal sealed record UnblockApp(
 /// anyway. A profile that DOES carry a list replaces it entirely, including with an empty one, so
 /// switching the feature off for everybody stays a server-side edit.
 /// </summary>
-internal sealed record UnblockPolicy(IReadOnlyList<UnblockApp> Apps, string Source)
+internal sealed record UnblockPolicy(IReadOnlyList<UnblockApp> Apps, string Source,
+    IReadOnlyList<LobbyProxyEntry>? LobbyProxies = null)
 {
     public bool IsEmpty => Apps.Count == 0;
 
@@ -157,12 +166,14 @@ internal sealed record UnblockPolicy(IReadOnlyList<UnblockApp> Apps, string Sour
                 scope,
                 Clean(entry.Excluded),
                 canary,
-                Clean(entry.Tunnel)));
+                Clean(entry.Tunnel),
+                Clean(entry.Proxied)));
         }
 
         return apps.Count == 0
             ? Empty
-            : new UnblockPolicy(apps, $"the profile ({apps.Count} service(s))");
+            : new UnblockPolicy(apps, $"the profile ({apps.Count} service(s))",
+                [.. profile.LobbyProxies.Where(p => !string.IsNullOrWhiteSpace(p.Host) && p.Port is > 0 and < 65536)]);
     }
 
     /// <summary>Which service claims this name, or null. First match wins; the lists should not overlap.</summary>

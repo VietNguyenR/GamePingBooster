@@ -43,6 +43,9 @@ public static class ProfileMerge
             Unblock = primary.Unblock.Count > 0
                 ? primary.Unblock
                 : bundles.FirstOrDefault(b => b.Unblock.Count > 0)?.Unblock ?? [],
+            LobbyProxies = primary.LobbyProxies.Count > 0
+                ? primary.LobbyProxies
+                : bundles.FirstOrDefault(b => b.LobbyProxies.Count > 0)?.LobbyProxies ?? [],
         };
 
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

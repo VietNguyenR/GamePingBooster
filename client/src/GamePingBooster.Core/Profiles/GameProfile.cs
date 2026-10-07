@@ -37,6 +37,24 @@ public sealed class ProfileBundle
     /// client release and no way for an old client to misread it.
     /// </summary>
     [JsonPropertyName("unblock")] public List<UnblockEntry> Unblock { get; set; } = [];
+
+    /// <summary>
+    /// Servers that carry a service's lobby downloads for players whose own line reaches them slowly (PUBG's mainland
+    /// .cn mirror: 100-250 KB/s from Vietnam, about 1 MB/s from Hong Kong). One list for every game, kept from one
+    /// bundle like <see cref="Unblock"/>. Absent or empty means no proxy, which is also what a client that predates
+    /// the field does - so the list can be changed, or emptied, on the server without a client release.
+    /// </summary>
+    [JsonPropertyName("lobbyProxies")] public List<LobbyProxyEntry> LobbyProxies { get; set; } = [];
+}
+
+/// <summary>One lobby proxy (relay/cmd/lobbyproxy): a TCP address that takes the game's TLS connection and joins it to the real server.</summary>
+public sealed class LobbyProxyEntry
+{
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
+
+    /// <summary>An address or a DNS name.</summary>
+    [JsonPropertyName("host")] public string Host { get; set; } = "";
+    [JsonPropertyName("port")] public int Port { get; set; } = 443;
 }
 
 /// <summary>
@@ -85,6 +103,12 @@ public sealed class UnblockEntry
     /// Absent or empty routes nothing.
     /// </summary>
     [JsonPropertyName("tunnel")] public List<string> Tunnel { get; set; } = [];
+
+    /// <summary>
+    /// Names under <see cref="Tunnel"/> whose lobby connection goes through the profile's lobby proxies first (a name
+    /// not also in the tunnel list is ignored). Absent or empty sends nothing there.
+    /// </summary>
+    [JsonPropertyName("proxied")] public List<string> Proxied { get; set; } = [];
 }
 
 public sealed class GameEntry

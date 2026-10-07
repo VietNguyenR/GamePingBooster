@@ -107,3 +107,6 @@ tools/Check-Steam.ps1
 tools/Probe-SniSplit.ps1
 tools/Test-SniSplitLobby.ps1
 tools/Watch-LobbyPath.ps1
+relay/cmd/lobbyproxy/main_test.go
+relay/cmd/lobbyproxy/main.go
+relay/deploy/lobbyproxy.service

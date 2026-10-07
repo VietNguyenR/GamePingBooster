@@ -123,7 +123,14 @@ internal sealed class LocalResolver : IAsyncDisposable
             _tunnelEdges = new WorkingEdges(_doh, log, beforeProbe: (name, addresses) => routes.Route(name, addresses),
                 preferPlayersNetwork: true, memory: memory?.Tunnel, background: _stopping.Token,
                 keepFresh: TunnelKeepFresh, keepFreshFor: name => _policy.ClaimedBy(name)?.RoutesThroughTunnel(name) == true);
-            if (split) _split = new SplitProxy(_doh, routes, log, memory?.Split);
+            if (split)
+            {
+                _split = new SplitProxy(_doh, routes, log, memory?.Split)
+                {
+                    LobbyProxies = policy.LobbyProxies ?? [],
+                    IsProxied = name => policy.ClaimedBy(name)?.ViaLobbyProxy(name) == true,
+                };
+            }
         }
     }
 

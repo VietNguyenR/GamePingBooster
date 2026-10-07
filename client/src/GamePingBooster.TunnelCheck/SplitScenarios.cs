@@ -104,6 +104,65 @@ internal static partial class Program
             verdicts[SplitBlocked].Why);
     }
 
+    private const string LobbyName = "prod-live-front.playbattlegrounds.com.cn";
+
+    private static async Task AProxiedNameGoesThroughTheLobbyProxy()
+    {
+        using var certificate = SelfSigned();
+        // The lobby proxy: any TLS server will do for the game's side of it.
+        await using var lobbyProxy = new LineFilter("never.matches.example", reassembles: false, certificate);
+        await using var proxy = new SplitProxy(new DohUpstream(_ => { }), new SplitRoutes(), s => Log.Enqueue(s),
+            listen: new IPEndPoint(IPAddress.Loopback, 0), edgePort: 1, source: _ => LineAddress)
+        {
+            LobbyProxies = [new GamePingBooster.Core.Profiles.LobbyProxyEntry { Id = "t", Host = "127.0.0.1", Port = lobbyProxy.Port }],
+            IsProxied = name => name == LobbyName,
+        };
+        proxy.Start();
+
+        Check("a proxied name is answered with the proxy at once, before any verdict", proxy.Answers(LobbyName), "not answered");
+        Check("a name that is not proxied is not", !proxy.Answers("example.com"), "answered");
+
+        var status = await GetThroughAsync(proxy.Endpoint, LobbyName);
+        Check($"a connection for it is carried by the lobby proxy ({status})",
+            status.StartsWith("HTTP/1.1 200", StringComparison.Ordinal) && proxy.ProxiedConnections == 1
+            && proxy.SplitConnections == 0 && proxy.FellBack == 0,
+            $"proxied {proxy.ProxiedConnections}, line {proxy.SplitConnections}, fell back {proxy.FellBack}");
+    }
+
+    private static async Task ADeadLobbyProxyLeavesTheNameToTheLine()
+    {
+        using var certificate = SelfSigned();
+        await using var edge = new LineFilter("never.matches.example", reassembles: false, certificate);
+
+        // Nothing listens here: the port was free a moment ago.
+        var closed = new TcpListener(IPAddress.Loopback, 0);
+        closed.Start();
+        var deadPort = ((IPEndPoint)closed.LocalEndpoint).Port;
+        closed.Stop();
+
+        var verdicts = new ConcurrentDictionary<string, SplitProxy.Verdict>(StringComparer.OrdinalIgnoreCase)
+        {
+            [LobbyName] = new(true, [EdgeAddress], DateTimeOffset.UtcNow, "judged a moment ago", Whole: true),
+        };
+        await using var proxy = new SplitProxy(new DohUpstream(_ => { }), new SplitRoutes(), s => Log.Enqueue(s), verdicts,
+            new IPEndPoint(IPAddress.Loopback, 0), edge.Port, _ => LineAddress)
+        {
+            LobbyProxies = [new GamePingBooster.Core.Profiles.LobbyProxyEntry { Id = "dead", Host = "127.0.0.1", Port = deadPort }],
+            IsProxied = name => name == LobbyName,
+        };
+        proxy.Start();
+
+        var status = await GetThroughAsync(proxy.Endpoint, LobbyName);
+        Check($"with no proxy answering, the game's connection still gets through - over the line ({status})",
+            status.StartsWith("HTTP/1.1 200", StringComparison.Ordinal) && proxy.ProxiedConnections == 0 && proxy.SplitConnections == 1,
+            $"proxied {proxy.ProxiedConnections}, line {proxy.SplitConnections}, fell back {proxy.FellBack}");
+
+        var again = await GetThroughAsync(proxy.Endpoint, LobbyName);
+        Check("and the proxies are left alone for a while: the next connection goes straight to the line",
+            again.StartsWith("HTTP/1.1 200", StringComparison.Ordinal) && proxy.SplitConnections == 2 && proxy.ProxiedConnections == 0,
+            $"proxied {proxy.ProxiedConnections}, line {proxy.SplitConnections}");
+    }
+
     private static async Task TheResolverAnswersAListedSplitNameWithTheProxy()
     {
         var memory = new EdgeMemory();

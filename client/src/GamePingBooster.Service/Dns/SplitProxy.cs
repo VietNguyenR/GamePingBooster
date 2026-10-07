@@ -1,3 +1,4 @@
+using GamePingBooster.Core.Profiles;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
@@ -132,6 +133,35 @@ internal sealed class SplitProxy : IAsyncDisposable
 
     public bool Running => _listener is not null;
 
+    /// <summary>
+    /// The profile's lobby proxies, in order (relay/cmd/lobbyproxy). A name <see cref="IsProxied"/> says yes to goes
+    /// to them first - the game's hello unchanged - and only when none answers does it take the line or the relay as
+    /// before. Empty means no proxy: the behaviour of every client before the field existed.
+    /// </summary>
+    internal IReadOnlyList<LobbyProxyEntry> LobbyProxies { get; init; } = [];
+
+    /// <summary>Whether the name is on the profile's proxied list. See <see cref="LobbyProxies"/>.</summary>
+    internal Func<string, bool> IsProxied { get; init; } = _ => false;
+
+    /// <summary>How long the proxies go unused after none of them answered a connection.</summary>
+    private static readonly TimeSpan ProxyDownFor = TimeSpan.FromMinutes(3);
+
+    /// <summary>
+    /// How long a proxy gets to answer the hello. Longer than FirstReplyTimeout: the proxy itself gives each mainland
+    /// edge up to four seconds, and one edge in a few hangs.
+    /// </summary>
+    private static readonly TimeSpan ProxyFirstReply = TimeSpan.FromSeconds(12);
+    private static readonly TimeSpan ProxyConnect = TimeSpan.FromSeconds(3);
+
+    private long _proxyDownUntilTicks;
+    private long _viaProxy;
+
+    /// <summary>Connections carried by a lobby proxy.</summary>
+    public long ProxiedConnections => Interlocked.Read(ref _viaProxy);
+
+    private bool ProxyUsable(string name) =>
+        LobbyProxies.Count > 0 && IsProxied(name) && DateTime.UtcNow.Ticks >= Interlocked.Read(ref _proxyDownUntilTicks);
+
     /// <summary>The address and port this listens on - for TunnelCheck, which listens on a free port.</summary>
     public IPEndPoint Endpoint => (IPEndPoint?)_listener?.LocalEndPoint ?? _listen;
 
@@ -181,6 +211,13 @@ internal sealed class SplitProxy : IAsyncDisposable
     {
         if (!Running) return false;
         var now = DateTimeOffset.UtcNow;
+        if (ProxyUsable(name))
+        {
+            // A proxied name is answered at once: the connection tries the proxy first, and the line's verdict is only
+            // the fallback, judged meanwhile.
+            if (!_verdicts.TryGetValue(name, out var known) || now - known.At > Fresh) ProbeInBackground(name);
+            return true;
+        }
         if (!_verdicts.TryGetValue(name, out var verdict) || now - verdict.At > UsableFor)
         {
             ProbeInBackground(name);
@@ -381,14 +418,31 @@ internal sealed class SplitProxy : IAsyncDisposable
             client.NoDelay = true;
             var record = await ReadHelloAsync(client, ct).ConfigureAwait(false);
             if (record is null || SplitHello.NameOf(record) is not { } name) return;
-            if (!_verdicts.TryGetValue(name, out var verdict) || verdict.Edges.Length == 0)
+            byte[]? reply = null;
+            var viaProxy = false;
+            if (ProxyUsable(name))
             {
-                if (_said.TryAdd("?" + name, 0)) _log($"Unblock: a connection for {name} reached the split with no edge known for it - closed.");
-                return;
+                (edge, reply) = await ViaProxyAsync(name, record, ct).ConfigureAwait(false);
+                viaProxy = edge is not null;
             }
 
-            byte[]? reply = null;
-            if (verdict.Split)
+            Verdict? verdict = null;
+            if (!viaProxy)
+            {
+                if ((!_verdicts.TryGetValue(name, out verdict) || verdict.Edges.Length == 0) && IsProxied(name))
+                {
+                    // Answered for the proxy before any verdict existed, and the proxy did not answer: judge it now.
+                    await ProbeAsync(name, ct).ConfigureAwait(false);
+                    _verdicts.TryGetValue(name, out verdict);
+                }
+                if (verdict is null || verdict.Edges.Length == 0)
+                {
+                    if (_said.TryAdd("?" + name, 0)) _log($"Unblock: a connection for {name} reached the split with no edge known for it - closed.");
+                    return;
+                }
+            }
+
+            if (!viaProxy && verdict!.Split)
             {
                 (edge, reply) = await OverTheLineAsync(name, verdict.Edges, record, verdict.Whole, ct).ConfigureAwait(false);
             }
@@ -396,12 +450,12 @@ internal sealed class SplitProxy : IAsyncDisposable
             {
                 // Through the tunnel with the hello as the game sent it - nothing has reached the game yet, so it
                 // never knows. Also where a connection lands that was answered just before the name went back.
-                edge = await ThroughTunnelAsync(name, verdict.Edges, record, ct).ConfigureAwait(false);
+                edge = await ThroughTunnelAsync(name, verdict!.Edges, record, ct).ConfigureAwait(false);
                 if (edge is null) return;
             }
 
             // Only a connection over the line is watched: one through the tunnel has nowhere better to go.
-            var overLine = reply is not null;
+            var overLine = reply is not null && !viaProxy;
             if (reply is not null) await client.SendAsync(reply, SocketFlags.None, ct).ConfigureAwait(false);
             if (await PumpAsync(client, edge, overLine, ct).ConfigureAwait(false) is { } dead)
             {
@@ -423,6 +477,69 @@ internal sealed class SplitProxy : IAsyncDisposable
             edge?.Dispose();
             client.Dispose();
         }
+    }
+
+    /// <summary>
+    /// The hello, unchanged, to the first lobby proxy that answers it; its reply with the connection. Null - and the
+    /// proxies left alone for <see cref="ProxyDownFor"/> - when none does.
+    /// </summary>
+    private async Task<(Socket? Edge, byte[]? Reply)> ViaProxyAsync(string name, byte[] record, CancellationToken ct)
+    {
+        var clock = Stopwatch.StartNew();
+        var why = "no proxy to try";
+        foreach (var proxy in LobbyProxies)
+        {
+            var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+            using var owned = new SocketOwner(socket);
+            try
+            {
+                var address = IPAddress.TryParse(proxy.Host, out var literal)
+                    ? literal
+                    : (await System.Net.Dns.GetHostAddressesAsync(proxy.Host, AddressFamily.InterNetwork, ct).ConfigureAwait(false)).FirstOrDefault();
+                if (address is null) { why = $"{proxy.Host} has no address"; continue; }
+
+                if (_source(address) is { } source) socket.Bind(new IPEndPoint(source, 0));
+                using (var connect = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                {
+                    connect.CancelAfter(ProxyConnect);
+                    await socket.ConnectAsync(new IPEndPoint(address, proxy.Port), connect.Token).ConfigureAwait(false);
+                }
+
+                await socket.SendAsync(record, SocketFlags.None, ct).ConfigureAwait(false);
+                var buffer = new byte[16384];
+                int read;
+                using (var first = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                {
+                    first.CancelAfter(ProxyFirstReply);
+                    read = await socket.ReceiveAsync(buffer, SocketFlags.None, first.Token).ConfigureAwait(false);
+                }
+                if (read > 0)
+                {
+                    Interlocked.Increment(ref _viaProxy);
+                    if (_said.TryAdd(name, 0))
+                    {
+                        _log($"Unblock: {name} - first connection through the lobby proxy {proxy.Host}:{proxy.Port}, answered in " +
+                             $"{clock.ElapsedMilliseconds} ms.");
+                    }
+                    return (owned.Release(), buffer[..read]);
+                }
+                why = $"{proxy.Host} closed the connection after the hello";
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                why = $"{proxy.Host} did not answer in time";
+            }
+            catch (Exception ex) when (ex is SocketException or IOException)
+            {
+                why = $"{proxy.Host}: {(ex as SocketException)?.SocketErrorCode.ToString() ?? ex.Message}";
+            }
+        }
+
+        Interlocked.Exchange(ref _proxyDownUntilTicks, DateTime.UtcNow.Add(ProxyDownFor).Ticks);
+        _said.TryRemove(name, out _);
+        _log($"Unblock: {name} - no lobby proxy answered ({why}); this connection takes the line or the relay, and the " +
+             $"proxies are left alone for {ProxyDownFor.TotalMinutes:0} min.");
+        return (null, null);
     }
 
     /// <summary>The first record from the game - the ClientHello - or null when it is not one.</summary>
