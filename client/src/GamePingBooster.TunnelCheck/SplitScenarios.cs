@@ -129,6 +129,36 @@ internal static partial class Program
             $"proxied {proxy.ProxiedConnections}, line {proxy.SplitConnections}, fell back {proxy.FellBack}");
     }
 
+    private static Task ASlowLobbyProxyIsLeftAlone()
+    {
+        // 2 s ticks. 41 KB/s is what the Hong Kong box gave on 2026-10-07 with the player's route throttled.
+        var watch = new SplitProxy.ProxySpeedWatch();
+        string? why = null;
+        for (var i = 0; i < 3 && why is null; i++) why = watch.Observe(82_000, 2, open: 4);
+        Check($"a download moving at 41 KB/s for three ticks is slow ({why})", why is not null, "never judged slow");
+
+        watch = new SplitProxy.ProxySpeedWatch();
+        why = null;
+        for (var i = 0; i < 20; i++) why ??= watch.Observe(2_000_000, 2, open: 4);
+        Check("1 MB/s never is", why is null, why);
+
+        watch = new SplitProxy.ProxySpeedWatch();
+        why = null;
+        for (var i = 0; i < 20; i++) why ??= watch.Observe(6_000, 2, open: 4);
+        Check("chatter - a few KB a tick - is not a download", why is null, why);
+
+        watch = new SplitProxy.ProxySpeedWatch();
+        why = null;
+        foreach (var bytes in new long[] { 82_000, 82_000, 2_000_000, 82_000, 82_000 }) why ??= watch.Observe(bytes, 2, open: 4);
+        Check("one fast tick clears the count", why is null, why);
+
+        watch = new SplitProxy.ProxySpeedWatch();
+        why = null;
+        for (var i = 0; i < 10; i++) why ??= watch.Observe(82_000, 2, open: 0);
+        Check("nothing is judged with no proxied connection open", why is null, why);
+        return Task.CompletedTask;
+    }
+
     private static async Task ADeadLobbyProxyLeavesTheNameToTheLine()
     {
         using var certificate = SelfSigned();

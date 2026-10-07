@@ -155,6 +155,76 @@ internal sealed class SplitProxy : IAsyncDisposable
 
     private long _proxyDownUntilTicks;
     private long _viaProxy;
+    private long _proxyBytes;
+    private readonly ConcurrentDictionary<Socket, byte> _proxied = new();
+
+    /// <summary>How often the lobby proxies' throughput is looked at.</summary>
+    internal TimeSpan ProxyTick { get; init; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// A proxy that answers but moves a download at 10-150 KB/s is worse than none: on 2026-10-07 the Hong Kong box
+    /// carried the lobby at 41 KB/s for two minutes because the player's evening route to it was throttled, while
+    /// the line alone gave 100-200 KB/s. Slower than this for <see cref="ProxySlowTicks"/> ticks and the proxies are left
+    /// alone for <see cref="ProxyDownFor"/>.
+    /// </summary>
+    internal ProxySpeedWatch SpeedWatch { get; init; } = new();
+
+    /// <summary>
+    /// Told the bytes the proxied connections received in one tick; says when the proxies are too slow. A tick with
+    /// under <see cref="MinTransfer"/> of data is chatter (keep-alives, a log post), not a download, and neither
+    /// counts as slow nor clears the count.
+    /// </summary>
+    internal sealed class ProxySpeedWatch(long minBytesPerSecond = 150_000, int slowTicks = 3, long minTransfer = 20_000)
+    {
+        private int _slow;
+
+        /// <returns>Why the proxies are too slow, or null.</returns>
+        public string? Observe(long bytes, double seconds, int open)
+        {
+            if (open == 0) { _slow = 0; return null; }
+            if (bytes < minTransfer * seconds / 2.0) return null;
+            var rate = bytes / seconds;
+            if (rate >= minBytesPerSecond) { _slow = 0; return null; }
+            if (++_slow < slowTicks) return null;
+            _slow = 0;
+            return $"{rate / 1000:0} KB/s for {slowTicks} ticks, under {minBytesPerSecond / 1000} KB/s";
+        }
+    }
+
+    private async Task ProxySpeedLoopAsync(CancellationToken ct)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(ProxyTick);
+            long last = 0;
+            var clock = Stopwatch.StartNew();
+            var lastMs = 0L;
+            while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
+            {
+                var now = Interlocked.Read(ref _proxyBytes);
+                var ms = clock.ElapsedMilliseconds;
+                var why = SpeedWatch.Observe(now - last, Math.Max(0.001, (ms - lastMs) / 1000.0), _proxied.Count);
+                last = now;
+                lastMs = ms;
+                if (why is null) continue;
+
+                Interlocked.Exchange(ref _proxyDownUntilTicks, DateTime.UtcNow.Add(ProxyDownFor).Ticks);
+                var reset = 0;
+                foreach (var client in _proxied.Keys)
+                {
+                    // Reset, not closed: the game must see a failure at once and open the connection again - by the
+                    // line or the relay, the proxies being left alone now.
+                    try { client.LingerState = new LingerOption(true, 0); client.Dispose(); reset++; } catch (Exception) { }
+                }
+                _said.Clear();
+                _log($"Unblock: the lobby proxies moved a download too slowly ({why}); {reset} connection(s) reset so the game " +
+                     $"opens them again over the line or the relay, and the proxies are left alone for {ProxyDownFor.TotalMinutes:0} min.");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
 
     /// <summary>Connections carried by a lobby proxy.</summary>
     public long ProxiedConnections => Interlocked.Read(ref _viaProxy);
@@ -199,6 +269,7 @@ internal sealed class SplitProxy : IAsyncDisposable
 
         _listener = listener;
         _acceptLoop = Task.Run(() => AcceptAsync(listener, _stopping.Token));
+        if (LobbyProxies.Count > 0) _ = Task.Run(() => ProxySpeedLoopAsync(_stopping.Token));
         return true;
     }
 
@@ -457,7 +528,8 @@ internal sealed class SplitProxy : IAsyncDisposable
             // Only a connection over the line is watched: one through the tunnel has nowhere better to go.
             var overLine = reply is not null && !viaProxy;
             if (reply is not null) await client.SendAsync(reply, SocketFlags.None, ct).ConfigureAwait(false);
-            if (await PumpAsync(client, edge, overLine, ct).ConfigureAwait(false) is { } dead)
+            if (viaProxy) _proxied[client] = 0;
+            if (await PumpAsync(client, edge, overLine, ct, viaProxy ? n => Interlocked.Add(ref _proxyBytes, n) : null).ConfigureAwait(false) is { } dead)
             {
                 // Reset, not closed: the game must see a failure at once and open the connection again - and the
                 // name is on the relay by then, so the new one goes through the tunnel.
@@ -474,6 +546,7 @@ internal sealed class SplitProxy : IAsyncDisposable
         }
         finally
         {
+            _proxied.TryRemove(client, out _);
             edge?.Dispose();
             client.Dispose();
         }
@@ -683,13 +756,15 @@ internal sealed class SplitProxy : IAsyncDisposable
     /// it is also watched, and ends when the path stops carrying it - returning why, null otherwise. See
     /// <see cref="StallWatch"/> and <see cref="LineDropped"/>.
     /// </summary>
-    private static async Task<string?> PumpAsync(Socket client, Socket edge, bool overLine, CancellationToken ct)
+    private static async Task<string?> PumpAsync(Socket client, Socket edge, bool overLine, CancellationToken ct,
+        Action<int>? downBytes = null)
     {
         using var done = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var flow = new Flow();
         if (overLine) KeepAliveFast(edge);
         var up = CopyAsync(client, edge, flow.Up, null, done.Token);
-        var down = CopyAsync(edge, client, flow.Down, overLine ? code => flow.Dead(LineDropped(code, flow.Waiting)) : null, done.Token);
+        var down = CopyAsync(edge, client, flow.Down, overLine ? code => flow.Dead(LineDropped(code, flow.Waiting)) : null, done.Token,
+            downBytes);
         var watch = overLine ? WatchAsync(edge, flow, done) : Task.CompletedTask;
 
         var first = await Task.WhenAny(up, down).ConfigureAwait(false);
@@ -829,7 +904,7 @@ internal sealed class SplitProxy : IAsyncDisposable
     /// <param name="seen">Called for every read that carried bytes.</param>
     /// <param name="readFailed">Told why a read from <paramref name="from"/> failed - the edge's side only.</param>
     private static async Task<bool> CopyAsync(Socket from, Socket to, Action seen, Action<SocketError>? readFailed,
-        CancellationToken ct)
+        CancellationToken ct, Action<int>? counted = null)
     {
         var buffer = new byte[65536];
         while (true)
@@ -854,6 +929,7 @@ internal sealed class SplitProxy : IAsyncDisposable
                 return true;
             }
             seen();
+            counted?.Invoke(n);
             try
             {
                 var sent = 0;

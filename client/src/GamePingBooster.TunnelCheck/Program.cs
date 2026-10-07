@@ -72,6 +72,7 @@ internal static partial class Program
             ("Split: a filter reading the first record is passed", TheSplitHelloPassesAFilterThatReadsTheFirstRecord),
             ("Split: a filter that reassembles sends it through the tunnel", AFilterThatReassemblesSendsTheConnectionThroughTheTunnel),
             ("Lobby proxy: a proxied name goes through it", AProxiedNameGoesThroughTheLobbyProxy),
+            ("Lobby proxy: a slow proxy is left alone", ASlowLobbyProxyIsLeftAlone),
             ("Lobby proxy: a proxy that does not answer leaves the name to the line", ADeadLobbyProxyLeavesTheNameToTheLine),
             ("Split: the resolver answers a listed name with the proxy", TheResolverAnswersAListedSplitNameWithTheProxy),
             ("Unblock: a line answer leaves out addresses routed into the tunnel", () => { ALineAnswerLeavesOutTunnelledAddresses(); return Task.CompletedTask; }),
