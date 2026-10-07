@@ -116,6 +116,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     private volatile string _profileSource = "none";
 
     private GameEntry? _game;
+    private bool _gameCacheCleared;
     private RelayEntry? _relay;
     private volatile TunnelState _state = TunnelState.Disconnected;
     private volatile string _detail = "Not connected";
@@ -3041,6 +3042,14 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                 LeaveRelayNotForGame(detected);
                 RememberLastGame(detected);
 
+                // Once per game start (BattlEye's shim and the game itself both arrive here), and
+                // before the tunnel check: a stale cache is the player's problem on any path.
+                if (!_gameCacheCleared && detected.Id.Equals("pubg", StringComparison.OrdinalIgnoreCase))
+                {
+                    _gameCacheCleared = true;
+                    _log(GameCacheCleaner.Clean());
+                }
+
                 // The game can start while the tunnel is down and the reconnect loop is sweeping
                 // relays. Installing routes then would push the game's packets into an adapter
                 // with nothing behind it - the exact blackhole the reconnect path just undid.
@@ -3059,6 +3068,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             else
             {
                 _log("The game exited - removing routes, other traffic returns to the normal path.");
+                _gameCacheCleared = false;
                 _discovery?.GameStopped();
                 _presence.Set(null);
                 if (_adapter is not null) _routes?.RemoveGameRoutes(_adapter.InterfaceIndex);

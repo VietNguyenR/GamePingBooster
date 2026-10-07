@@ -44,6 +44,8 @@ internal sealed class WintunAdapter : IPacketDevice, IDisposable
     /// </summary>
     private static readonly int[] CreateRetryDelaysMs = [250, 500, 750, 1000, 1000];
 
+    private const int ErrorDeviceNotReady = 4319;
+
     /// <summary>
     /// Creates a new adapter (or reuses one of the same name left over from a previous run).
     /// Throws <see cref="Win32Exception"/> if the process is not running as LocalSystem.
@@ -53,6 +55,7 @@ internal sealed class WintunAdapter : IPacketDevice, IDisposable
     {
         var handle = nint.Zero;
         var err = 0;
+        var netSetupChecked = false;
 
         for (var attempt = 0; attempt <= CreateRetryDelaysMs.Length; attempt++)
         {
@@ -62,6 +65,16 @@ internal sealed class WintunAdapter : IPacketDevice, IDisposable
             err = Marshal.GetLastPInvokeError();
             if (attempt == CreateRetryDelaysMs.Length) break;
 
+            // ERROR_DEVICE_NOT_READY: the device was made but Windows could not finish configuring it. Waiting
+            // does not help; the usual cause is a Disabled Network Setup Service. Repair it once and go again
+            // at once; if it was fine, stop here rather than leave a dead device behind on every retry.
+            if (err == ErrorDeviceNotReady)
+            {
+                if (netSetupChecked || !NetworkSetupService.EnsureRunnable(log)) break;
+                netSetupChecked = true;
+                continue;
+            }
+
             var delay = CreateRetryDelaysMs[attempt];
             log?.Invoke($"Wintun would not create '{name}' yet (error {err}) - the previous adapter " +
                         $"is probably still being removed. Retrying in {delay} ms.");
@@ -70,11 +83,14 @@ internal sealed class WintunAdapter : IPacketDevice, IDisposable
 
         if (handle == nint.Zero)
         {
+            var hint = err == ErrorDeviceNotReady
+                ? "Error 4319 means Windows could not finish setting up the new adapter. Check that the " +
+                  "'Network Setup Service' (NetSetupSvc) is not Disabled, and that no tweak tool or security " +
+                  "software is blocking network drivers."
+                : "Error 2 here usually means a previous adapter is still being removed; error 5 means the " +
+                  "process is not LocalSystem. Also check that wintun.dll sits next to the executable.";
             throw new Win32Exception(err,
-                $"Could not create the Wintun virtual adapter '{name}' (error {err}) after " +
-                $"{CreateRetryDelaysMs.Length + 1} attempts. Error 2 here usually means a previous " +
-                "adapter is still being removed; error 5 means the process is not LocalSystem. " +
-                "Also check that wintun.dll sits next to the executable.");
+                $"Could not create the Wintun virtual adapter '{name}' (error {err}). {hint}");
         }
 
         var adapter = new WintunAdapter(name, handle);
