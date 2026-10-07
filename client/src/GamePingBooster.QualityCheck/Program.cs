@@ -82,6 +82,19 @@ internal static partial class Program
         AMoveToAFasterWayDoesNotBounceBack();
         TheLobbyIsJudgedToo();
         ADetourTakenAtConnectIsLeftOnceTheRoadRecovers();
+        TheOwnersMatchOnSg2MovesToVn5Sg2();
+        ASteadyGapMovesAfterThirtySeconds();
+        ASmallSteadyGapDoesNotMove();
+        ASteadyGapWithTheWorseTailDoesNotMove();
+        ASteadyGapLosingProbesDoesNotMove();
+
+        Console.WriteLine();
+        Console.WriteLine("The lobby record (LobbyTracker):");
+        ALobbyBeforeAMatchIsOneRecord();
+        AShortLobbyIsNoRecord();
+        ALongLobbyKeepsItsLastTwoMinutes();
+        AMoveInTheLobbyEndsTheRecord();
+        AHoleDoesNotEndTheLobbyButLeavingDoes();
 
         Console.WriteLine();
         Console.WriteLine("Between matches:");
@@ -603,12 +616,87 @@ internal static partial class Program
     private static void OnlyAClearDifferenceMoves()
     {
         var small = new Ways();
-        small.Run(400, 52, 44);
-        Check("8 ms better is not a reason to move", small.Decisions.Count == 0, $"{small.Decisions.Count} decision(s)");
+        small.Run(DoorSwitchPolicy.SteadyWindowTicks - 1, 52, 44);
+        Check("8 ms better is not a reason to move inside thirty seconds", small.Decisions.Count == 0,
+            $"{small.Decisions.Count} decision(s)");
 
         var clear = new Ways();
         clear.Run(400, 56, 44);
-        Check("12 ms better is", clear.Decisions.Count == 1, $"{clear.Decisions.Count} decision(s)");
+        Check("12 ms better is", clear.Decisions.Count == 1 && !clear.Decisions[0].Steady, $"{clear.Decisions.Count} decision(s)");
+    }
+
+    // ------------------------------------------------------------------ steadily faster
+
+    private static void TheOwnersMatchOnSg2MovesToVn5Sg2()
+    {
+        // 2026-10-07 17:40: sg-2 at 58 ms, vn-5-sg2 at 49, for the whole match - and nothing moved until it was over.
+        var w = new Ways { Current = "sg-2", Others = Session20261007.Others };
+        w.Replay(Session20261007.Ticks());
+        Check("2026-10-07: sg-2 at 58 against vn-5-sg2 at 49 moves to vn-5-sg2 by the steady rule",
+            w.Decisions is [{ From: "sg-2", To: "vn-5-sg2", Steady: true }],
+            string.Join(", ", w.Decisions.Select(d => $"{d.From}->{d.To}{(d.Steady ? " (steady)" : "")}")));
+        if (w.Decisions.Count != 1) return;
+        var d = w.Decisions[0];
+        Check("  ...thirty seconds in", d.TickIndex + 1 == DoorSwitchPolicy.SteadyWindowTicks,
+            $"{(d.TickIndex + 1) / (double)SpikeDetector.TicksPerSecond} s");
+        Check("  ...and says what each way measured",
+            d.FromStats.P50 is > 57 and < 59.5 && d.ToStats.P50 is > 48 and < 51 && d.ToStats.P95 <= d.FromStats.P95,
+            $"sg-2 {d.FromStats.P50:F1}/{d.FromStats.P95:F1}, vn-5-sg2 {d.ToStats.P50:F1}/{d.ToStats.P95:F1}");
+    }
+
+    private static void ASteadyGapMovesAfterThirtySeconds()
+    {
+        var w = new Ways();
+        w.Run(DoorSwitchPolicy.SteadyWindowTicks - 1, 52, 44);
+        Check("8 ms better for thirty seconds moves", w.Decisions.Count == 0, "moved before thirty seconds");
+        w.Run(1, 52, 44);
+        Check("  ...on the thirtieth second, by the steady rule", w.Decisions is [{ Steady: true, To: "sg-2-vn" }],
+            $"{w.Decisions.Count} decision(s)");
+        if (w.Decisions.Count == 1)
+        {
+            Check("  ...judged over thirty seconds", w.Decisions[0].WindowTicks == DoorSwitchPolicy.SteadyWindowTicks,
+                $"{w.Decisions[0].WindowTicks}");
+        }
+
+        var lobby = new Ways { Current = "sg-2", Others = ["vn-5-sg2"], Mode = TickMode.Lobby };
+        lobby.Run(DoorSwitchPolicy.SteadyWindowTicks, 58, 49);
+        Check("  ...in the lobby as in a match", lobby.Decisions is [{ Steady: true }], $"{lobby.Decisions.Count} decision(s)");
+    }
+
+    private static void ASmallSteadyGapDoesNotMove()
+    {
+        var four = new Ways();
+        four.Run(DoorSwitchPolicy.CooldownTicks, 48, 44);
+        Check("4 ms better, however long, does not move", four.Decisions.Count == 0, $"{four.Decisions.Count} decision(s)");
+
+        // A tenth of a slow way: 5 ms under 63 is not 10%, 7 is.
+        var under = new Ways();
+        under.Run(DoorSwitchPolicy.CooldownTicks, 68, 63);
+        Check("  ...nor 5 ms better than a 63 ms way - under a tenth of it", under.Decisions.Count == 0,
+            $"{under.Decisions.Count} decision(s)");
+        var over = new Ways();
+        over.Run(DoorSwitchPolicy.CooldownTicks, 70, 63);
+        Check("  ...7 ms is", over.Decisions is [{ Steady: true }], $"{over.Decisions.Count} decision(s)");
+    }
+
+    private static void ASteadyGapWithTheWorseTailDoesNotMove()
+    {
+        var w = new Ways();
+        w.Run(DoorSwitchPolicy.CooldownTicks, _ => 52, i => i % 10 == 0 ? 95 : 44);
+        Check("8 ms faster at the median but spiking every few seconds does not move", w.Decisions.Count == 0,
+            $"{w.Decisions.Count} decision(s)");
+    }
+
+    private static void ASteadyGapLosingProbesDoesNotMove()
+    {
+        var lossy = new Ways();
+        lossy.Run(DoorSwitchPolicy.CooldownTicks, _ => 52, i => i % 15 == 0 ? null : 44);
+        Check("8 ms faster but losing one probe in fifteen does not move", lossy.Decisions.Count == 0,
+            $"{lossy.Decisions.Count} decision(s)");
+
+        var clean = new Ways();
+        clean.Run(DoorSwitchPolicy.CooldownTicks, _ => 52, i => i % 25 == 0 ? null : 44);
+        Check("  ...one in twenty-five does", clean.Decisions is [{ Steady: true }], $"{clean.Decisions.Count} decision(s)");
     }
 
     private static void NothingMovesAgainForFiveMinutes()
@@ -779,10 +867,14 @@ internal static partial class Program
         // The connect started on vn-2-hk because hk was slow. hk is back at 43 against 53: inside the "worse" margin,
         // so only the return rule can bring the player back - as after the 2026-09-18 move off sg-4.
         // 52, not 53: 10 ms is exactly the margin, and over eight seconds jitter crosses it now and then.
+        // Without a detour, hk is just a way 9 ms faster, and the steady rule takes it after thirty seconds. With one, hk
+        // is the way left, which only the return rule's two minutes bring the player back to.
         var plain = new Ways { Current = "vn-2-hk", Others = ["hk"] };
         plain.Run(DoorSwitchPolicy.ReturnWindowTicks * 2, 52, 43);
-        Check("without a detour at connect, 43 against 52 moves nobody", plain.Decisions.Count == 0,
-            $"{plain.Decisions.Count} decision(s)");
+        Check("without a detour at connect, 43 against 52 is taken by the steady rule, not as a return",
+            plain.Decisions is [{ Steady: true, Return: false, To: "hk" }] &&
+            plain.Decisions[0].TickIndex + 1 == DoorSwitchPolicy.SteadyWindowTicks,
+            string.Join(", ", plain.Decisions.Select(d => $"{d.From}->{d.To} at {d.TickIndex}")));
 
         var detour = new Ways { Current = "vn-2-hk", Others = ["hk"] };
         detour.Policy.StartedOnDetour("hk", "vn-2-hk");
@@ -796,8 +888,8 @@ internal static partial class Program
         var elsewhere = new Ways { Current = "vn-1-hk", Others = ["hk", "vn-2-hk"] };
         elsewhere.Policy.StartedOnDetour("hk", "vn-2-hk");
         elsewhere.Run(DoorSwitchPolicy.ReturnWindowTicks * 2, _ => 53, _ => 43, _ => 60);
-        Check("  ...and never while the tunnel is on another way", elsewhere.Decisions.Count == 0,
-            $"{elsewhere.Decisions.Count} decision(s)");
+        Check("  ...and never as a return while the tunnel is on another way", !elsewhere.Decisions.Any(d => d.Return),
+            string.Join(", ", elsewhere.Decisions.Select(d => $"{d.From}->{d.To}{(d.Return ? " (return)" : "")}")));
     }
 
     // ------------------------------------------------------------------ between matches
@@ -903,6 +995,87 @@ internal static partial class Program
             RescanScore.WorthMoving(80, 71) && !RescanScore.WorthMoving(80, 73), "wrong margin");
     }
 
+    // ------------------------------------------------------------------ the lobby record
+
+    private static void ALobbyBeforeAMatchIsOneRecord()
+    {
+        // The owner's wait on 2026-10-07: sg-2 in the lobby with vn-5-sg2 beside it, then a match.
+        var w = new Ways { Current = "sg-2", Others = ["vn-5-sg2", "vn-3-sg2"], Mode = TickMode.Lobby };
+        w.Run(100, _ => 58, _ => 49, i => i % 10 == 0 ? null : 70);
+        Check("a lobby is not written while it lasts", w.Lobbies.Count == 0 && w.LobbiesStarted == 1,
+            $"{w.Lobbies.Count} record(s), {w.LobbiesStarted} started");
+        w.Mode = TickMode.Match;
+        w.Run(1, 58, 49, 70);
+        Check("  ...and is written once, when the match starts", w.Lobbies is [{ EndedBy: "match", TickCount: 100 }],
+            string.Join(", ", w.Lobbies.Select(l => $"{l.EndedBy} {l.TickCount}")));
+        if (w.Lobbies.Count != 1) return;
+        var l = w.Lobbies[0];
+        var ways = l.Ways.ToDictionary(p => p.Key, p => p.Value);
+        Check("  ...with the way in use first, then the others",
+            l.Ways.Select(p => p.Key).SequenceEqual(["sg-2", "vn-5-sg2", "vn-3-sg2"]), string.Join(", ", l.Ways.Select(p => p.Key)));
+        Check("  ...each way's median",
+            ways["sg-2"].P50 is > 57 and < 59 && ways["vn-5-sg2"].P50 is > 48 and < 50 && ways["vn-3-sg2"].P50 is > 69 and < 71,
+            string.Join(", ", l.Ways.Select(p => $"{p.Key} {p.Value.P50:F1}")));
+        Check("  ...and what each way lost", ways["vn-3-sg2"] is { Sent: 100, Lost: 10 } && ways["vn-5-sg2"].Lost == 0,
+            $"vn-3-sg2 {ways["vn-3-sg2"].Lost}/{ways["vn-3-sg2"].Sent}");
+        Check("  ...and every quarter second of it", l.Ticks.Count == 100 && l.TicksSkipped == 0 && l.Seconds == 25,
+            $"{l.Ticks.Count} ticks, {l.TicksSkipped} skipped, {l.Seconds} s");
+    }
+
+    private static void AShortLobbyIsNoRecord()
+    {
+        var w = new Ways { Mode = TickMode.Lobby };
+        w.Run(LobbyTracker.MinTicks - 1, 58, 49);
+        w.Mode = TickMode.Match;
+        w.Run(1, 58, 49);
+        Check("a lobby under twenty seconds is not written", w.Lobbies.Count == 0, $"{w.Lobbies.Count} record(s)");
+    }
+
+    private static void ALongLobbyKeepsItsLastTwoMinutes()
+    {
+        var w = new Ways { Mode = TickMode.Lobby };
+        w.Run(LobbySummary.MaxTicks + 240, 58, 49);
+        w.Mode = TickMode.Match;
+        w.Run(1, 58, 49);
+        Check("a lobby of three minutes keeps its last two in the record, and its figures over all three",
+            w.Lobbies is [{ TicksSkipped: 240 }] && w.Lobbies[0].Ticks.Count == LobbySummary.MaxTicks &&
+            w.Lobbies[0].Ways[0].Value.Sent == LobbySummary.MaxTicks + 240,
+            string.Join(", ", w.Lobbies.Select(l => $"{l.Ticks.Count} kept, {l.TicksSkipped} skipped, {l.Ways[0].Value.Sent} sent")));
+    }
+
+    private static void AMoveInTheLobbyEndsTheRecord()
+    {
+        var w = new Ways { Current = "sg-2", Others = ["vn-5-sg2"], Mode = TickMode.Lobby };
+        w.Run(160, 58, 49);
+        w.Current = "vn-5-sg2";
+        w.Others = ["sg-2"];
+        w.Run(100, 49, 58);
+        Check("a move in the lobby ends its record and starts another",
+            w.Lobbies is [{ EndedBy: "moved", Door: "sg-2", TickCount: 160 }] && w.LobbiesStarted == 2,
+            string.Join(", ", w.Lobbies.Select(l => $"{l.EndedBy} {l.Door} {l.TickCount}")) + $", {w.LobbiesStarted} started");
+        var lane = new Ways { Mode = TickMode.Lobby, Lane = 50001 };
+        lane.Run(100, 58, 49);
+        lane.Lane = 50002;
+        lane.Run(1, 58, 49);
+        Check("  ...so does a move to another lane", lane.Lobbies is [{ EndedBy: "moved" }], $"{lane.Lobbies.Count} record(s)");
+    }
+
+    private static void AHoleDoesNotEndTheLobbyButLeavingDoes()
+    {
+        var w = new Ways { Mode = TickMode.Lobby };
+        w.Run(100, 58, 49);
+        w.Mode = TickMode.Idle;
+        w.Run(LobbyTracker.GapTicks, 58, 49);
+        w.Mode = TickMode.Lobby;
+        w.Run(20, 58, 49);
+        Check("two seconds that compared nothing do not end a lobby", w.Lobbies.Count == 0 && w.LobbiesStarted == 1,
+            $"{w.Lobbies.Count} record(s), {w.LobbiesStarted} started");
+        w.Mode = TickMode.Idle;
+        w.Run(LobbyTracker.GapTicks + 1, 58, 49);
+        Check("  ...more do: the game left the lobby", w.Lobbies is [{ EndedBy: "left", TickCount: 120 }],
+            string.Join(", ", w.Lobbies.Select(l => $"{l.EndedBy} {l.TickCount}")));
+    }
+
     /// <summary>
     /// The pongs down the current way and the probes down the others, quarter second by quarter second. Values
     /// are the round trip to relayd; null is sent and never answered.
@@ -916,6 +1089,17 @@ internal static partial class Program
 
         public DoorSwitchPolicy Policy { get; } = new();
         public List<DoorDecision> Decisions { get; } = [];
+        public LobbyTracker Lobby { get; } = new();
+        public List<LobbySummary> Lobbies { get; } = [];
+        public int LobbiesStarted { get; private set; }
+
+        private void Feed(QualityTick tick)
+        {
+            if (Policy.Feed(tick) is { } decision) Decisions.Add(decision);
+            var (ended, started) = Lobby.Feed(tick);
+            if (ended is not null) Lobbies.Add(ended);
+            if (started) LobbiesStarted++;
+        }
         public string Current { get; set; } = "sg-2";
         public int Lane { get; set; }
         public string[] Others { get; set; } = ["sg-2-vn"];
@@ -942,7 +1126,7 @@ internal static partial class Program
                     DoorMs = others.Select(o => o(i) is { } v ? v + Noise() : (double?)null).ToArray(),
                 };
                 _index++;
-                if (Policy.Feed(tick) is { } decision) Decisions.Add(decision);
+                Feed(tick);
             }
         }
 
@@ -963,7 +1147,30 @@ internal static partial class Program
                     DoorMs = [other],
                 };
                 _index++;
-                if (Policy.Feed(tick) is { } decision) Decisions.Add(decision);
+                Feed(tick);
+            }
+        }
+
+        /// <summary>Measured ticks as they were: the current way's pong, then each of <see cref="Others"/>, as (value, sent).</summary>
+        public void Replay(IEnumerable<(double? Ms, bool Sent)[]> ticks)
+        {
+            foreach (var t in ticks)
+            {
+                var tick = new QualityTick(_index, new DateTimeOffset(2026, 10, 7, 10, 40, 0, TimeSpan.Zero)
+                    .AddMilliseconds(_index * SpikeDetector.TickMs))
+                {
+                    Active = Mode == TickMode.Match,
+                    Lobby = Mode == TickMode.Lobby,
+                    RelayProcessSent = t[0].Sent,
+                    RelayProcessMs = t[0].Ms,
+                    CurrentDoor = Current,
+                    CurrentLane = Lane,
+                    DoorIds = Others,
+                    DoorSent = t.Skip(1).Select(o => o.Sent).ToArray(),
+                    DoorMs = t.Skip(1).Select(o => o.Ms).ToArray(),
+                };
+                _index++;
+                Feed(tick);
             }
         }
 

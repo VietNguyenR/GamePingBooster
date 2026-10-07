@@ -58,6 +58,8 @@ internal static partial class Program
             ("Region plan echoes, every region at once", PlanEchoesAtOnce),
             ("Relay loss", RelayLossIsMeasured),
             ("A region's tunnel moves its way in, like home", ARegionsTunnelMovesItsWayInLikeHome),
+            ("The lobby is recorded, and a move in it ends the record", TheLobbyIsRecordedAndAMoveInItEndsTheRecord),
+            ("Lobby record", ALobbyRecordKeepsItsShape),
             ("Lanes: the fast port is found and taken under load", ALaneHuntFindsTheFastPortAndMovesOntoIt),
             ("Lanes: a line without lanes is left alone", ALineWithoutLanesIsLeftAlone),
             ("Relays measured side by side", RelaysAreMeasuredSideBySide),

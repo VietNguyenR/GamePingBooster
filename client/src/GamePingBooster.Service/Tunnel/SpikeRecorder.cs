@@ -238,6 +238,16 @@ internal sealed class SpikeRecorder : IQualitySink
 
     private const int FollowTicks = 60 * SpikeDetector.TicksPerSecond;
 
+    // ------------------------------------------------------------------ the lobby record
+
+    /// <summary>
+    /// The lobby stretches, cut from the same settled ticks the switch policy judges, and what their record says about
+    /// the session - taken when each began. Touched only by the recorder's own loop, like <see cref="_pendingMove"/>.
+    /// See QualityFile.WriteLobby.
+    /// </summary>
+    private readonly LobbyTracker _lobby = new();
+    private QualityMeta _lobbyMeta;
+
     private sealed class PendingMove
     {
         public required DoorDecision Decision { get; init; }
@@ -296,6 +306,7 @@ internal sealed class SpikeRecorder : IQualitySink
             Attach(null);
             try
             {
+                EndLobby("stopped");
                 EndMatch();
             }
             catch (Exception ex)
@@ -481,6 +492,7 @@ internal sealed class SpikeRecorder : IQualitySink
                     (decisions ??= []).Add(decision);
                 }
                 if (Follow(settled) is { } done) (followed ??= []).Add(done);
+                TrackLobby(settled, context);
             }
         }
         if (closed is not null)
@@ -997,8 +1009,12 @@ internal sealed class SpikeRecorder : IQualitySink
             ? $"Entry switching: {decision.To}, left earlier, has recovered - faster than {decision.From} in " +
               $"{decision.WorseShare:P0} of the last {seconds} s, {Figures(decision.ToStats)} against " +
               $"{Figures(decision.FromStats)}; {(requested ? "going back to it" : what)}."
-            : $"Entry switching: {decision.From} was worse than {decision.To} in {decision.WorseShare:P0} of the last " +
-              $"{seconds} s - {Figures(decision.FromStats)} against {Figures(decision.ToStats)}; {what}.");
+            : decision.Steady
+                ? $"Entry switching: {decision.To} was faster than {decision.From} by {DoorSwitchPolicy.SteadyTickMargin:F0} ms " +
+                  $"or more in {decision.WorseShare:P0} of the last {seconds} s - {Figures(decision.ToStats)} against " +
+                  $"{Figures(decision.FromStats)}; {what}."
+                : $"Entry switching: {decision.From} was worse than {decision.To} in {decision.WorseShare:P0} of the last " +
+                  $"{seconds} s - {Figures(decision.FromStats)} against {Figures(decision.ToStats)}; {what}.");
     }
 
     /// <summary>Adds one settled quarter second to the move being followed. Returns it once the minute is complete.</summary>
@@ -1057,6 +1073,39 @@ internal sealed class SpikeRecorder : IQualitySink
              (move.Moved
                  ? $"the tunnel is on {move.Decision.To}" + (onMeasured is { } m ? (m ? ", on the socket it was measured on." : ", on a fresh socket.") : ".")
                  : $"the tunnel stayed on {move.Decision.From}."));
+    }
+
+    /// <summary>
+    /// Adds one settled quarter second to the lobby record - the same ticks the switch policy judged - and writes a
+    /// stretch once it is over. See LobbyTracker.
+    /// </summary>
+    private void TrackLobby(QualityTick tick, Context context)
+    {
+        var (ended, started) = _lobby.Feed(tick);
+        if (ended is not null) WriteLobby(ended);
+        if (started) _lobbyMeta = Meta(context);
+    }
+
+    /// <summary>Ends the lobby stretch being recorded, if any, and writes it when it was long enough to say anything.</summary>
+    private void EndLobby(string endedBy)
+    {
+        if (_lobby.Flush(endedBy) is { } ended) WriteLobby(ended);
+    }
+
+    private void WriteLobby(LobbySummary lobby)
+    {
+        _file.WriteLobby(lobby, _lobbyMeta);
+
+        var why = lobby.EndedBy switch
+        {
+            "match" => "a match started",
+            "moved" => "the tunnel moved",
+            "stopped" => "the recorder stopped",
+            _ => "the game left the lobby",
+        };
+        _log($"Lobby, {lobby.Seconds:F0} s on {lobby.Door} until {why}: " +
+             string.Join(", ", lobby.Ways.Select(w => $"{w.Key} {(w.Value.P50 is { } p50 ? $"{p50:F0} ms" : "no answer")}" +
+                                                      (w.Value.Lost > 0 ? $" ({w.Value.LossPct:F0}% lost)" : ""))) + ".");
     }
 
     private static string Figures(DoorStats stats) =>

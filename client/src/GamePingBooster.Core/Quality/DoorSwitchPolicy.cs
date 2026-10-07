@@ -37,6 +37,12 @@ public sealed class DoorDecision
     /// </summary>
     public bool Return { get; init; }
 
+    /// <summary>
+    /// True when the other way was simply faster for thirty seconds by less than the "worse" margin - the steady
+    /// rule over <see cref="DoorSwitchPolicy.SteadyWindowTicks"/> (STEADILY FASTER), not a lag on the current way.
+    /// </summary>
+    public bool Steady { get; init; }
+
     /// <summary>The quarter seconds the decision was judged over.</summary>
     public int WindowTicks { get; init; } = DoorSwitchPolicy.WindowTicks;
 }
@@ -89,6 +95,26 @@ public sealed class DoorDecision
 /// no incident at all. That is consistent with the connect-time rule, which would have chosen the same
 /// way had it measured it then.
 ///
+/// STEADILY FASTER. A way faster by less than that margin, but every quarter second, never moved anybody:
+/// on 2026-10-07 the owner's match sat on sg-2 at 58 ms for three minutes while vn-5-sg2 answered in 49,
+/// clean, with a lower 95th percentile - 9 ms, under the 10 ms bar, so it was never "worse", and the move
+/// waited for the between-matches rescan (max(5 ms, 10%)). So a second bar over THIRTY seconds
+/// (<see cref="SteadyWindowTicks"/>): the other way faster by <see cref="SteadyTickMargin"/> in three
+/// quarters of the quarter seconds, its median faster by <see cref="SteadyMargin"/> - the rescan's margin -
+/// its 95th percentile no higher than the current way's, and at most <see cref="SteadyMaxOtherLostShare"/>
+/// of its probes lost. Replayed over prod spike records with every way's samples (38,882 matches, record-mode
+/// relays giving what came after): it decided in 1,644 match-ways, 1,421 of which the "worse" bar never
+/// reached, and afterwards the way moved to stayed faster by 7.1 ms at the median, by 3 ms or more in 90%,
+/// and turned out slower in 6.6% - against 8.4% for the "worse" bar's own decisions. Sixty seconds instead of
+/// thirty was no surer (6.5%); a 7 or 8 ms bar was a little surer (6.0%, 4.9%) and caught a third to a half
+/// fewer. The 95th percentile check halves the moves onto a way with the worse tail. The way the last
+/// decision left is not judged by it: going back has its own, longer proof (GOING BACK).
+///
+/// The connect-time rule keeps the 10 ms bar on purpose. Its numbers are a burst of pings: that evening
+/// vn-3-sg2 measured 50 ms at connect against sg-2's 60, and 70 for the whole match after - a 5 ms bar
+/// there would have started the player on the slowest way in. Thirty seconds of quarter seconds, in the
+/// lobby or the match, is where a gap this small can be told from noise.
+///
 /// GOING BACK. Once the tunnel is on the way a decision moved it to, the way it left is judged by a lower
 /// bar: faster by <see cref="ReturnMargin"/> in three quarters of the last TWO minutes, with at most
 /// <see cref="ReturnMaxLost"/> probes lost down it and its 95th percentile no higher than the current
@@ -135,6 +161,18 @@ public sealed class DoorSwitchPolicy
     internal const int MaxOtherLost = 2;
 
     public static double Margin(double otherMs) => Math.Max(10.0, 0.15 * otherMs);
+
+    /// <summary>The window the steady rule is judged over. See STEADILY FASTER above.</summary>
+    public const int SteadyWindowTicks = 30 * SpikeDetector.TicksPerSecond;
+
+    /// <summary>How much faster the other way must be in a quarter second to count toward the steady rule.</summary>
+    public const double SteadyTickMargin = 5.0;
+
+    /// <summary>How much faster the other way's median must be over the steady window: the between-matches rescan's margin.</summary>
+    public static double SteadyMargin(double otherMs) => Math.Max(5.0, 0.1 * otherMs);
+
+    /// <summary>The share of its probes the other way may lose over the steady window.</summary>
+    internal const double SteadyMaxOtherLostShare = 0.05;
 
     /// <summary>How long the way a decision left must have been better before the tunnel goes back to it.</summary>
     public const int ReturnWindowTicks = 2 * 60 * SpikeDetector.TicksPerSecond;
@@ -240,6 +278,13 @@ public sealed class DoorSwitchPolicy
                 }
             }
 
+            // Or simply faster, by less than "worse" asks but for thirty seconds (STEADILY FASTER) - never back to the
+            // way the last decision left, which has the return rule.
+            if (candidate is null && !IsLeft(ids[slot]) && _window.Count >= SteadyWindowTicks)
+            {
+                candidate = JudgeSteady(last, slot);
+            }
+
             if (candidate is null) continue;
             if (best is null || (candidate.ToStats.P50 ?? double.MaxValue) < (best.ToStats.P50 ?? double.MaxValue))
             {
@@ -251,6 +296,26 @@ public sealed class DoorSwitchPolicy
 
     private bool IsLeft(string id) => _leftFrom is not null && string.Equals(id, _leftFrom, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// The steady rule for the way in <paramref name="slot"/> over the last <see cref="SteadyWindowTicks"/>: faster by
+    /// <see cref="SteadyTickMargin"/> in three quarters of the quarter seconds, by <see cref="SteadyMargin"/> at the
+    /// median, no worse at the 95th percentile, and clean. Null when any of it does not hold.
+    /// </summary>
+    private DoorDecision? JudgeSteady(QualityTick last, int slot)
+    {
+        var t = Count(slot, SteadyWindowTicks, static _ => SteadyTickMargin);
+        if (t.Other.Count == 0 || t.Current.Count == 0) return null;
+        if (t.Comparable < MinComparableShare * SteadyWindowTicks || t.Share < WorseShareToMove) return null;
+        if (t.OtherLost > SteadyMaxOtherLostShare * t.OtherSent) return null;
+
+        var from = Stats(t.Current, t.CurrentSent, t.CurrentLost);
+        var to = Stats(t.Other, t.OtherSent, t.OtherLost);
+        if (from.P50 is not { } fromP50 || to.P50 is not { } toP50 || fromP50 - toP50 < SteadyMargin(toP50)) return null;
+        if (from.P95 is { } fromP95 && to.P95 is { } toP95 && toP95 > fromP95) return null;
+
+        return Decide(last, slot, t, SteadyWindowTicks, steady: true);
+    }
+
     /// <summary>The current way against the way in <paramref name="slot"/>, over the last <paramref name="ticks"/> of the window.</summary>
     private sealed class Tally
     {
@@ -260,8 +325,10 @@ public sealed class DoorSwitchPolicy
         public double Share => Comparable == 0 ? 0 : (double)Worse / Comparable;
     }
 
-    private Tally Count(int slot, int ticks)
+    /// <param name="margin">What "worse" means in one quarter second, from the other way's round trip: <see cref="Margin"/> unless said.</param>
+    private Tally Count(int slot, int ticks, Func<double, double>? margin = null)
     {
+        margin ??= Margin;
         var t = new Tally();
         var position = -1;
         foreach (var tick in _window.Skip(_window.Count - ticks))
@@ -293,7 +360,7 @@ public sealed class DoorSwitchPolicy
                 t.LostWorse++;
                 t.LossSlices |= 1 << (position * LossSlices / ticks);
             }
-            else if (currentValue - otherValue >= Margin(otherValue))
+            else if (currentValue - otherValue >= margin(otherValue))
             {
                 t.Worse++;
             }
@@ -301,8 +368,9 @@ public sealed class DoorSwitchPolicy
         return t;
     }
 
-    private static DoorDecision Decide(QualityTick last, int slot, Tally t, int windowTicks) => new()
+    private static DoorDecision Decide(QualityTick last, int slot, Tally t, int windowTicks, bool steady = false) => new()
     {
+        Steady = steady,
         TickIndex = last.Index,
         AtUtc = last.StartUtc,
         From = last.CurrentDoor!,

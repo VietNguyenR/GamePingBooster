@@ -116,6 +116,7 @@ internal sealed record RegionPlanEntry(
 /// like - the denominator, without which "eight spikes on sg-3" cannot be told from "sg-3 is busy".
 /// <c>"type":"switch"</c> is one decision of entry switching and the minute after it - see WriteMove.
 /// <c>"type":"regionPlan"</c> is one pass of the region planner - see WriteRegionPlan.
+/// <c>"type":"lobby"</c> is one stretch of the game open with no match, and the ways in compared over it - see WriteLobby.
 /// Spikes also carry <c>door</c>, the way into the relay in use, and <c>ticks.doors</c>, the probes down
 /// the others, when entry switching is not off.
 ///
@@ -308,7 +309,7 @@ internal sealed class QualityFile(Action<string> log)
         if (moved && onMeasured is { } measured) w.WriteString("socket", measured ? "measured" : "fresh");
         w.WriteString("from", decision.From);
         w.WriteString("to", decision.To);
-        w.WriteString("reason", decision.Return ? "return" : "worse");
+        w.WriteString("reason", decision.Return ? "return" : decision.Steady ? "steady" : "worse");
         w.WriteNumber("windowSeconds", decision.WindowTicks / SpikeDetector.TicksPerSecond);
         w.WriteNumber("worseShare", Math.Round(decision.WorseShare, 2));
         w.WriteNumber("comparable", decision.Comparable);
@@ -507,6 +508,56 @@ internal sealed class QualityFile(Action<string> log)
             }
             w.WriteEndArray();
         }
+
+        w.WriteEndObject();
+    }
+
+    /// <summary>
+    /// One stretch of the game open with no match - the lobby - on one way into the relay: <c>"type":"lobby"</c>.
+    ///
+    /// Entry switching compares the ways in during the lobby too (QualityTick.Lobby), but until 2026-10-07 nothing of
+    /// it was kept: spikes are written only in a match, so whether a way was steadily faster while a player waited in
+    /// the lobby - the moment a move costs nothing - could not be checked against anything. This is that record.
+    /// <c>ways</c> holds every way's round trip to relayd over the whole stretch (the way in use by its pong, the others
+    /// by their Probes); <c>ticks</c> the last <see cref="LobbySummary.MaxTicks"/> quarter seconds of it in the spike
+    /// convention (null not sent, -1 lost), <c>relayProcess</c> being the way in use and <c>doors</c> the others, so the
+    /// policy can be replayed on it. <c>endedBy</c>: "match" (the game started sending), "moved" (the tunnel moved to
+    /// another way or lane), "left" (the game closed, the tunnel went, or nothing was compared for two seconds) or
+    /// "stopped" (the service stopped). Ids only, like every record here.
+    /// </summary>
+    public void WriteLobby(LobbySummary lobby, QualityMeta meta) => Append((w, id) => WriteLobbyJson(w, id, lobby, meta));
+
+    /// <summary>
+    /// The line <see cref="WriteLobby"/> appends, apart from the file so TunnelCheck can hold it to
+    /// testdata/lobby-record.json - the shape the licence server parses - without touching the real queue.
+    /// </summary>
+    internal static void WriteLobbyJson(Utf8JsonWriter w, string id, LobbySummary lobby, QualityMeta meta)
+    {
+        w.WriteStartObject();
+        w.WriteString("id", id);
+        w.WriteString("type", "lobby");
+        w.WriteNumber("schema", Schema);
+        w.WriteString("utc", lobby.StartUtc);
+        w.WriteString("endUtc", lobby.EndUtc);
+        WriteMeta(w, meta);
+
+        w.WriteString("door", lobby.Door);
+        w.WriteNumber("seconds", Round(lobby.Seconds));
+        w.WriteString("endedBy", lobby.EndedBy);
+
+        w.WriteStartObject("ways");
+        foreach (var (way, stats) in lobby.Ways) DoorFigures(w, way, stats);
+        w.WriteEndObject();
+
+        w.WriteNumber("tickMs", SpikeDetector.TickMs);
+        // Quarter seconds of the stretch before the first one in "ticks": a long lobby keeps only its end.
+        w.WriteNumber("ticksSkipped", lobby.TicksSkipped);
+        w.WriteStartObject("ticks");
+        Series(w, "relayProcess", lobby.Ticks, t => Probe(t.RelayProcessSent, t.RelayProcessMs));
+        w.WriteStartObject("doors");
+        foreach (var door in lobby.DoorIds) Series(w, door, lobby.Ticks, t => DoorValue(t, door));
+        w.WriteEndObject();
+        w.WriteEndObject();
 
         w.WriteEndObject();
     }

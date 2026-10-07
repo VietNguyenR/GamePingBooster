@@ -102,6 +102,59 @@ internal static partial class Program
         return Task.CompletedTask;
     }
 
+    private const string LobbyGolden = "testdata/lobby-record.json";
+
+    /// <summary>
+    /// The lobby record, byte for byte against <see cref="LobbyGolden"/> - the file the licence server's own check
+    /// parses. Twenty seconds - the shortest stretch written - of sg-2 at 58 ms beside vn-5-sg2 at 49, which loses
+    /// every tenth probe, and vn-1-sg2, whose first probe was never sent. GPB_WRITE_GOLDEN=1 rewrites it.
+    /// </summary>
+    private static Task ALobbyRecordKeepsItsShape()
+    {
+        string[] others = ["vn-5-sg2", "vn-1-sg2"];
+        var tracker = new LobbyTracker();
+        var start = new DateTimeOffset(2026, 10, 7, 10, 39, 0, TimeSpan.Zero);
+        for (var i = 0; i < LobbyTracker.MinTicks; i++)
+        {
+            tracker.Feed(new QualityTick(i, start.AddMilliseconds(i * SpikeDetector.TickMs))
+            {
+                Lobby = true,
+                RelayProcessSent = true,
+                RelayProcessMs = 58 + i % 3 * 0.5,
+                CurrentDoor = "sg-2",
+                DoorRelayId = "sg-2",
+                DoorIds = others,
+                DoorSent = [true, i != 0],
+                DoorMs = [i % 10 == 0 ? null : 49 + i % 2, i == 0 ? null : 55],
+            });
+        }
+        var lobby = tracker.Feed(new QualityTick(LobbyTracker.MinTicks, start.AddSeconds(20)) { Active = true }).Ended;
+        Check("twenty seconds of lobby, then a match: one stretch, ended by the match", lobby is { EndedBy: "match", TickCount: LobbyTracker.MinTicks });
+        if (lobby is null) return Task.CompletedTask;
+
+        var meta = new QualityMeta("0.4.4", "pubg", "sg-2", null, "Southeast Asia (Singapore)", "Wi-Fi");
+        var buffer = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions { Indented = true }))
+        {
+            QualityFile.WriteLobbyJson(writer, "00000000000000000000000000000000", lobby, meta);
+        }
+        var json = Encoding.UTF8.GetString(buffer.ToArray()).Replace("\r\n", "\n") + "\n";
+        Check("no IP address of any kind in the record", !Regex.IsMatch(json, @"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b"));
+        Check("a probe never sent is null and a lost one -1, as in a spike",
+            json.Contains("\"vn-1-sg2\": [\n        null,") && json.Contains("\"vn-5-sg2\": [\n        -1,"), "the series do not start as expected");
+
+        var path = Path.Combine(RepositoryRoot(), LobbyGolden);
+        if (Environment.GetEnvironmentVariable("GPB_WRITE_GOLDEN") == "1")
+        {
+            File.WriteAllText(path, json);
+            Console.WriteLine($"  wrote {LobbyGolden}");
+        }
+        var golden = File.Exists(path) ? File.ReadAllText(path).Replace("\r\n", "\n") : null;
+        Check($"the record is exactly {LobbyGolden}", golden == json,
+            golden is null ? "the file is missing - run with GPB_WRITE_GOLDEN=1" : "it differs - rerun with GPB_WRITE_GOLDEN=1 if the change is meant, and update the licence server's parser");
+        return Task.CompletedTask;
+    }
+
     /// <summary>The directory holding testdata/, found upwards from the build output.</summary>
     private static string RepositoryRoot()
     {
