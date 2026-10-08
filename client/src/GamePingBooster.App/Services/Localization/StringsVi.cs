@@ -122,6 +122,13 @@ internal static class StringsVi
         ["licence.renewing"] =
             "Đang gia hạn giấy phép... Nếu gói của bạn đã hết, gia hạn trên website là app tự nhận.",
         ["licence.notSignedIn"] = "Chưa đăng nhập",
+
+        // Last sign-in wins (2026-10-08): this machine was signed out by the account signing in on another one.
+        // {0} is signedOut.elsewhere.device or "", {1} is signedOut.elsewhere.at or "".
+        ["signedOut.elsewhere"] = "Tài khoản của bạn vừa đăng nhập trên máy khác{0}{1}, nên máy này đã bị đăng xuất và ngắt kết nối. Đăng nhập lại để dùng tiếp trên máy này.",
+        ["signedOut.elsewhere.device"] = " ({0})",
+        ["signedOut.elsewhere.at"] = " lúc {0}",
+        ["signedOut.elsewhere.title"] = "Máy này đã bị đăng xuất",
         ["licence.signedInShipped"] = "Đã đăng nhập - đang dùng danh sách game kèm theo bản cài, chưa phải bản mới nhất",
         ["licence.signedIn"] = "Đã đăng nhập",
         ["licence.expired"] = "Giấy phép đã hết hạn - đang tự gia hạn",
@@ -239,6 +246,7 @@ internal static class StringsVi
         ["svc.rescanMoved"] = "Đã kết nối tới {0} - chuyển từ {1} giữa hai trận, nhanh hơn {2} ms",
         ["svc.reconnecting"] = "Đang kết nối lại qua {0} (lần {1}) - traffic đang đi đường mạng thường",
         ["svc.reconnected"] = "Đã kết nối lại tới {0}",
+        ["svc.revoked"] = "Tài khoản của bạn vừa đăng nhập trên máy khác nên máy này bị ngắt kết nối.",
         ["svc.accelerating"] = "Đang tăng tốc {0} qua {1}",
         ["svc.acceleratingAdaptive"] = "Đang tăng tốc {0} qua {1} (máy chủ khu vực) - máy chủ chính {2}",
         ["svc.fixingClock"] = "Đang chỉnh lại giờ hệ thống...",

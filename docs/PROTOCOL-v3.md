@@ -189,6 +189,13 @@ is no length field and no TLV, in keeping with the rest of the format.
 4 and 5 are sent **only after the signature verified**, so they tell a legitimate customer why
 they were refused without telling a stranger anything. A bad signature stays silent.
 
+5 is sent for a token the licence server has revoked because the account signed in on another
+machine (last sign-in wins). The relay still verifies offline; the licence server hands it the
+list of such tokens - device key plus the token's exact expiry - in the reply to each status
+report, and the relay refuses those tokens and cuts any session open on one. The list can only
+deny, never admit, and a relay that cannot reach the licence server keeps its last list until
+the entries expire. See `relay/internal/server/revoked.go`.
+
 ## Version mismatch stays parseable by old clients
 
 v2's rule holds and gets stricter: when the relay answers a handshake whose version is not its

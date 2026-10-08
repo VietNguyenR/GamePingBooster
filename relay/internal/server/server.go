@@ -158,6 +158,10 @@ type sessionIdent struct {
 	// relays, and the id lets the reports be read as one client (docs/MULTI-TUNNEL.md, section
 	// 7). Never a reservation key in token mode; see handleHandshakeToken.
 	clientID protocol.ClientID
+
+	// expiry is the token's expiry in unix seconds, or 0 in PSK mode. With deviceKey it names the
+	// exact token this session was opened with, which is what a revocation names - see revoked.go.
+	expiry int64
 }
 
 func (s *session) touch() { s.lastSeen.Store(time.Now().UnixNano()) }
@@ -180,6 +184,10 @@ type Server struct {
 	// routing table over a two-second network blip. Entries survive the session they came from
 	// and are only given up when the pool runs dry.
 	reservedIPs map[protocol.ClientID]netip.Addr
+
+	// revoked is the licence server's latest list of revoked tokens, replaced wholesale on every
+	// status report that carries one. Nil until the first. See revoked.go.
+	revoked atomic.Pointer[revokedSet]
 
 	relayIP netip.Addr
 	started time.Time
@@ -506,6 +514,18 @@ func (s *Server) handleHandshakeToken(pkt []byte, from netip.AddrPort) {
 		return
 	}
 
+	// Signed out because the account signed in on another machine (revoked.go). Answered, like an
+	// expired licence: the signature verified, so this is the customer's own app, and a status lets
+	// even a release that has never heard of last-sign-in-wins say why instead of timing out.
+	if s.isRevoked(tok.DeviceKeyRaw(), tok.Expiry.Unix()) {
+		s.respondToken(protocol.StatusCredentialRevoked, protocol.SessionID{},
+			netip.Addr{}, 0, nonce, from)
+		s.log.Info("licence revoked: the account signed in on another machine",
+			"from", from.String(), "user", tok.UserID)
+		s.stats.dropped.Add(1)
+		return
+	}
+
 	// The plan gate. Answered rather than dropped, for the same reason an expired licence is:
 	// the signature verified, so this is a real customer holding a real licence who has arrived
 	// somewhere their plan does not reach. A timeout would send them to support; a status sends
@@ -536,6 +556,7 @@ func (s *Server) handleHandshakeToken(pkt []byte, from netip.AddrPort) {
 		userID:    tok.UserID,
 		deviceKey: tok.DeviceKeyRaw(),
 		clientID:  clientID,
+		expiry:    tok.Expiry.Unix(),
 	})
 	if !ok {
 		s.respondToken(protocol.StatusPoolFull, protocol.SessionID{}, netip.Addr{}, 0, nonce, from)
@@ -758,7 +779,9 @@ func (s *Server) loopJanitor(done <-chan struct{}) {
 		case <-done:
 			return
 		case <-t.C:
-			s.sweep(time.Now())
+			now := time.Now()
+			s.sweep(now)
+			s.pruneRevoked(now)
 		}
 	}
 }

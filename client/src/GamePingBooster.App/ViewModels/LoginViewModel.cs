@@ -44,6 +44,14 @@ public sealed class LoginViewModel : INotifyPropertyChanged
         _saveRefreshToken = saveRefreshToken ?? RefreshTokenStore.Save;
     }
 
+    /// <summary>
+    /// Why this window opened by itself, when it did: "your account signed in on another machine, so this one was
+    /// signed out". Null for an ordinary sign-in.
+    /// </summary>
+    public string? Notice { get; init; }
+
+    public bool HasNotice => !string.IsNullOrEmpty(Notice);
+
     /// <summary>Shown so somebody can tell which server they are about to hand a password to.</summary>
     public string ServerText => Loc.F("login.server", _licenceUrl);
 

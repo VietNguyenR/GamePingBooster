@@ -64,6 +64,10 @@ type handoffSession struct {
 	UserID    uint64            `json:"userID,omitempty"`
 	DeviceKey []byte            `json:"deviceKey,omitempty"`
 	ClientID  protocol.ClientID `json:"clientID"`
+	// Expiry is the token's expiry, so a session handed over can still be cut when its token is
+	// revoked. Absent from a handoff written by a release before it, which reads as 0: that
+	// session is simply never matched, and is cut at its next handshake instead.
+	Expiry int64 `json:"expiry,omitempty"`
 }
 
 type handoffReserved struct {
@@ -107,6 +111,7 @@ func (s *Server) exportLocked() handoffState {
 			ID: sess.id, ResKey: sess.resKey, InnerIP: sess.innerIP,
 			LastSeen: sess.lastSeen.Load(), Born: sess.born, Resumed: sess.resumed,
 			UserID: sess.ident.userID, DeviceKey: sess.ident.deviceKey, ClientID: sess.ident.clientID,
+			Expiry: sess.ident.expiry,
 		}
 		if a := sess.addr.Load(); a != nil {
 			hs.Addr = *a
@@ -174,7 +179,7 @@ func (s *Server) restore(data []byte) (int, string, error) {
 		}
 		sess := &session{
 			id: hs.ID, resKey: hs.ResKey, innerIP: hs.InnerIP, born: hs.Born, resumed: hs.Resumed,
-			ident: sessionIdent{userID: hs.UserID, deviceKey: hs.DeviceKey, clientID: hs.ClientID},
+			ident: sessionIdent{userID: hs.UserID, deviceKey: hs.DeviceKey, clientID: hs.ClientID, expiry: hs.Expiry},
 			up:    newBucket(s.cfg.BurstBytes),
 			down:  newBucket(s.cfg.BurstBytes),
 		}

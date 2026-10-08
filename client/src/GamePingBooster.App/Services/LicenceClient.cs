@@ -496,28 +496,64 @@ public sealed class LicenceClient : IDisposable
             return response.IsSuccessStatusCode;
         });
 
+    /// <summary>
+    /// How long one <see cref="WatchSignInAsync"/> may take: the server holds it for 45 s, so this is that plus room
+    /// for a slow line, and still under the 60 s nginx keeps a proxied request open.
+    /// </summary>
+    public static readonly TimeSpan WatchTimeout = TimeSpan.FromSeconds(58);
+
+    /// <summary>
+    /// One long poll of GET /auth/watch: answers the moment this sign-in is ended because the account signed in on
+    /// another machine, or after about 45 s with "still signed in". See SignInWatcher.
+    ///
+    /// 200 and 401 both carry a <see cref="WatchResult"/>. Anything else - a proxy's page, a 5xx, a server older
+    /// than the route (404) - is thrown, like every other call here.
+    /// </summary>
+    public Task<WatchResult> WatchSignInAsync(string refreshToken, CancellationToken ct) =>
+        WithDeadline(WatchTimeout, ct, async t =>
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, "auth/watch");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshToken);
+            using var response = await _http.SendAsync(request, t).ConfigureAwait(false);
+
+            if (response.StatusCode is System.Net.HttpStatusCode.OK or System.Net.HttpStatusCode.Unauthorized)
+            {
+                WatchResult? body = null;
+                try
+                {
+                    body = await response.Content
+                        .ReadFromJsonAsync(LicenceJsonContext.Default.WatchResult, t).ConfigureAwait(false);
+                }
+                catch (Exception) when (!t.IsCancellationRequested)
+                {
+                    // Not the server's shape. Falls through to the ordinary error below.
+                }
+                if (body is { State: "active" or "signed_in_elsewhere" or "signed_out" }) return body;
+            }
+
+            throw await ErrorAsync(response, t, []).ConfigureAwait(false);
+        });
+
     private static async Task<LicenceException> ErrorAsync(HttpResponseMessage response,
         CancellationToken ct, Dictionary<System.Net.HttpStatusCode, string> known)
     {
-        string? serverMessage = null;
+        ErrorResponse? error = null;
         try
         {
-            var error = await response.Content
+            error = await response.Content
                 .ReadFromJsonAsync(LicenceJsonContext.Default.ErrorResponse, ct).ConfigureAwait(false);
-            serverMessage = error?.Error;
         }
         catch (Exception)
         {
             // Not JSON. Fall through to the status code.
         }
 
-        if (serverMessage is not null) return new LicenceException(serverMessage, response.StatusCode);
-        if (known.TryGetValue(response.StatusCode, out var message))
-        {
-            return new LicenceException(message, response.StatusCode);
-        }
-        return new LicenceException(Loc.ViF("licenceErr.status", (int)response.StatusCode),
-            response.StatusCode);
+        // The code goes through as well: /account answers 401 signed_in_elsewhere, and it used to be dropped here.
+        var message = error?.Error
+            ?? (known.TryGetValue(response.StatusCode, out var said)
+                ? said
+                : Loc.ViF("licenceErr.status", (int)response.StatusCode));
+        return LicenceException.From(message, response.StatusCode, error);
     }
 
     /// <summary>
@@ -538,21 +574,18 @@ public sealed class LicenceClient : IDisposable
             return value;
         }
 
-        string? serverMessage = null;
-        string? serverCode = null;
+        ErrorResponse? error = null;
         try
         {
-            var error = await response.Content
+            error = await response.Content
                 .ReadFromJsonAsync(LicenceJsonContext.Default.ErrorResponse, ct).ConfigureAwait(false);
-            serverMessage = error?.Error;
-            serverCode = error?.Code;
         }
         catch (Exception)
         {
             // Not JSON, or not the shape expected. Fall through to the status code.
         }
 
-        throw new LicenceException(serverMessage ?? response.StatusCode switch
+        throw LicenceException.From(error?.Error ?? response.StatusCode switch
         {
             // No password is ever sent from here, so a 401 can only mean the sign-in itself is no
             // longer accepted - an expired or revoked refresh token, or a one-time code already spent.
@@ -560,7 +593,7 @@ public sealed class LicenceClient : IDisposable
             System.Net.HttpStatusCode.Forbidden => Loc.Vi("licenceErr.deviceLimit"),
             System.Net.HttpStatusCode.NotFound => Loc.Vi("licenceErr.notFound"),
             _ => Loc.ViF("licenceErr.status", (int)response.StatusCode),
-        }, response.StatusCode, serverCode);
+        }, response.StatusCode, error);
     }
 }
 
@@ -580,6 +613,25 @@ public sealed class LicenceException(string message, System.Net.HttpStatusCode? 
 
     /// <summary>The server's machine-readable reason ("rate_limited", "creator"...), when it sent one.</summary>
     public string? Code { get; } = code;
+
+    /// <summary>
+    /// This sign-in was ended because the account signed in on another machine: 401 <c>signed_in_elsewhere</c>
+    /// from /auth/token, /account or /auth/watch. Never worth asking again - SignInWatcher disconnects and signs out.
+    /// </summary>
+    public bool SignedInElsewhere => Code == SignInWatcher.SignedInElsewhereCode;
+
+    /// <summary>With <see cref="SignedInElsewhere"/>: the label of the machine that signed in, when the server knows it.</summary>
+    public string? OtherDevice { get; init; }
+
+    /// <summary>With <see cref="SignedInElsewhere"/>: when this machine was signed out, when the server knows it.</summary>
+    public DateTimeOffset? SignedOutAt { get; init; }
+
+    internal static LicenceException From(string message, System.Net.HttpStatusCode status, ErrorResponse? error) =>
+        new(message, status, error?.Code)
+        {
+            OtherDevice = error?.DeviceLabel,
+            SignedOutAt = error?.At is { } at ? DateTimeOffset.FromUnixTimeSeconds(at) : null,
+        };
 }
 
 /// <summary>
@@ -704,6 +756,27 @@ public sealed class ErrorResponse
 {
     [JsonPropertyName("error")] public string? Error { get; set; }
     [JsonPropertyName("code")] public string? Code { get; set; }
+
+    /// <summary>signed_in_elsewhere only: the machine that signed in, and when (unix seconds). Either may be null.</summary>
+    [JsonPropertyName("deviceLabel")] public string? DeviceLabel { get; set; }
+    [JsonPropertyName("at")] public long? At { get; set; }
+}
+
+/// <summary>
+/// GET /auth/watch: 200 <c>active</c> (ask again), or 401 <c>signed_in_elsewhere</c> / <c>signed_out</c> carrying the
+/// same fields as <see cref="ErrorResponse"/>.
+/// </summary>
+public sealed class WatchResult
+{
+    [JsonPropertyName("state")] public string State { get; set; } = "";
+
+    /// <summary>Seconds to wait before asking again; 0 is straight away.</summary>
+    [JsonPropertyName("wait")] public int Wait { get; set; }
+
+    [JsonPropertyName("code")] public string? Code { get; set; }
+    [JsonPropertyName("error")] public string? Error { get; set; }
+    [JsonPropertyName("deviceLabel")] public string? DeviceLabel { get; set; }
+    [JsonPropertyName("at")] public long? At { get; set; }
 }
 
 // ------------------------------------------------------------------- buying a plan in the app
@@ -849,6 +922,7 @@ public sealed class QualityUploadResult
 [JsonSerializable(typeof(ProfilesResult))]
 [JsonSerializable(typeof(AccountResult))]
 [JsonSerializable(typeof(ErrorResponse))]
+[JsonSerializable(typeof(WatchResult))]
 [JsonSerializable(typeof(DiagnosticRequest))]
 [JsonSerializable(typeof(DiagnosticResult))]
 [JsonSerializable(typeof(QualityUploadResult))]

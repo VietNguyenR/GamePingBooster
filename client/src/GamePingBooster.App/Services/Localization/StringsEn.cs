@@ -123,6 +123,10 @@ internal static class StringsEn
 
         ["licence.renewing"] =
             "Renewing the licence... If your plan has ended, renew it on the website and it is picked up here.",
+        ["signedOut.elsewhere"] = "Your account just signed in on another computer{0}{1}, so this one was signed out and disconnected. Sign in again to keep using it here.",
+        ["signedOut.elsewhere.device"] = " ({0})",
+        ["signedOut.elsewhere.at"] = " at {0}",
+        ["signedOut.elsewhere.title"] = "This computer was signed out",
         ["licence.notSignedIn"] = "Not signed in",
         ["licence.signedInShipped"] = "Signed in - using the installed game list, not the current one",
         ["licence.signedIn"] = "Signed in",
@@ -241,7 +245,8 @@ internal static class StringsEn
         ["svc.movedForGame"] = "Connected to {0} - {1} is not used for {2}",
         ["svc.rescanMoved"] = "Connected to {0} - moved from {1} between matches, {2} ms faster",
         ["svc.reconnecting"] = "Reconnecting via {0} (attempt {1}) - traffic is on the normal path",
-        ["svc.reconnected"] = "Reconnected to {0}",
+        ["svc.revoked"] = "Your account just signed in on another computer, so this one was disconnected.",
+        ["svc.reconnected"] ="Reconnected to {0}",
         ["svc.accelerating"] = "Accelerating {0} through {1}",
         ["svc.acceleratingAdaptive"] = "Accelerating {0} through {1} (adaptive relay) - main relay {2}",
         ["svc.fixingClock"] = "Correcting the system clock...",

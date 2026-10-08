@@ -46,6 +46,8 @@ public partial class MainWindow : SurfaceWindow
     private void OfferSignIn()
     {
         if (_offeredSignIn || _updateOpen || !_hasOpened || !IsVisible) return;
+        // Not over another dialog. This runs with every status, so it comes round again once that one closes.
+        if (OwnedWindows.Count > 0) return;
         if (DataContext is not MainViewModel vm || _pipe is null) return;
 
         // Same preconditions as the menu item: nothing to sign in to until the service has said
@@ -70,8 +72,18 @@ public partial class MainWindow : SurfaceWindow
 
     private async Task ShowSignInAsync(MainViewModel vm)
     {
-        var login = new LoginViewModel(vm.LicenceUrl!, vm.DevicePublicKey!, _pipe!, _profileSync);
+        var login = new LoginViewModel(vm.LicenceUrl!, vm.DevicePublicKey!, _pipe!, _profileSync)
+        {
+            Notice = _signedOutNotice,
+        };
         await new LoginWindow { DataContext = login }.ShowDialog(this);
+
+        if (login.Succeeded)
+        {
+            _signedOutNotice = null;
+            // Watch the new sign-in now, not when the old one's poll runs out.
+            _signIn?.Wake();
+        }
 
         // The menu and the banner follow at once rather than at the next status. Matters most for
         // an account with no plan: no licence arrives to change anything else on screen.
@@ -132,6 +144,32 @@ public partial class MainWindow : SurfaceWindow
     }
 
     private ProfileSync? _profileSync;
+
+    private SignInWatcher? _signIn;
+
+    /// <summary>Why the next sign-in window opens by itself: this machine was signed out by another's sign-in.</summary>
+    private string? _signedOutNotice;
+
+    public void AttachSignInWatcher(SignInWatcher watcher) => _signIn = watcher;
+
+    /// <summary>
+    /// The account signed in on another machine and this one has been disconnected and signed out (App does both
+    /// first). Closes what belonged to that account and offers the sign-in again, saying why - once the window is on
+    /// screen and free, like every other offer, so a game full screen in front of a window in the tray is not
+    /// minimised by it. The line under the button and a tray notification say it meanwhile.
+    /// </summary>
+    public void ShowSignedOutElsewhere(string notice)
+    {
+        _signedOutNotice = notice;
+        _offeredSignIn = false;
+
+        foreach (var owned in OwnedWindows.ToList())
+        {
+            if (owned is AccountWindow or UpgradeWindow) owned.Close();
+        }
+
+        Dispatcher.UIThread.Post(OfferSignIn);
+    }
 
     /// <summary>The sign-in window fetches the game list as soon as it has a credential.</summary>
     public void AttachProfileSync(ProfileSync sync) => _profileSync = sync;
@@ -221,7 +259,8 @@ public partial class MainWindow : SurfaceWindow
         {
             var account = new AccountWindow
             {
-                DataContext = new AccountViewModel(vm.LicenceUrl, vm.DevicePublicKey, _pipe, _purchases),
+                DataContext = new AccountViewModel(vm.LicenceUrl, vm.DevicePublicKey, _pipe, _purchases,
+                    signedInElsewhere: _signIn is { } watcher ? watcher.Report : null),
             };
             await account.ShowDialog(this);
 

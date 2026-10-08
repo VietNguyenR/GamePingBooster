@@ -86,6 +86,13 @@ public static class GpbProtocol
     public const byte StatusCredentialRevoked = 5;
 
     /// <summary>
+    /// What the service reports when a relay answers <see cref="StatusCredentialRevoked"/>. A constant because the app
+    /// recognises it: the account signed in on another machine, SignInWatcher says so in full, and the red banner
+    /// would only repeat it in English (and flash it first, when the relay's cut beat the watcher).
+    /// </summary>
+    public const string RevokedMessage = "This device is no longer authorised. Check your devices in the app.";
+
+    /// <summary>
     /// The licence verified, but this relay is reserved for a higher plan than the token carries.
     ///
     /// Distinct from an expired credential on purpose: nothing is wrong with the subscription and

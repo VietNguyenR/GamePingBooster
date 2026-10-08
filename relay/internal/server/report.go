@@ -44,6 +44,11 @@ const (
 	minReportInterval     = 5 * time.Second
 	reportTimeout         = 5 * time.Second
 
+	// maxAckBytes caps the reply read back from the licence server. Its revocation list is about
+	// 160 bytes an entry; this holds tens of thousands, far beyond a real day of sign-outs, while
+	// still bounding what a proxy answering in its place can make the relay read.
+	maxAckBytes = 4 << 20
+
 	// reportVersion is the body format. The licence server refuses anything it does not know
 	// rather than guessing at a field that moved.
 	reportVersion = 1
@@ -313,26 +318,40 @@ func (s *Server) postReport(client *http.Client, priv *ecdsa.PrivateKey, pub str
 		return fmt.Errorf("%s said %s: %s", s.cfg.ReportURL, resp.Status, detail)
 	}
 
-	// A success body is normally ignored. The one thing worth reading out of it is the licence
-	// server telling us our tier gate disagrees with the one it has on file - which is the whole
-	// reason min_tier is sent up. The operator who can fix it is reading THIS log, next to the
-	// flag that is wrong, not the licence server's.
+	// Two things are read out of a success body.
+	//
+	// The licence server telling us our tier gate disagrees with the one it has on file - which
+	// is the whole reason min_tier is sent up. The operator who can fix it is reading THIS log,
+	// next to the flag that is wrong, not the licence server's.
+	//
+	// And `revoked`: the tokens of machines signed out because their account signed in on
+	// another one. The only thing in this reply the relay acts on, and deliberately the narrowest
+	// thing it could be - it can cut a token, never admit one. See revoked.go.
 	//
 	// Best effort in every direction: a body that is missing, truncated or not JSON leaves the
-	// report a success, because a status snapshot that started failing over a diagnostic would
-	// be a worse bargain than never noticing the drift.
+	// report a success and the last revocation list in place, because a status snapshot that
+	// started failing over either would be a worse bargain than acting a report late.
 	var ack struct {
 		TierMismatch *struct {
 			Configured int `json:"configured"`
 			Enforced   int `json:"enforced"`
 		} `json:"tierMismatch"`
+		// A pointer, so "no field" (a licence server from before it) keeps the current list, and
+		// an empty array clears it.
+		Revoked *[]revokedEntry `json:"revoked"`
 	}
-	ackBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-	if err := json.Unmarshal(ackBody, &ack); err == nil && ack.TierMismatch != nil {
+	ackBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxAckBytes))
+	if err := json.Unmarshal(ackBody, &ack); err != nil {
+		return nil
+	}
+	if ack.TierMismatch != nil {
 		s.log.Warn("the licence server expects a different tier gate than this relay enforces",
 			"enforced_min_tier", ack.TierMismatch.Enforced,
 			"configured_min_tier", ack.TierMismatch.Configured,
 			"fix", "change -min-tier here, or the relay's minTier there, so the two agree")
+	}
+	if ack.Revoked != nil && s.cfg.LicencePub != nil {
+		s.applyRevoked(*ack.Revoked, time.Now())
 	}
 	return nil
 }

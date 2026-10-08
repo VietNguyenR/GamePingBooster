@@ -136,16 +136,22 @@ public sealed class TokenRefresher : IAsyncDisposable
     /// Called, from the loop's thread, when the account has no plan (402), with the sentence the
     /// plans window should open with.
     /// </param>
+    /// <param name="signedInElsewhere">
+    /// Called, from the loop's thread, when the renewal is refused because the account signed in on
+    /// another machine - SignInWatcher.Report in the app.
+    /// </param>
     public TokenRefresher(PipeClient pipe, Action<string?> report, Action? upgradeRequired = null,
-        Action<string>? noPlan = null)
+        Action<string>? noPlan = null, Action<LicenceException>? signedInElsewhere = null)
     {
         _pipe = pipe;
         _report = report;
         _upgradeRequired = upgradeRequired;
         _noPlan = noPlan;
+        _signedInElsewhere = signedInElsewhere;
     }
 
     private readonly Action<string>? _noPlan;
+    private readonly Action<LicenceException>? _signedInElsewhere;
 
     public void Start() => _loop ??= Task.Run(() => LoopAsync(_cts.Token));
 
@@ -381,6 +387,14 @@ public sealed class TokenRefresher : IAsyncDisposable
             // quietly ran out a day later with nothing in the log to say why. A timeout is a
             // network failure and is handled as one below.
             throw;
+        }
+        catch (LicenceException ex) when (ex.SignedInElsewhere && _signedInElsewhere is not null)
+        {
+            // This machine lost its seat while the app was closed, or between watches. Not a renewal
+            // failure to put in the footer: the sign-in is over, and SignInWatcher disconnects, signs
+            // out and says why. Nothing left to renew with afterwards, so stand down.
+            _due = null;
+            _signedInElsewhere(ex);
         }
         catch (LicenceException ex)
         {

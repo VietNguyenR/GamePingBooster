@@ -19,15 +19,22 @@ public sealed class AccountViewModel : INotifyPropertyChanged
     private readonly PipeClient _pipe;
 
     private readonly Func<string?> _refreshToken;
+    private readonly Action<LicenceException>? _signedInElsewhere;
 
+    /// <param name="signedInElsewhere">
+    /// The account answered that this machine was signed out by a sign-in on another one - SignInWatcher.Report,
+    /// which disconnects and signs out. The screen still shows the server's sentence meanwhile.
+    /// </param>
     public AccountViewModel(string licenceUrl, string devicePublicKey, PipeClient pipe,
-        PurchaseWatcher? purchases = null, Func<string?>? refreshToken = null)
+        PurchaseWatcher? purchases = null, Func<string?>? refreshToken = null,
+        Action<LicenceException>? signedInElsewhere = null)
     {
         _licenceUrl = licenceUrl;
         _devicePublicKey = devicePublicKey;
         _pipe = pipe;
         Purchases = purchases;
         _refreshToken = refreshToken ?? RefreshTokenStore.Load;
+        _signedInElsewhere = signedInElsewhere;
     }
 
     /// <summary>Where the screen reads the credential from; the upgrade screen asks the same place.</summary>
@@ -125,6 +132,7 @@ public sealed class AccountViewModel : INotifyPropertyChanged
         catch (LicenceException ex)
         {
             Error = ex.Message;
+            if (ex.SignedInElsewhere) _signedInElsewhere?.Invoke(ex);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

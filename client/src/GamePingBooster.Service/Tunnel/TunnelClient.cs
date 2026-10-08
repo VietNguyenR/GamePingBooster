@@ -330,7 +330,7 @@ internal sealed partial class TunnelClient : IDisposable
                         GpbProtocol.StatusCredentialExpired =>
                             "Your subscription has expired. Sign in again to renew it.",
                         GpbProtocol.StatusCredentialRevoked =>
-                            "This device is no longer authorised. Check your devices in the app.",
+                            GpbProtocol.RevokedMessage,
                         GpbProtocol.StatusTierTooLow =>
                             "This relay is reserved for a higher plan. Your subscription is fine - " +
                             "pick another relay, or upgrade to reach this one.",

@@ -15,6 +15,7 @@ public partial class App : Application
     private TokenRefresher? _refresher;
     private ProfileSync? _profileSync;
     private PurchaseWatcher? _purchases;
+    private SignInWatcher? _signIn;
     private QualityUploader? _quality;
     private UpdateChecker? _updates;
     private SystemTray? _tray;
@@ -54,6 +55,13 @@ public partial class App : Application
             //
             // Harmless on a self-hosted installation: with no licence URL and no refresh token
             // it never sends anything, it just sleeps.
+            // Last sign-in wins: a long poll that hears at once when the account signs in on another machine,
+            // and then takes this one down and out - see SignInWatcher and SignedOutElsewhereAsync below.
+            var signIn = new SignInWatcher(what => Dispatcher.UIThread.Post(() => _ = SignedOutElsewhereAsync(window, vm, what)));
+            _signIn = signIn;
+            _pipe.StatusReceived += signIn.OnStatus;
+            window.AttachSignInWatcher(signIn);
+
             _refresher = new TokenRefresher(
                 _pipe,
                 // Marshalled: the refresher reports from its own loop, and raising
@@ -61,7 +69,8 @@ public partial class App : Application
                 // surface much later and somewhere else.
                 message => Dispatcher.UIThread.Post(() => vm.LicenceNotice = message),
                 OnUpgradeRequired,
-                notice => Dispatcher.UIThread.Post(() => window.OfferPlans(notice)));
+                notice => Dispatcher.UIThread.Post(() => window.OfferPlans(notice)),
+                signIn.Report);
             _pipe.StatusReceived += _refresher.OnStatus;
             // Coming back to the app - typically from the payment page - asks again at once when
             // there is no usable token, rather than waiting out the refusal backoff.
@@ -144,6 +153,7 @@ public partial class App : Application
             // the button - the app never rearranges the machine's routing on its own at startup.
             _pipe.Start();
             _refresher.Start();
+            signIn.Start();
             _quality.Start();
 
             // Checks GitHub for a newer release as the app opens and every six hours after, and puts a
@@ -169,6 +179,45 @@ public partial class App : Application
         }
 
         base.OnFrameworkInitializationCompleted();
+    }
+
+    /// <summary>Set while <see cref="SignedOutElsewhereAsync"/> runs, so a report from the watch and one from a renewal do it once.</summary>
+    private bool _signingOut;
+
+    /// <summary>
+    /// This machine was signed out because the account signed in on another one. In the owner's order (2026-10-08):
+    /// disconnected FIRST - game routes, the lobby proxy and unblocking all go with Disconnect - then signed out here,
+    /// and only then told. The relay refuses the old licence by itself within ~20 s; this is the app agreeing with it
+    /// at once, instead of sitting on "Reconnecting..." with no explanation.
+    ///
+    /// No /auth/logout: the server has already ended this sign-in.
+    /// </summary>
+    private async Task SignedOutElsewhereAsync(MainWindow window, MainViewModel vm, SignedOutElsewhere what)
+    {
+        if (_signingOut || _shuttingDown || _pipe is null) return;
+        _signingOut = true;
+        try
+        {
+            await vm.DisconnectAndWaitAsync(TimeSpan.FromSeconds(6));
+            // Again, unconditionally: the window can believe it is down while a connect is still on its way to the
+            // service. Idempotent there.
+            try { await _pipe.DisconnectTunnelAsync(); } catch (Exception) { }
+
+            RefreshTokenStore.Clear();
+            try { await _pipe.SendAsync(new Core.Ipc.CommandMessage { Verb = "set-token", Token = null }); }
+            catch (Exception) { }
+            _purchases?.Clear();
+
+            var text = what.Text();
+            vm.SignedOutNotice = text;
+            vm.RefreshSignedIn();
+            if (!window.IsVisible) _tray?.Notify(Loc.T("signedOut.elsewhere.title"), text);
+            window.ShowSignedOutElsewhere(text);
+        }
+        finally
+        {
+            _signingOut = false;
+        }
     }
 
     /// <summary>
@@ -210,6 +259,7 @@ public partial class App : Application
             _purchases?.Dispose();
 
             if (_refresher is not null) await _refresher.DisposeAsync();
+            if (_signIn is not null) await _signIn.DisposeAsync();
             if (_quality is not null) await _quality.DisposeAsync();
             if (_updates is not null) await _updates.DisposeAsync();
             if (_pipe is not null) await _pipe.DisposeAsync();

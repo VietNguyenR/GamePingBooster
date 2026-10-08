@@ -32,6 +32,11 @@
             PointerPressed="OnTitleBarPressed" />
 
   <StackPanel Grid.Row="1" Margin="24,4,24,24" Spacing="14">
+    <!-- Why the window opened on its own: this machine was signed out by a sign-in on another one. -->
+    <Border Background="#422006" CornerRadius="8" Padding="12,8" IsVisible="{Binding HasNotice}">
+      <TextBlock Text="{Binding Notice}" Foreground="#FDE68A" FontSize="12" TextWrapping="Wrap" />
+    </Border>
+
     <TextBlock Classes="hint" Text="{Binding ServerText}" />
 
     <!-- Sign-in happens in the browser, and there is no password box here on purpose: this app

@@ -5,6 +5,7 @@ using Avalonia.Threading;
 using GamePingBooster.App.Services;
 using GamePingBooster.App.Services.Localization;
 using GamePingBooster.Core.Ipc;
+using GamePingBooster.Core.Protocol;
 
 namespace GamePingBooster.App.ViewModels;
 
@@ -94,7 +95,31 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     /// <summary>Called right after a sign-in or sign-out, rather than waiting for the next status.</summary>
-    public void RefreshSignedIn() => SignedIn = HasToken || RefreshTokenStore.Exists();
+    public void RefreshSignedIn()
+    {
+        SignedIn = HasToken || RefreshTokenStore.Exists();
+        // Only a credential on disk clears it: right after the sign-out the service can still report the old
+        // licence for a second, and that is not somebody signing in again.
+        if (RefreshTokenStore.Exists()) SignedOutNotice = null;
+    }
+
+    private string? _signedOutNotice;
+
+    /// <summary>
+    /// Why this machine is no longer signed in, when it was not the person's doing: the account signed in on another
+    /// machine (see SignInWatcher). Its own property rather than <see cref="LicenceNotice"/>, which the token being
+    /// cleared wipes - in the same second this is set. Shown until the next sign-in.
+    /// </summary>
+    public string? SignedOutNotice
+    {
+        get => _signedOutNotice;
+        set
+        {
+            if (!Set(ref _signedOutNotice, value)) return;
+            Raise(nameof(LicenceText));
+            Raise(nameof(ShowLicenceLine));
+        }
+    }
 
     private DateTimeOffset? _tokenExpiresAt;
     public DateTimeOffset? TokenExpiresAt
@@ -229,6 +254,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     ? LicenceNotice!
                     : Loc.T("licence.renewing");
             }
+            // Before the refusal: signed out by another machine's sign-in, the service's "sign in" says less.
+            if (!SignedIn && !string.IsNullOrEmpty(SignedOutNotice)) return SignedOutNotice!;
             if (LicenceBlocked) return LicenceRefusal!;
             if (!string.IsNullOrEmpty(LicenceNotice)) return LicenceNotice!;
             if (!SignedIn) return Loc.T("licence.notSignedIn");
@@ -1258,6 +1285,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _detailKey = null;
         Detail = DetailOf(status);
         Error = status.Error;
+
+        // Signed in on another machine: SignInWatcher tears down and tells the whole story. Until it does (the relay's
+        // cut can land a second before the watcher hears), the status line says it in the app's language and the red
+        // banner stays away.
+        if (status.Error == GpbProtocol.RevokedMessage)
+        {
+            Error = null;
+            Detail = Loc.T("svc.revoked");
+        }
         ApplyDetails(status);
     });
 

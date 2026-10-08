@@ -98,6 +98,9 @@ public sealed class SystemTray : IDisposable
         _noticeShown = TrayNotice.Show(_icon, Loc.T("tray.notice.title"), Loc.T("tray.notice.body"));
     }
 
+    /// <summary>A notification from the tray icon, for news that cannot wait for the window to be opened. False when it could not.</summary>
+    public bool Notify(string title, string text) => TrayNotice.Show(_icon, title, text);
+
     /// <summary>
     /// The app icon, from the compiled-in resource rather than a file beside the exe: the tray
     /// icon has to survive an installation the user has tidied, and AvaloniaResource puts it

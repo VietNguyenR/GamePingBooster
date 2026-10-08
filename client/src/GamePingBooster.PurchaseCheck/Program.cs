@@ -13,6 +13,7 @@ namespace GamePingBooster.PurchaseCheck;
 ///     dotnet run --project client/src/GamePingBooster.PurchaseCheck -- logic [http://localhost:5183]
 ///     dotnet run --project client/src/GamePingBooster.PurchaseCheck -- ui    [http://localhost:5183]
 ///     dotnet run --project client/src/GamePingBooster.PurchaseCheck -- snap  [http://localhost:5183] [outDir]
+///     dotnet run --project client/src/GamePingBooster.PurchaseCheck -- signin    (no server needed - see SignInCheck)
 ///
 /// `logic` drives the real LicenceClient, PurchaseWatcher and UpgradeViewModel - the code the app
 /// runs - over real HTTP, and makes the transfer land the way SePay does: a signed webhook to the
@@ -39,6 +40,9 @@ internal static class Program
         if (args.Length > 1) LicenceUrl = args[1];
         if (args.FirstOrDefault() == "ui") return UiCheck.Run(args);
         if (args.FirstOrDefault() == "snap") return SnapCheck.Run(args);
+        if (args.FirstOrDefault() == "signin") return SignInCheck.Run();
+        if (args.FirstOrDefault() == "signin-snap") return SignInSnap.Run(args);
+        if (args.FirstOrDefault() == "signin-live") return SignInLive.Run(args);
 
         // Faster than in the app, so a run takes seconds rather than minutes. Same code paths.
         PurchaseWatcher.PollInterval = TimeSpan.FromMilliseconds(300);
