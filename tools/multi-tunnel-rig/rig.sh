@@ -8,6 +8,11 @@
 #   wsl -d Ubuntu -u root -- bash tools/multi-tunnel-rig/rig.sh heal       every way back to normal
 #   wsl -d Ubuntu -u root -- bash tools/multi-tunnel-rig/rig.sh status
 #   wsl -d Ubuntu -u root -- bash tools/multi-tunnel-rig/rig.sh down
+#   wsl -d Ubuntu -u root -- bash tools/multi-tunnel-rig/rig.sh ticket up|status|mint <device.pub>|down
+#
+# `ticket` adds a LICENSED relayd C with an entry G in front of it, for measurement tickets (the relay list's ping,
+# docs/PROTOCOL-v3.md): its own licence key pair, made on first use, and `mint` signs a token for a device key. Needs
+# relay/licence-gen as well as relay/relayd, both built for linux. Ways c and g can be degraded like the others.
 #
 # Ways: a (relay A direct), f (entry F -> A), b (relay B direct), e (entry E -> B).
 # Relay A is home; relay B carries the "kr" region. Game servers: 198.51.100.10 (sg, via home) and 198.51.100.20
@@ -33,6 +38,7 @@ addresses() {
     IFS=. read -r o1 o2 o3 _ <<<"$ip"
     PREFIX="$prefix"
     A="$o1.$o2.$o3.201"; B="$o1.$o2.$o3.202"; E="$o1.$o2.$o3.203"; F="$o1.$o2.$o3.204"
+    C="$o1.$o2.$o3.205"; G="$o1.$o2.$o3.206"
 }
 
 up() {
@@ -105,8 +111,8 @@ degrade() {
     addresses
     local way="$1" delay="${2:-0}" loss="${3:-0}" src
     case "$way" in
-        a) src="$A" ;; b) src="$B" ;; e) src="$E" ;; f) src="$F" ;;
-        *) echo "way must be a, b, e or f" >&2; exit 2 ;;
+        a) src="$A" ;; b) src="$B" ;; e) src="$E" ;; f) src="$F" ;; c) src="$C" ;; g) src="$G" ;;
+        *) echo "way must be a, b, c, e, f or g" >&2; exit 2 ;;
     esac
     # One netem per shaped way, each in a band of its own - rebuilt whole, so ways can be shaped together.
     touch "$state/shaped-$way"
@@ -119,7 +125,7 @@ degrade() {
     for w in "${ways[@]}"; do
         local d l s
         read -r d l <"$state/shaped-$w"
-        case "$w" in a) s="$A" ;; b) s="$B" ;; e) s="$E" ;; f) s="$F" ;; esac
+        case "$w" in a) s="$A" ;; b) s="$B" ;; e) s="$E" ;; f) s="$F" ;; c) s="$C" ;; g) s="$G" ;; esac
         if [ "$l" != "0" ]; then
             tc qdisc add dev "$dev" parent "1:$band" handle "${band}0:" netem delay "${d}ms" loss "${l}%"
         else
@@ -187,6 +193,60 @@ down() {
 
 logs() { tail -n "${1:-40}" "$state/relay-a.log" "$state/relay-b.log"; }
 
+# The licensed relay C and its entry G, in a directory of their own: pkill/pgrep on "$state/relayd" must not see it.
+ticket_up() {
+    addresses
+    local dir="$state/ticket"
+    mkdir -p "$dir"
+    install -m 755 "$relayd" "$dir/relayd"
+    install -m 755 "$repo/relay/licence-gen" "$dir/licence-gen"
+    [ -f "$dir/licence.key" ] || "$dir/licence-gen" keygen -name "$dir/licence" >/dev/null
+
+    for ip in "$C" "$G"; do ip addr replace "$ip/$PREFIX" dev "$dev"; done
+    iptables -t nat -D PREROUTING -d "$G" -p udp --dport 51820 -j DNAT --to-destination "$C:51820" 2>/dev/null || true
+    iptables -t nat -A PREROUTING -d "$G" -p udp --dport 51820 -j DNAT --to-destination "$C:51820"
+    sysctl -qw net.ipv4.ip_forward=1
+
+    pkill -f "$dir/relayd" 2>/dev/null || true
+    sleep 0.3
+    nohup "$dir/relayd" -listen "$C:51820" -tun gpbC -subnet 10.79.0.0/24 -licence-key "$dir/licence.pub" \
+        -relay-key "$dir/relay.key" -rate-limit 0 -log-level debug >"$dir/relay-c.log" 2>&1 &
+    sleep 0.5
+    ticket_status
+}
+
+ticket_status() {
+    addresses
+    local dir="$state/ticket"
+    echo "C=$C:51820 (licensed relay)  G=$G:51820 (entry -> C)"
+    echo "relay key: $("$dir/relayd" -print-relay-key -relay-key "$dir/relay.key" 2>/dev/null)"
+    echo "licensed relayd running: $(pgrep -fc "$dir/relayd -listen" || true)"
+}
+
+# A token for the device public key in the file given (hex, 65 bytes), signed with the rig's licence key; hex on stdout.
+ticket_mint() {
+    "$state/ticket/licence-gen" mint -key "$state/ticket/licence.key" -device "$1" -user 1 -expiry 1h
+}
+
+ticket_down() {
+    addresses
+    pkill -f "$state/ticket/relayd" 2>/dev/null || true
+    iptables -t nat -D PREROUTING -d "$G" -p udp --dport 51820 -j DNAT --to-destination "$C:51820" 2>/dev/null || true
+    for ip in "$C" "$G"; do ip addr del "$ip/$PREFIX" dev "$dev" 2>/dev/null || true; done
+    echo "licensed relay down"
+}
+
+ticket() {
+    case "${1:-status}" in
+        up) ticket_up ;;
+        status) ticket_status ;;
+        mint) shift; ticket_mint "$@" ;;
+        down) ticket_down ;;
+        logs) tail -n "${2:-40}" "$state/ticket/relay-c.log" ;;
+        *) echo "usage: rig.sh ticket up|status|mint <device.pub>|logs [n]|down" >&2; exit 2 ;;
+    esac
+}
+
 case "${1:-status}" in
     up) up ;;
     down) down ;;
@@ -196,5 +256,6 @@ case "${1:-status}" in
     status) status ;;
     logs) shift; logs "$@" ;;
     ip) echo "$dev $(base_ip | cut -d/ -f1)" ;;
+    ticket) shift; ticket "$@" ;;
     *) echo "usage: rig.sh up|down|heal|degrade <a|b|e|f> <delay-ms> [loss-%]|lanes <a|b|e|f> <delay-ms> [<slow-way> <delay-ms>]|status|logs [n]" >&2; exit 2 ;;
 esac

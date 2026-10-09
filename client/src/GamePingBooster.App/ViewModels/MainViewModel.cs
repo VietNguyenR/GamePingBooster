@@ -1344,6 +1344,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
         GameCount = status.GameCount;
         RelayName = status.RelayName;
         HomeRelayName = status.HomeRelayName;
+        if (status.ListRelayId is { } listed && status.ListRelayPingMs is { } listedMs)
+        {
+            // The line of the relay the tunnel is on follows the tunnel every second, list open or not: it is the
+            // number beside the chosen relay on the closed list too, and it used to keep the one from its last opening.
+            RelayItems.FirstOrDefault(i => string.Equals(i.Id, listed, StringComparison.OrdinalIgnoreCase))?.UpdatePing(listedMs);
+        }
         RegionPathList = status.RegionPaths ?? [];
         RelayEndpoints = status.RelayEndpoints;
         Configured = status.Configured;
@@ -1436,9 +1442,14 @@ public sealed class RelayChoiceItem : INotifyPropertyChanged
     public RelayChoiceItem(string? id, string name, string? location, double? pingMs, string? notForGame)
     {
         Id = id;
+        _name = name;
+        _location = location;
         _notForGame = notForGame;
         _label = LabelFor(id, name, location, pingMs, notForGame);
     }
+
+    private string _name;
+    private string? _location;
 
     /// <summary>The relay id, or null for automatic.</summary>
     public string? Id { get; }
@@ -1460,9 +1471,14 @@ public sealed class RelayChoiceItem : INotifyPropertyChanged
     /// </summary>
     public bool IsAvailable => _notForGame is null;
 
+    /// <summary>A new ping and nothing else - the live tunnel's, between two list replies.</summary>
+    public void UpdatePing(double pingMs) => Update(_name, _location, Math.Round(pingMs), _notForGame);
+
     public void Update(string name, string? location, double? pingMs, string? notForGame)
     {
         var availabilityChanged = notForGame != _notForGame;
+        _name = name;
+        _location = location;
         _notForGame = notForGame;
         if (availabilityChanged) PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsAvailable)));
 

@@ -114,6 +114,10 @@ internal static partial class Program
         LanePickChecks();
 
         Console.WriteLine();
+        Console.WriteLine("Which way into a relay the list shows and a connect starts on (DoorChoice):");
+        DoorChoiceChecks();
+
+        Console.WriteLine();
         Console.WriteLine("Which edges the unblock resolver probes and hands out (EdgeRanking):");
         EdgeRankingChecks();
 

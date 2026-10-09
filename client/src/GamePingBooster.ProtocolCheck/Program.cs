@@ -42,7 +42,12 @@ internal static class Program
 
         if (args.Length > 0 && args[0] == "--emit-handshake-req-token")
         {
-            return EmitHandshakeReqToken(args.Length > 1 ? args[1] : null);
+            return EmitHandshakeReqToken(args.Length > 1 ? args[1] : null, measure: false);
+        }
+
+        if (args.Length > 0 && args[0] == "--emit-measure-req")
+        {
+            return EmitHandshakeReqToken(args.Length > 1 ? args[1] : null, measure: true);
         }
 
         string path;
@@ -83,6 +88,7 @@ internal static class Program
         CheckDisconnect(root.GetProperty("disconnect"));
         CheckCryptoP256(root.GetProperty("cryptoP256"));
         CheckHandshakeReqToken(root.GetProperty("handshakeReqToken"));
+        CheckMeasure(root);
         CheckProfileEnvelope(root);
         CheckLobbyRoutes();
         CheckProfileMerge();
@@ -769,7 +775,7 @@ internal static class Program
     /// clock skew, so a packet stamped "now" would stop verifying within a minute of being
     /// committed, and the failure would look like a format bug rather than a stale sample.
     /// </summary>
-    private static int EmitHandshakeReqToken(string? vectorPath)
+    private static int EmitHandshakeReqToken(string? vectorPath, bool measure)
     {
         string path;
         try
@@ -790,11 +796,82 @@ internal static class Program
         var clientId = HexToUInt64(v.GetProperty("clientIdHex").GetString()!);
         var unixTime = v.GetProperty("unixTimeSeconds").GetInt64();
 
-        var pkt = GpbProtocol.BuildHandshakeReqToken(devicePriv, token, clientId,
-            DateTimeOffset.FromUnixTimeSeconds(unixTime), out _);
+        var at = DateTimeOffset.FromUnixTimeSeconds(unixTime);
+        var pkt = measure
+            ? GpbProtocol.BuildMeasureReq(devicePriv, token, clientId, at, out _)
+            : GpbProtocol.BuildHandshakeReqToken(devicePriv, token, clientId, at, out _);
 
         Console.WriteLine(ToHex(pkt));
         return 0;
+    }
+
+    /// <summary>
+    /// The measurement ticket: the request in both directions, like the token handshake it copies, and the
+    /// ticket's answer, a probe and the reply byte for byte. The client never makes or checks a ticket - it
+    /// only has to carry the relay's 32 bytes back unchanged and read the stamp it echoes.
+    /// </summary>
+    private static void CheckMeasure(JsonElement root)
+    {
+        if (!root.TryGetProperty("measureReq", out var req) || !root.TryGetProperty("measureTicket", out var tk) ||
+            !root.TryGetProperty("measureProbe", out var probe) || !root.TryGetProperty("measureReply", out var reply))
+        {
+            Fail("measurement ticket", "no measure sections in the vectors - the cross-language check is not running");
+            return;
+        }
+
+        var h = root.GetProperty("handshakeReqToken");
+        var token = Hex(h.GetProperty("tokenHex").GetString()!);
+        var clientId = HexToUInt64(h.GetProperty("clientIdHex").GetString()!);
+        var unixTime = h.GetProperty("unixTimeSeconds").GetInt64();
+        using var devicePriv = GpbCrypto.ImportPrivateKey(Hex(h.GetProperty("devicePrivateKeyHex").GetString()!));
+        using var devicePub = GpbCrypto.ImportPublicKey(Hex(h.GetProperty("devicePublicKeyHex").GetString()!));
+
+        void VerifyRequest(string label, byte[] pkt)
+        {
+            Check($"{label}: length", pkt.Length == GpbProtocol.HandshakeReqTokenLen, $"got {pkt.Length}");
+            if (pkt.Length != GpbProtocol.HandshakeReqTokenLen) return;
+            Check($"{label}: header byte", pkt[0] == (GpbProtocol.Version << 4 | GpbProtocol.TypeHandshakeReq), $"got {pkt[0]:x2}");
+            Check($"{label}: auth mode byte", pkt[1] == GpbProtocol.AuthModeMeasure,
+                $"got {pkt[1]} - a relay would read it as a handshake and open a session, the thing tickets exist to avoid");
+            Check($"{label}: carries the committed token",
+                pkt.AsSpan(ReqTokenOffset, GpbProtocol.TokenLen).SequenceEqual(token), "token at the wrong offset");
+            Check($"{label}: device signature covers the mode byte",
+                GpbCrypto.Verify(devicePub, pkt.AsSpan(0, ReqTokenSigOffset), pkt.AsSpan(ReqTokenSigOffset)),
+                "the signature does not cover the span the relay verifies");
+        }
+
+        VerifyRequest("ticket request from Go", Hex(req.GetProperty("packetFromGoHex").GetString()!));
+        VerifyRequest("ticket request built here", GpbProtocol.BuildMeasureReq(devicePriv, token, clientId,
+            DateTimeOffset.FromUnixTimeSeconds(unixTime), out _));
+        if (req.GetProperty("packetFromDotnetHex").GetString() is not { Length: > 0 })
+        {
+            Fail("ticket request from .NET", "empty - regenerate with: dotnet run --project " +
+                                             "client/src/GamePingBooster.ProtocolCheck -- --emit-measure-req");
+        }
+
+        var ticket = Hex(tk.GetProperty("ticketHex").GetString()!);
+        var nonce = Hex(tk.GetProperty("nonceHex").GetString()!);
+        var answer = Hex(tk.GetProperty("packetHex").GetString()!);
+        Check("ticket answer: parsed, ticket carried unchanged",
+            GpbProtocol.TryParseMeasureTicket(answer, nonce, out var read) && read.AsSpan().SequenceEqual(ticket),
+            "the list would never get a ticket, and every relay would show ICMP");
+        var wrongNonce = (byte[])nonce.Clone();
+        wrongNonce[0] ^= 0xff;
+        Check("ticket answer: the wrong nonce is refused", !GpbProtocol.TryParseMeasureTicket(answer, wrongNonce, out _),
+            "an answer to somebody else's request would be taken");
+
+        var stamp = probe.GetProperty("stamp").GetUInt64();
+        Check("BuildMeasureProbe", GpbProtocol.BuildMeasureProbe(ticket, stamp).AsSpan()
+                .SequenceEqual(Hex(probe.GetProperty("packetHex").GetString()!)),
+            "the relay would drop every ticket probe, and the list would time nothing");
+
+        var replyPkt = Hex(reply.GetProperty("packetHex").GetString()!);
+        Check("TryReadMeasureReply", GpbProtocol.TryReadMeasureReply(replyPkt, out var echoed) &&
+                                     echoed == reply.GetProperty("stamp").GetUInt64(),
+            "every reply would be ignored, or timed against the wrong stamp");
+        Check("TryReadMeasureReply refuses the probe itself",
+            !GpbProtocol.TryReadMeasureReply(Hex(probe.GetProperty("packetHex").GetString()!), out _),
+            "a probe looped back by something on the path would read as the relay's answer");
     }
 
     /// <summary>

@@ -167,6 +167,55 @@ type vectorFile struct {
 		PacketFromGoHex      string `json:"packetFromGoHex"`
 		PacketFromDotnetHex  string `json:"packetFromDotnetHex"`
 	} `json:"handshakeReqToken"`
+
+	// The ticket request: handshakeReqToken's keys, token, client id and instant, with the mode byte
+	// set to AuthModeMeasure. Crossed the same way - each side verifies the packet the other built.
+	MeasureReq struct {
+		Note                string `json:"note"`
+		PacketFromGoHex     string `json:"packetFromGoHex"`
+		PacketFromDotnetHex string `json:"packetFromDotnetHex"`
+	} `json:"measureReq"`
+
+	// A ticket, the answer that carries it, a probe made with it and the reply. All reproducible: the
+	// ticket key is derived from cryptoP256's fixed key, the device tag from handshakeReqToken's device
+	// key. The client never makes or checks a ticket; it only has to carry the 32 bytes faithfully.
+	MeasureTicket struct {
+		ExpiryUnixSeconds int64  `json:"expiryUnixSeconds"`
+		DeviceTagHex      string `json:"deviceTagHex"`
+		TicketHex         string `json:"ticketHex"`
+		NonceHex          string `json:"nonceHex"`
+		PacketHex         string `json:"packetHex"`
+	} `json:"measureTicket"`
+
+	MeasureProbe struct {
+		Stamp     uint64 `json:"stamp"`
+		PacketHex string `json:"packetHex"`
+	} `json:"measureProbe"`
+
+	MeasureReply struct {
+		Stamp     uint64 `json:"stamp"`
+		PacketHex string `json:"packetHex"`
+	} `json:"measureReply"`
+
+	// Sealed by the licence server in Node and checked only by the C# client. Go neither reads nor
+	// makes it, but a regeneration rewrites the whole file, so it is carried across untouched -
+	// otherwise regenerating silently deletes that cross-language check.
+	ProfileEnvelope json.RawMessage `json:"profileEnvelope,omitempty"`
+}
+
+// The nonce in the golden ticket answer. Arbitrary and frozen.
+const vectorMeasureNonceHex = "a1b2c3d4e5f60718"
+
+// goldenTicket rebuilds the committed ticket from the frozen keys.
+func goldenTicket(t *testing.T, devicePubHex string) (key []byte, tag [8]byte, ticket [TicketLen]byte) {
+	t.Helper()
+	relayPriv, err := ParsePrivateKey(mustHex(t, vectorP256PrivHex))
+	if err != nil {
+		t.Fatalf("parse the fixed P-256 key: %v", err)
+	}
+	key = TicketKey(relayPriv)
+	tag = DeviceTag(mustHex(t, devicePubHex))
+	return key, tag, MintTicket(key, tag, time.Unix(vectorTokenExpiry, 0))
 }
 
 func mustHex(t *testing.T, s string) []byte {
@@ -277,6 +326,7 @@ func generateVectors(t *testing.T) {
 	if prev, err := os.ReadFile(vectorPath); err == nil {
 		_ = json.Unmarshal(prev, &old)
 	}
+	v.ProfileEnvelope = old.ProfileEnvelope
 	v.CryptoP256.SignatureFromDotnetHex = old.CryptoP256.SignatureFromDotnetHex
 	if v.CryptoP256.SignatureFromDotnetHex == "" {
 		t.Log("no .NET signature carried over - produce one and paste it in, or the " +
@@ -330,6 +380,36 @@ func generateVectors(t *testing.T) {
 		t.Log("no .NET token handshake carried over - produce one and paste it in, or the " +
 			"cross-language half of this check is not running")
 	}
+
+	// ------------------------------------------------------ measurement ticket
+	m := &v.MeasureReq
+	m.Note = "handshakeReqToken's inputs in AuthModeMeasure. Regenerate .NET's with: " +
+		"dotnet run --project client/src/GamePingBooster.ProtocolCheck -- --emit-measure-req"
+	goMeasure, _, err := BuildMeasureReq(devicePriv, mustHex(t, h.TokenHex), cid, now)
+	if err != nil {
+		t.Fatalf("build the ticket request: %v", err)
+	}
+	m.PacketFromGoHex = hex.EncodeToString(goMeasure)
+	m.PacketFromDotnetHex = old.MeasureReq.PacketFromDotnetHex
+	if m.PacketFromDotnetHex == "" {
+		t.Log("no .NET ticket request carried over - produce one and paste it in")
+	}
+
+	_, tag, ticket := goldenTicket(t, h.DevicePublicKeyHex)
+	var measureNonce [8]byte
+	copy(measureNonce[:], mustHex(t, vectorMeasureNonceHex))
+	v.MeasureTicket.ExpiryUnixSeconds = vectorTokenExpiry
+	v.MeasureTicket.DeviceTagHex = hex.EncodeToString(tag[:])
+	v.MeasureTicket.TicketHex = hex.EncodeToString(ticket[:])
+	v.MeasureTicket.NonceHex = vectorMeasureNonceHex
+	v.MeasureTicket.PacketHex = hex.EncodeToString(BuildMeasureTicket(measureNonce, ticket))
+
+	probe := BuildMeasureProbe(ticket[:], vectorStamp)
+	v.MeasureProbe.Stamp = vectorStamp
+	v.MeasureProbe.PacketHex = hex.EncodeToString(probe)
+	MeasureReplyInto(probe)
+	v.MeasureReply.Stamp = vectorStamp
+	v.MeasureReply.PacketHex = hex.EncodeToString(probe)
 
 	out, err := json.MarshalIndent(&v, "", "  ")
 	if err != nil {
@@ -499,6 +579,65 @@ func TestProtocolVectors(t *testing.T) {
 	}
 
 	checkTokenHandshake(t, v)
+	checkMeasure(t, v)
+}
+
+// checkMeasure runs the ticket request through VerifyMeasureReq - what relayd calls - in both
+// directions, and the ticket, its answer, a probe and the reply byte for byte.
+func checkMeasure(t *testing.T, v *vectorFile) {
+	t.Helper()
+	h := &v.HandshakeReqToken
+	now := time.Unix(h.UnixTimeSeconds, 0)
+	licencePub, err := ParsePublicKey(mustHex(t, h.LicencePublicKeyHex))
+	if err != nil {
+		t.Fatalf("the committed licence public key does not parse: %v", err)
+	}
+
+	verify := func(label, packetHex string) {
+		pkt := mustHex(t, packetHex)
+		if len(pkt) != HandshakeReqTokenLen || pkt[hsOffMode] != AuthModeMeasure {
+			t.Errorf("%s: %d bytes, mode %d - want %d bytes in AuthModeMeasure", label, len(pkt), pkt[hsOffMode], HandshakeReqTokenLen)
+			return
+		}
+		if _, _, _, err := VerifyMeasureReq(licencePub, pkt, now); err != nil {
+			t.Errorf("%s: a relay would REFUSE this ticket request: %v", label, err)
+		}
+		// Signed mode byte: the same packet must not pass as a handshake.
+		if _, _, _, err := VerifyHandshakeReqToken(licencePub, pkt, now); err == nil {
+			t.Errorf("%s: a ticket request was accepted as a handshake", label)
+		}
+	}
+	verify("ticket request built by Go", v.MeasureReq.PacketFromGoHex)
+	if v.MeasureReq.PacketFromDotnetHex == "" {
+		t.Error("no .NET ticket request in the vectors: the cross-language check is not running")
+	} else {
+		verify("ticket request built by .NET", v.MeasureReq.PacketFromDotnetHex)
+	}
+
+	key, tag, ticket := goldenTicket(t, h.DevicePublicKeyHex)
+	if got := hex.EncodeToString(ticket[:]); got != v.MeasureTicket.TicketHex {
+		t.Errorf("ticket changed:\n got %s\nwant %s", got, v.MeasureTicket.TicketHex)
+	}
+	if got, ok := CheckTicket(key, mustHex(t, v.MeasureTicket.TicketHex), now); !ok || got != tag {
+		t.Errorf("the golden ticket does not check: ok=%v tag=%x want %x", ok, got, tag)
+	}
+	if _, ok := CheckTicket(key, mustHex(t, v.MeasureTicket.TicketHex), time.Unix(vectorTokenExpiry+1, 0)); ok {
+		t.Error("the golden ticket was accepted after its expiry")
+	}
+
+	var nonce [8]byte
+	copy(nonce[:], mustHex(t, v.MeasureTicket.NonceHex))
+	if got := BuildMeasureTicket(nonce, ticket); !bytes.Equal(got, mustHex(t, v.MeasureTicket.PacketHex)) {
+		t.Errorf("ticket answer changed:\n got %x\nwant %s", got, v.MeasureTicket.PacketHex)
+	}
+	probe := BuildMeasureProbe(ticket[:], v.MeasureProbe.Stamp)
+	if !bytes.Equal(probe, mustHex(t, v.MeasureProbe.PacketHex)) {
+		t.Errorf("ticket probe changed:\n got %x\nwant %s", probe, v.MeasureProbe.PacketHex)
+	}
+	MeasureReplyInto(probe)
+	if !bytes.Equal(probe, mustHex(t, v.MeasureReply.PacketHex)) {
+		t.Errorf("ticket reply changed:\n got %x\nwant %s", probe, v.MeasureReply.PacketHex)
+	}
 }
 
 // checkTokenHandshake runs the 240-byte v3 token HandshakeReq through the SAME function relayd

@@ -44,6 +44,7 @@ func licensedRelay(t *testing.T) (*Server, *net.UDPConn, *ecdsa.PrivateKey, *ecd
 	// through the wrong path without anybody noticing.
 	s.cfg.LicencePub = &licence.PublicKey
 	s.cfg.RelayPriv = relayKey
+	s.ticketKey = protocol.TicketKey(relayKey) // what New derives for a licensed relay
 	s.conn = srvConn
 	s.dev = &tun.Device{}
 

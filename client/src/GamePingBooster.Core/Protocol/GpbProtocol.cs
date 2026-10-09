@@ -36,11 +36,29 @@ public static class GpbProtocol
     public const byte TypeProbe = 0x8;
     public const byte TypeProbeReply = 0x9;
 
+    /// <summary>
+    /// The measurement ticket's traffic, told apart by the op byte after the header: the ticket a relay
+    /// hands back, and the probes and replies made with it. A ticket lets the relay list time every way
+    /// into a relay without a session, which would take a slot under the relay's -max-clients for every
+    /// player looking at the list. See relay/internal/protocol/measure.go. A relay older than this drops
+    /// all of it in silence, and the list falls back to ICMP for that relay.
+    /// </summary>
+    public const byte TypeMeasure = 0xA;
+    public const byte MeasureOpTicket = 1;
+    public const byte MeasureOpProbe = 2;
+    public const byte MeasureOpReply = 3;
+    /// <summary>Every TypeMeasure message, either way.</summary>
+    public const int MeasureLen = 42;
+    public const int TicketLen = 32;
+
     /// <summary>Self-hosted mode: one shared key, as in v1 and v2.</summary>
     public const byte AuthModePsk = 0;
 
     /// <summary>Commercial mode: a licence token the relay verifies offline.</summary>
     public const byte AuthModeToken = 1;
+
+    /// <summary>A token-mode request for a measurement ticket instead of a session - the same 240 bytes.</summary>
+    public const byte AuthModeMeasure = 2;
 
     // v2's 57 bytes plus the auth-mode byte.
     public const int HandshakeReqPskLen = 58;
@@ -151,6 +169,18 @@ public static class GpbProtocol
     /// also hold the matching private key, which never leaves the machine it was made on.
     /// </summary>
     public static byte[] BuildHandshakeReqToken(ECDsa deviceKey, ReadOnlySpan<byte> token,
+        ulong clientId, DateTimeOffset now, out byte[] nonce) =>
+        BuildTokenReq(AuthModeToken, deviceKey, token, clientId, now, out nonce);
+
+    /// <summary>
+    /// Builds a request for a measurement ticket: a token-mode HandshakeReq with the mode byte set to
+    /// <see cref="AuthModeMeasure"/>. The relay verifies it like a handshake and opens no session.
+    /// </summary>
+    public static byte[] BuildMeasureReq(ECDsa deviceKey, ReadOnlySpan<byte> token,
+        ulong clientId, DateTimeOffset now, out byte[] nonce) =>
+        BuildTokenReq(AuthModeMeasure, deviceKey, token, clientId, now, out nonce);
+
+    private static byte[] BuildTokenReq(byte mode, ECDsa deviceKey, ReadOnlySpan<byte> token,
         ulong clientId, DateTimeOffset now, out byte[] nonce)
     {
         if (token.Length != TokenLen)
@@ -160,7 +190,7 @@ public static class GpbProtocol
 
         var pkt = new byte[HandshakeReqTokenLen];
         pkt[0] = Header(TypeHandshakeReq);
-        pkt[ReqOffMode] = AuthModeToken;
+        pkt[ReqOffMode] = mode;
         RandomNumberGenerator.Fill(pkt.AsSpan(ReqOffNonce, NonceLen));
         BinaryPrimitives.WriteUInt64BigEndian(pkt.AsSpan(ReqOffTime, 8), (ulong)now.ToUnixTimeSeconds());
         BinaryPrimitives.WriteUInt64BigEndian(pkt.AsSpan(ReqOffClientId, 8), clientId);
@@ -325,6 +355,56 @@ public static class GpbProtocol
         sessionId = BinaryPrimitives.ReadUInt64BigEndian(pkt.Slice(1, 8));
         stamp = BinaryPrimitives.ReadUInt64BigEndian(pkt.Slice(9, 8));
         return true;
+    }
+
+    // TypeMeasure layout: header, op, an 8-byte field (the request's nonce in a ticket answer, the stamp
+    // in a probe and its reply), then the 32-byte ticket.
+    private const int MeasureOffOp = 1;
+    private const int MeasureOffField = 2;
+    private const int MeasureOffTicket = 10;
+
+    /// <summary>
+    /// Reads a relay's answer to <see cref="BuildMeasureReq"/>. False for anything else, or an answer whose
+    /// nonce is not the one that was sent. The ticket is opaque here: only the relay can check it.
+    /// </summary>
+    public static bool TryParseMeasureTicket(ReadOnlySpan<byte> pkt, ReadOnlySpan<byte> sentNonce, out byte[] ticket)
+    {
+        ticket = [];
+        if (!IsMeasure(pkt, MeasureOpTicket)) return false;
+        if (!CryptographicOperations.FixedTimeEquals(pkt.Slice(MeasureOffField, NonceLen), sentNonce)) return false;
+        ticket = pkt.Slice(MeasureOffTicket, TicketLen).ToArray();
+        return true;
+    }
+
+    /// <summary>One timed probe with a ticket, down whichever way into the relay it is sent.</summary>
+    public static byte[] BuildMeasureProbe(ReadOnlySpan<byte> ticket, ulong stamp)
+    {
+        if (ticket.Length != TicketLen)
+        {
+            throw new ArgumentException($"a measurement ticket is {TicketLen} bytes", nameof(ticket));
+        }
+        var pkt = new byte[MeasureLen];
+        pkt[0] = Header(TypeMeasure);
+        pkt[MeasureOffOp] = MeasureOpProbe;
+        BinaryPrimitives.WriteUInt64BigEndian(pkt.AsSpan(MeasureOffField, 8), stamp);
+        ticket.CopyTo(pkt.AsSpan(MeasureOffTicket));
+        return pkt;
+    }
+
+    /// <summary>Reads the relay's reply to <see cref="BuildMeasureProbe"/>: the stamp it echoed.</summary>
+    public static bool TryReadMeasureReply(ReadOnlySpan<byte> pkt, out ulong stamp)
+    {
+        stamp = 0;
+        if (!IsMeasure(pkt, MeasureOpReply)) return false;
+        stamp = BinaryPrimitives.ReadUInt64BigEndian(pkt.Slice(MeasureOffField, 8));
+        return true;
+    }
+
+    private static bool IsMeasure(ReadOnlySpan<byte> pkt, byte op)
+    {
+        if (pkt.Length != MeasureLen) return false;
+        var (version, type) = ParseHeader(pkt[0]);
+        return version == Version && type == TypeMeasure && pkt[MeasureOffOp] == op;
     }
 
     public static byte[] BuildDisconnect(ulong sessionId)

@@ -289,10 +289,27 @@ internal sealed partial class TunnelClient : IDisposable
     /// Handshakes with the relay to obtain a session id and inner IP. Retries up to
     /// <paramref name="attempts"/> times, since UDP gives no delivery guarantee.
     /// </summary>
-    public async Task<GpbProtocol.HandshakeResult> HandshakeAsync(int attempts, CancellationToken ct)
+    /// <param name="measured">
+    /// A socket the relay list measured this very way on (RelayMeter.Take), already connected to it, to handshake on
+    /// instead of a fresh one: a source port is a lane of the ISP's (LanePick), and the number the list showed belongs to
+    /// that lane. Owned from here on. Ignored - and closed - when it is connected anywhere else.
+    /// </param>
+    public async Task<GpbProtocol.HandshakeResult> HandshakeAsync(int attempts, CancellationToken ct, Socket? measured = null)
     {
-        _socket = NewSocket();
-        _socket.Connect(_relayEndpoint);
+        if (measured is not null && !_relayEndpoint.Equals(measured.RemoteEndPoint))
+        {
+            measured.Dispose();
+            measured = null;
+        }
+        if (measured is not null)
+        {
+            _socket = measured;
+        }
+        else
+        {
+            _socket = NewSocket();
+            _socket.Connect(_relayEndpoint);
+        }
 
         var buffer = new byte[GpbProtocol.MaxPacketLen];
         for (var attempt = 1; attempt <= attempts; attempt++)
@@ -313,6 +330,13 @@ internal sealed partial class TunnelClient : IDisposable
             try
             {
                 var n = await _socket.ReceiveAsync(buffer, SocketFlags.None, timeout.Token).ConfigureAwait(false);
+
+                // A measured socket's last measurement replies, still on their way when it was handed over: not an
+                // answer, and not worth an attempt - read on within this one.
+                while (n >= 1 && GpbProtocol.ParseHeader(buffer[0]).Type == GpbProtocol.TypeMeasure)
+                {
+                    n = await _socket.ReceiveAsync(buffer, SocketFlags.None, timeout.Token).ConfigureAwait(false);
+                }
                 if (!_auth.TryParseResponse(buffer.AsSpan(0, n), nonce, out var result))
                 {
                     _log("Got a reply with a bad signature or a nonce we did not send - ignoring " +

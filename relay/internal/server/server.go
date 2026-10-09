@@ -189,6 +189,11 @@ type Server struct {
 	// status report that carries one. Nil until the first. See revoked.go.
 	revoked atomic.Pointer[revokedSet]
 
+	// ticketKey makes and checks measurement tickets; nil on a PSK relay, which issues none. measures
+	// rate-limits the probes made with them. See measure.go.
+	ticketKey []byte
+	measures  measureLimiter
+
 	relayIP netip.Addr
 	started time.Time
 
@@ -245,6 +250,9 @@ func New(cfg Config) (*Server, error) {
 		bySession:   make(map[protocol.SessionID]*session),
 		byIP:        make(map[netip.Addr]*session),
 		reservedIPs: make(map[protocol.ClientID]netip.Addr),
+	}
+	if licence {
+		s.ticketKey = protocol.TicketKey(cfg.RelayPriv)
 	}
 
 	// .1 of the subnet is the relay's own address on the TUN device; the rest is the pool.
@@ -407,6 +415,8 @@ func (s *Server) loopUDP() error {
 			s.handleProbe(buf[:n], from)
 		case protocol.TypeDisconnect:
 			s.handleDisconnect(buf[:n], from)
+		case protocol.TypeMeasure:
+			s.handleMeasure(buf[:n], from)
 		default:
 			s.stats.dropped.Add(1)
 		}
@@ -429,6 +439,8 @@ func (s *Server) handleHandshake(pkt []byte, from netip.AddrPort) {
 		s.handleHandshakePSK(pkt, from)
 	case mode == protocol.AuthModeToken && s.cfg.LicencePub != nil:
 		s.handleHandshakeToken(pkt, from)
+	case mode == protocol.AuthModeMeasure && s.cfg.LicencePub != nil:
+		s.handleMeasureReq(pkt, from)
 	default:
 		s.log.Debug("handshake for an authentication mode this relay does not serve",
 			"from", from.String(), "mode", mode)
@@ -782,6 +794,7 @@ func (s *Server) loopJanitor(done <-chan struct{}) {
 			now := time.Now()
 			s.sweep(now)
 			s.pruneRevoked(now)
+			s.measures.prune(now)
 		}
 	}
 }

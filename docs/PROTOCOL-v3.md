@@ -58,6 +58,9 @@ bits 3..0 : message type
 | 0x5  | Pong             | relay -> client | unchanged |
 | 0x6  | Disconnect       | client -> relay | unchanged |
 | 0x7  | **reserved**     | -               | **DataEncrypted. Reserved, never sent, never accepted.** |
+| 0x8  | Probe            | client -> relay | added later, see below |
+| 0x9  | ProbeReply       | relay -> client | added later, see below |
+| 0xA  | Measure          | both ways       | added later: measurement tickets, see below |
 
 Reserving `0x7` now costs nothing and means a future encrypted Data path can be introduced
 alongside the plaintext one without touching the handshake again.
@@ -260,6 +263,56 @@ The relay therefore treats a Probe differently in every respect that matters:
 
 The reply is the request's size, so it amplifies nothing; the per-session cap bounds what anybody
 holding a session id could reflect at another address.
+
+## Measurement tickets - type 0xA, 42 bytes each
+
+Added after v3 shipped, without a version bump, the same way Probe was: a relay older than this
+drops an unknown auth mode and an unknown type in silence, and the client falls back to ICMP for it.
+
+The relay list in the app must show the ping a player will actually get through whichever way in a
+connect would pick - the relay itself or an entry in front of it. Only a UDP round trip through
+relayd measures that, and a Probe needs a session. A session is a slot under `-max-clients`: a list
+that handshook every relay whenever it was opened would take a slot on every relay for everybody
+looking at it, and at peak the players trying to connect would be refused. A ticket costs no slot.
+
+**Asking for one.** A mode 1 HandshakeReq, byte for byte, with the auth-mode byte set to **2**. The
+relay verifies it exactly as it verifies a handshake - token, expiry, device signature, clock skew,
+then tier and revocation - and on success answers with a ticket and allocates nothing: no session,
+no inner address, no slot. Every refusal is silence; there is no customer-facing message to give,
+since the list just shows ICMP for that relay. The mode byte is inside the device signature, so a
+ticket request cannot be relabelled into a handshake, nor the reverse. A PSK relay issues none.
+
+All three messages share one type, told apart by the op byte:
+
+| off | len | field |
+|---|---|---|
+| 0 | 1 | header: type `0xA` |
+| 1 | 1 | op: `1` ticket (relay -> client), `2` probe (client -> relay), `3` reply (relay -> client) |
+| 2 | 8 | ticket: the request's nonce, echoed. probe and reply: a stamp, opaque to the relay |
+| 10 | 32 | the ticket; a reply echoes it unchanged |
+
+The ticket is opaque to the client:
+
+| off | len | field |
+|---|---|---|
+| 0 | 8 | expiry, unix seconds - at most 10 minutes, never past the token's own |
+| 8 | 8 | device tag: first 8 bytes of SHA-256 over the 65-byte device key |
+| 16 | 16 | HMAC-SHA256 over bytes 0..16, truncated, under the relay's ticket key |
+
+The ticket key is SHA-256 over `"gpb measure ticket v1"` and the relay's own private scalar.
+Deterministic, so a relayd restarted on the same key file - hot or cold - accepts the tickets the
+last one issued. The ticket answer itself is not signed: the nonce echo binds it to its request,
+and a forged ticket could do nothing but fail, since only the relay ever checks one.
+
+**Measuring with one.** The client sends op-2 probes carrying the ticket down every way into the
+relay. The relay checks the MAC and the expiry, rewrites the op byte to 3, and sends the packet back
+to wherever it came from - the same size, so nothing is amplified. It answers at most 40 per device
+per second across all ways together, keeps a one-second window per device and nothing else, and
+neither the probe nor the ticket ever touches the session table or the session count in the stats
+line that `relay deploy --when-idle` reads.
+
+Because a probe goes to the relay's own port, entries forward it unchanged and it rides the same
+ISP lanes (source-port ECMP) as the tunnel that would follow it.
 
 ## MTU arithmetic
 

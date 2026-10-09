@@ -38,6 +38,12 @@ const (
 	// or Data came from, so a Ping down a second path would drag the game's traffic onto it.
 	TypeProbe      = 0x8
 	TypeProbeReply = 0x9
+
+	// TypeMeasure carries the measurement ticket's traffic: the ticket coming back from the relay, and
+	// the probes and replies made with it. One type number for all of them, told apart by the op byte
+	// after the header, because the header has room for sixteen types and this used the tenth. See
+	// measure.go.
+	TypeMeasure = 0xA
 )
 
 // Authentication modes. A relay is configured for exactly one and answers only that one.
@@ -47,6 +53,10 @@ const (
 	// AuthModeToken is the commercial mode: a licence token signed by the licence server, which
 	// the relay verifies offline against a public key.
 	AuthModeToken = 1
+	// AuthModeMeasure is a token-mode request for a measurement ticket rather than a session: the same
+	// 240 bytes, the same token and device signature, answered with a ticket and nothing else. See
+	// measure.go. The mode byte is inside the signed span, so one cannot be replayed as the other.
+	AuthModeMeasure = 2
 )
 
 // Fixed sizes for each message type (see docs/PROTOCOL-v3.md).
@@ -198,6 +208,11 @@ func BuildHandshakeReq(psk []byte, clientID ClientID, now time.Time) (pkt []byte
 // the matching private key.
 func BuildHandshakeReqToken(deviceKey *ecdsa.PrivateKey, token []byte, clientID ClientID,
 	now time.Time) (pkt []byte, nonce [8]byte, err error) {
+	return buildTokenReq(deviceKey, token, clientID, now, AuthModeToken)
+}
+
+func buildTokenReq(deviceKey *ecdsa.PrivateKey, token []byte, clientID ClientID,
+	now time.Time, mode byte) (pkt []byte, nonce [8]byte, err error) {
 
 	if len(token) != TokenLen {
 		return nil, nonce, ErrBadTokenLength
@@ -207,7 +222,7 @@ func BuildHandshakeReqToken(deviceKey *ecdsa.PrivateKey, token []byte, clientID 
 	}
 	pkt = make([]byte, HandshakeReqTokenLen)
 	pkt[0] = header(TypeHandshakeReq)
-	pkt[hsOffMode] = AuthModeToken
+	pkt[hsOffMode] = mode
 	copy(pkt[hsOffNonce:hsOffTime], nonce[:])
 	binary.BigEndian.PutUint64(pkt[hsOffTime:hsOffClientID], uint64(now.Unix()))
 	copy(pkt[hsOffClientID:hsOffAuthStart], clientID[:])
@@ -281,6 +296,14 @@ func VerifyHandshakeReq(psk, pkt []byte, now time.Time) (ClientID, [8]byte, erro
 // a real customer why they were refused instead of dropping them in silence.
 func VerifyHandshakeReqToken(licencePub *ecdsa.PublicKey, pkt []byte, now time.Time) (
 	*Token, ClientID, [8]byte, error) {
+	return verifyTokenReq(licencePub, pkt, now, AuthModeToken)
+}
+
+// verifyTokenReq is VerifyHandshakeReqToken for either of the two modes that carry a token. The mode
+// is checked before anything else is read, and it is signed, so a request made for one mode never
+// passes as the other.
+func verifyTokenReq(licencePub *ecdsa.PublicKey, pkt []byte, now time.Time, mode byte) (
+	*Token, ClientID, [8]byte, error) {
 
 	var id ClientID
 	var nonce [8]byte
@@ -294,7 +317,7 @@ func VerifyHandshakeReqToken(licencePub *ecdsa.PublicKey, pkt []byte, now time.T
 	if t != TypeHandshakeReq {
 		return nil, id, nonce, ErrBadType
 	}
-	if pkt[hsOffMode] != AuthModeToken {
+	if pkt[hsOffMode] != mode {
 		return nil, id, nonce, ErrBadAuthMode
 	}
 

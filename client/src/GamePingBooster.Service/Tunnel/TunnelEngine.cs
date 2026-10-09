@@ -151,6 +151,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                 () => _tunnel is { } home ? AllGameUdpPackets(home) : null, _discoveryUploader.WhyNotSend, _discoveryUploader.Report, log);
         }
         _presence = new PresenceReporter(() => _config.LicenceUrl, () => _token, _device.Key, () => _config.ShareQuality, log);
+        _meter = new RelayMeter(MeterCredentials, log);
         if (_token is not null)
         {
             log($"Licence token loaded, expires {TokenStore.ExpiryOf(_token):u}.");
@@ -808,6 +809,31 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
 
     private const int RelayPingTimeoutMs = 1000;
 
+    /// <summary>Every way into the listed relays, timed through relayd with measurement tickets. See RelayMeter.</summary>
+    private readonly RelayMeter _meter;
+
+    /// <summary>Answers per way a list round waits for before it is shown, and the longest it waits.</summary>
+    private const int ListAnswers = 3;
+    private static readonly TimeSpan ListWait = TimeSpan.FromMilliseconds(1500);
+
+    /// <summary>
+    /// Answers per way a connect to a relay waits for before choosing its way in - a median of six is a quarter second
+    /// apart each, so a second and a half on a relay the list was not just measuring - and the longest it waits.
+    /// </summary>
+    private const int ConnectAnswers = 6;
+    private static readonly TimeSpan ConnectWait = TimeSpan.FromSeconds(3);
+
+    /// <summary>The way each relay's list number was last logged for, so the log says when it changes and not every round.</summary>
+    private readonly Dictionary<string, string> _listDoorLogged = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>What a ticket request is signed with: a licensed installation's live token, or null - then ICMP only.</summary>
+    private RelayMeter.Credentials? MeterCredentials()
+    {
+        if (string.IsNullOrWhiteSpace(_config.LicenceUrl) || _config.RelayEndpoints.Count > 0) return null;
+        if (_token is not { } token || TokenStore.ExpiryOf(token) <= DateTimeOffset.UtcNow) return null;
+        return new RelayMeter.Credentials(token, _device.Key, _clientId);
+    }
+
     /// <summary>
     /// Pings every relay once, all at once, and returns the list with the results. For the main window's
     /// relay list, which asks when it opens and every few seconds while it stays open.
@@ -833,6 +859,16 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     private async Task<List<RelayOption>> PingRoundAsync()
     {
         var relays = _profile?.Relays ?? [];
+
+        // Every way into each relay the list can offer, through relayd (RelayMeter) - not the one the tunnel is on, which
+        // shows its own live round trip, and not one greyed out for the game. The ICMP echo still goes to every relay
+        // beside it: the number for a relay that gives no ticket, and for an installation with no licence to ask with.
+        var game = GameForRelayList();
+        var current = _relay is { } inUse ? RelayPaths.RelayIdOf(inUse) : null;
+        var metering = _meter.Measure(relays.Where(r =>
+            RelayPaths.Serves(r, game?.Id) && !r.Id.Equals(current, StringComparison.OrdinalIgnoreCase)));
+        var metered = _meter.WaitAsync(metering, ListAnswers, ListWait, CancellationToken.None);
+
         var rounds = relays.Select(async relay =>
         {
             double? rtt = null;
@@ -849,13 +885,31 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             }
             lock (_relayPings) _relayPings[relay.Id] = rtt;
         });
-        await Task.WhenAll(rounds).ConfigureAwait(false);
+        await Task.WhenAll(rounds.Append(metered)).ConfigureAwait(false);
+        LogListDoors(metering);
         return RelayOptions();
     }
 
+    /// <summary>One line per relay whose listed way changed since the last: what the list now shows, and why.</summary>
+    private void LogListDoors(List<string> relayIds)
+    {
+        foreach (var id in relayIds)
+        {
+            if (_meter.Pick(id) is not { } measured) continue;
+            var door = measured.Pick.Door!.DoorId;
+            lock (_listDoorLogged)
+            {
+                if (_listDoorLogged.TryGetValue(id, out var was) && was.Equals(door, StringComparison.OrdinalIgnoreCase)) continue;
+                _listDoorLogged[id] = door;
+            }
+            _log($"Relay list, {id}: {measured.Pick.Reason} ({string.Join(", ", measured.Readings)}).");
+        }
+    }
+
     /// <summary>
-    /// Every relay in the profile for the main window's choice, in profile order, with the last ping of each.
-    /// The relay the tunnel is on shows the tunnel's own round trip instead: live, and the same leg.
+    /// Every relay in the profile for the main window's choice, in profile order, with the last ping of each: the way
+    /// in DoorChoice picks, as RelayMeter measured it - the number a connect to it starts on - or, for a relay that gives
+    /// no ticket, the ICMP echo. The relay the tunnel is on shows the tunnel's own round trip instead: live, and the same leg.
     /// </summary>
     public List<RelayOption> RelayOptions()
     {
@@ -875,7 +929,9 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     Location = r.Location,
                     PingMs = r.Id.Equals(current.Id, StringComparison.OrdinalIgnoreCase)
                         ? Math.Round(current.Ms)
-                        : _relayPings.TryGetValue(r.Id, out var ms) && ms is { } value ? Math.Round(value) : null,
+                        : _meter.Pick(r.Id) is { } measured
+                            ? Math.Round(measured.Pick.Door!.MedianMs!.Value)
+                            : _relayPings.TryGetValue(r.Id, out var ms) && ms is { } value ? Math.Round(value) : null,
                     NotForGame = RelayPaths.Serves(r, game?.Id) ? null : game?.Name,
                 })
                 .ToList();
@@ -1193,7 +1249,10 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                 _log($"Using {chosen.Name} [{chosen.Id}], the relay chosen in the app.");
                 try
                 {
-                    return await SelectAmongAsync([chosen], RelayPaths.Expand([chosen]), psk, ct).ConfigureAwait(false);
+                    // The way the list showed for it, by the list's own rule and on the socket it measured, when the relay
+                    // gives tickets; the old measurement, handshake by handshake, when it does not.
+                    return await ConnectAsListedAsync(chosen, psk, ct).ConfigureAwait(false)
+                           ?? await SelectAmongAsync([chosen], RelayPaths.Expand([chosen]), psk, ct).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
@@ -1217,6 +1276,63 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         }
 
         return await SelectAmongAsync(relays, paths, psk, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Connects to a relay chosen in the app by the way into it the list shows - <see cref="DoorChoice"/> over what
+    /// <see cref="RelayMeter"/> measured - handshaking on the very socket that way was measured on, so the player starts
+    /// on the number they chose by (list-ping-handoff.md, 2026-10-09). Always, unlike the old rule, which compared the
+    /// entries only when no relay beat the player's own connection: the list shows the fastest way, so the connect takes it.
+    ///
+    /// A relay the list was measuring a moment ago is ready at once; otherwise its ways are measured here for a second or
+    /// two, which is less than the handshake per entry the old rule took. Null - the caller measures the old way - when
+    /// the relay gives no ticket or nothing answered. Throws when the handshake on the chosen way fails.
+    /// </summary>
+    private async Task<(RelayEntry Relay, TunnelClient Tunnel)?> ConnectAsListedAsync(RelayEntry chosen, byte[] psk, CancellationToken ct)
+    {
+        if (await MeteredPickAsync(chosen, ct).ConfigureAwait(false) is not { } measured) return null;
+
+        var picked = measured.Pick.Door!;
+        var door = RelayPaths.DoorsOf(_profile!.Relays, chosen.Id)
+            .FirstOrDefault(d => d.Id.Equals(picked.DoorId, StringComparison.OrdinalIgnoreCase));
+        if (door is null) return null;
+
+        var endpoint = ParseEndpoint(door.Endpoint);
+        var socket = _meter.Take(chosen.Id, door.Id, endpoint);
+        _log($"Starting on {measured.Pick.Reason} ({string.Join(", ", measured.Readings)}), " +
+             (socket is null ? "on a fresh socket." : "on the socket the list measured it on."));
+
+        var client = new TunnelClient(endpoint, AuthFor(door, psk), _clientId, _log);
+        try
+        {
+            await client.HandshakeAsync(attempts: 4, ct, socket).ConfigureAwait(false);
+        }
+        catch
+        {
+            client.Dispose();
+            throw;
+        }
+
+        // On an entry because it was faster than an answering relay: the switch policy's way back (see ChooseDoorAsync).
+        if (door.ViaRelayId is not null && measured.Readings.Any(r => r.Direct && r.MedianMs is not null))
+        {
+            _connectLeftDoor = chosen.Id;
+        }
+        await ReportBothLegsAsync(door, client, ct).ConfigureAwait(false);
+        return (door, client);
+    }
+
+    /// <summary>
+    /// <see cref="DoorChoice"/> for <paramref name="relay"/> over its ways as <see cref="RelayMeter"/> measures them,
+    /// waiting for <see cref="ConnectAnswers"/> answers on each - at once when the list has been measuring it. Null when
+    /// it gives no ticket, this installation holds no licence to ask with, or no way answered.
+    /// </summary>
+    private async Task<(DoorPick Pick, IReadOnlyList<DoorReading> Readings)?> MeteredPickAsync(RelayEntry relay, CancellationToken ct)
+    {
+        var measuring = _meter.Measure([relay]);
+        if (measuring.Count == 0) return null;
+        await _meter.WaitAsync(measuring, ConnectAnswers, ConnectWait, ct).ConfigureAwait(false);
+        return _meter.Pick(relay.Id);
     }
 
     /// <summary>
@@ -1405,6 +1521,11 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         }
 
         _log($"Entry switching: measuring the other ways into {best.Relay.Name} before starting on one.");
+        if (await MeteredPickAsync(best.Relay, ct).ConfigureAwait(false) is { } metered)
+        {
+            return await StartOnMeteredDoorAsync(best, probes, metered, psk, ct).ConfigureAwait(false);
+        }
+
         var measured = new List<RelayProbe> { best };
         foreach (var door in doors)
         {
@@ -1434,6 +1555,57 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
              (best.Loss.IsLossy && !fastest.Loss.IsLossy ? "road that is not losing packets right now." : "faster road right now."));
         _connectLeftDoor = best.Relay.Id;
         return fastest;
+    }
+
+    /// <summary>
+    /// <see cref="ChooseDoorAsync"/> by the relay list's rule and measurements (<see cref="DoorChoice"/>, RelayMeter), for a
+    /// relay that gives tickets: every way timed side by side through relayd with no handshake each, and an entry that wins
+    /// started on the socket it was measured on. The relay's own address winning keeps the tunnel already open to it. An
+    /// entry whose handshake fails leaves the relay's own address, reopened by OpenChosenAsync.
+    /// </summary>
+    private async Task<RelayProbe> StartOnMeteredDoorAsync(RelayProbe best, List<RelayProbe> probes,
+        (DoorPick Pick, IReadOnlyList<DoorReading> Readings) metered, byte[] psk, CancellationToken ct)
+    {
+        var relayId = best.Relay.Id;
+        var picked = metered.Pick.Door!;
+        var readings = string.Join(", ", metered.Readings);
+        var door = picked.Direct
+            ? null
+            : RelayPaths.DoorsOf(_profile!.Relays, relayId).FirstOrDefault(d => d.Id.Equals(picked.DoorId, StringComparison.OrdinalIgnoreCase));
+        if (door is null)
+        {
+            _log($"Entry switching: starting on {metered.Pick.Reason} ({readings}).");
+            return best;
+        }
+
+        // One path to a relay open at a time - see SelectRelayAsync.
+        CloseProbesOf(probes, relayId);
+        var endpoint = ParseEndpoint(door.Endpoint);
+        var socket = _meter.Take(relayId, door.Id, endpoint);
+        var client = new TunnelClient(endpoint, AuthFor(door, psk), _clientId, _log);
+        try
+        {
+            await client.HandshakeAsync(attempts: 2, ct, socket).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Abandon(client);
+            _log($"Entry switching: {door.Id} measured fastest ({readings}) but did not answer a handshake ({ex.Message}) - " +
+                 $"starting on {best.Relay.Id}.");
+            return best;
+        }
+        catch
+        {
+            Abandon(client);
+            throw;
+        }
+
+        _log($"Entry switching: starting on {metered.Pick.Reason} ({readings}) - the same relay, reached by a faster road " +
+             $"right now{(socket is null ? "" : ", on the socket it was measured on")}.");
+        var probe = new RelayProbe(door, picked.MedianMs!.Value, null) { Client = client, Loss = picked.Loss };
+        probes.Add(probe);
+        if (metered.Readings.Any(r => r.Direct && r.MedianMs is not null)) _connectLeftDoor = relayId;
+        return probe;
     }
 
     /// <summary>
@@ -3504,6 +3676,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             RelayName = carrying.Relay?.Name,
             RelayAddress = carrying.Relay?.Endpoint,
             HomeRelayName = _paths is null ? null : _relay?.Name,
+            ListRelayId = _relay is { } listed && _tunnel?.LastRttMs is not null ? RelayPaths.RelayIdOf(listed) : null,
+            ListRelayPingMs = _relay is not null ? _tunnel?.LastRttMs : null,
             RegionPaths = RegionPathsForStatus(),
             // What is CONFIGURED, not what is connected, so the settings screen can show the current
             // value before anything has been tried. The key is deliberately absent - see the
@@ -3938,6 +4112,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         _discovery?.Dispose();
         _discoveryUploader?.Dispose();
         _presence.Dispose();
+        _meter.Dispose();
         _device.Dispose();
     }
 }

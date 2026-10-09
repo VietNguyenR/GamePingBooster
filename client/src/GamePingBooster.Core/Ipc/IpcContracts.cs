@@ -1,4 +1,4 @@
-﻿using System.Text.Json.Serialization;
+﻿﻿using System.Text.Json.Serialization;
 
 namespace GamePingBooster.Core.Ipc;
 
@@ -190,10 +190,11 @@ public sealed class RelayOption
     [JsonPropertyName("location")] public string? Location { get; set; }
 
     /// <summary>
-    /// Round trip to the relay, milliseconds: an ICMP echo over the player's own connection, taken when the
-    /// list was asked for - or, for the relay the tunnel is on, the tunnel's own keepalive. The first leg
-    /// only, not on to the game; automatic selection still measures the whole way at connect. Null when
-    /// the relay did not answer or has not been pinged yet.
+    /// Round trip to relayd, milliseconds, down the way in a connect to this relay would start on - its own address
+    /// or an entry in front of it - measured with measurement tickets over the last few seconds (RelayMeter,
+    /// DoorChoice). For a relay that gives no ticket, an ICMP echo to its own address; for the relay the tunnel is
+    /// on, the tunnel's own keepalive. The first leg only, not on to the game; automatic selection still measures
+    /// the whole way at connect. Null when the relay did not answer or has not been measured yet.
     /// </summary>
     [JsonPropertyName("pingMs")] public double? PingMs { get; set; }
 
@@ -293,6 +294,15 @@ public sealed class StatusMessage
     /// every connection until region routing is turned on. Additive: an older UI ignores them.
     /// </summary>
     [JsonPropertyName("homeRelayName")] public string? HomeRelayName { get; set; }
+
+    /// <summary>
+    /// The relay-list id of the relay the connection is on, and the tunnel's live round trip to it - the number its
+    /// line in the relay list shows (TunnelEngine.RelayOptions). In every status, so that line follows the tunnel each
+    /// second, open or closed, instead of keeping the number from the last time the list was opened. Null when not
+    /// connected. Additive: an older UI ignores them.
+    /// </summary>
+    [JsonPropertyName("listRelayId")] public string? ListRelayId { get; set; }
+    [JsonPropertyName("listRelayPingMs")] public double? ListRelayPingMs { get; set; }
 
     /// <summary>Each region that leaves by a relay other than home, and that relay. See <see cref="HomeRelayName"/>.</summary>
     [JsonPropertyName("regionPaths")] public List<RegionPathStatus>? RegionPaths { get; set; }
