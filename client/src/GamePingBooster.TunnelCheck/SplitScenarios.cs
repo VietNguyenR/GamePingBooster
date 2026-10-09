@@ -229,6 +229,55 @@ internal static partial class Program
     }
 
     /// <summary>
+    /// 2026-10-09: shared.steamstatic.com's /32 was also fastly.cdn.steampipe.steamcontent.com's address, and the Steam
+    /// window loaded through the relay's cap. Steam's web names are tried over the line split first; the
+    /// connection servers and other services keep the old path.
+    /// </summary>
+    private static void SteamWebNamesTrySplitFirst()
+    {
+        // The scope the server delivers (prisma/seed.ts), not the built-in one, which leaves steamstatic.com out.
+        var app = UnblockPolicy.Builtin.Apps.First(a => a.Id == "steam") with
+        {
+            Scope = ["steamcommunity.com", "steampowered.com", "steamgames.com", "steam-chat.com", "valvesoftware.com",
+                "steamserver.net", "steamstatic.com", "steamcontent.com", "steamusercontent.com", "steampipe.akamaized.net"],
+            Excluded = [],
+        };
+        Check("a Steam web name is tried over the line first", app.SplitsBeforeTunnel("shared.fastly.steamstatic.com") &&
+            app.SplitsBeforeTunnel("client-update.fastly.steamstatic.com") && app.SplitsBeforeTunnel("crash.steampowered.com"), "not split first");
+        Check("so is a download host - its manifests are HTTPS, and the line resets them", app.SplitsBeforeTunnel("fastly.cdn.steampipe.steamcontent.com") &&
+            app.SplitsBeforeTunnel("cache1-sgp1.steamcontent.com"), "not split first");
+        Check("a connection server is not", !app.SplitsBeforeTunnel("cmp1-sgp1.steamserver.net"), "split first");
+        Check("a name outside the service is not", !app.SplitsBeforeTunnel("example.com"), "split first");
+        Check("only download hosts are never relayed", app.IsDownloadHost("cache1-sgp1.steamcontent.com") &&
+            app.IsDownloadHost("fastly.cdn.steampipe.steamcontent.com") && !app.IsDownloadHost("shared.steamstatic.com") &&
+            !app.IsDownloadHost("api.steampowered.com"), "wrong set");
+        Check("the Steam client's own update is a download host on every CDN", app.IsDownloadHost("client-update.fastly.steamstatic.com") &&
+            app.IsDownloadHost("client-update.akamai.steamstatic.com") && app.IsDownloadHost("client-update.steamstatic.com") &&
+            !app.IsDownloadHost("cdn.fastly.steamstatic.com"), "client-update missing");
+        Check("Steam's unblock names (community, store, login, CM) are never download hosts", !app.IsDownloadHost("steamcommunity.com") &&
+            !app.IsDownloadHost("store.steampowered.com") && !app.IsDownloadHost("login.steampowered.com") &&
+            !app.IsDownloadHost("cmp1-sgp1.steamserver.net"), "unblock name treated as download");
+        var listed = app with { Tunnel = ["cache1-sgp1.steamcontent.com"] };
+        Check("a download host the profile lists keeps its relay", !listed.IsDownloadHost("cache1-sgp1.steamcontent.com"), "listed name reset");
+        var served = app with { Downloads = ["cache1-sgp1.steamcontent.com"] };
+        Check("a delivered download list replaces the built-in one", served.IsDownloadHost("cache1-sgp1.steamcontent.com") &&
+            !served.IsDownloadHost("cache2-sgp1.steamcontent.com") && served.MayTunnelWhenCut("cache2-sgp1.steamcontent.com"), "built-in list still used");
+        var none = app with { Downloads = [] };
+        Check("a delivered empty list means no download hosts", !none.IsDownloadHost("cache1-sgp1.steamcontent.com"), "empty list ignored");
+        Check("no list delivered keeps the built-in one", (app with { Downloads = null }).IsDownloadHost("cache1-sgp1.steamcontent.com"), "default lost");
+        var fromProfile = UnblockPolicy.FromProfile(new GamePingBooster.Core.Profiles.ProfileBundle
+        {
+            Unblock = [new() { Id = "steam", Name = "Steam", Scope = ["steamcontent.com"], Canary = "steamcontent.com", Downloads = ["Cache1-sgp1.steamcontent.com."] }],
+        }, _ => { }, allowBuiltin: false);
+        Check("the profile's list is cleaned like the others", fromProfile.Apps[0].IsDownloadHost("cache1-sgp1.steamcontent.com"), "not read from the profile");
+        var pubgOnly = app with { Id = "pubg", Scope = ["playbattlegrounds.com", "pubg.com"], Excluded = [] };
+        Check("PUBG's names are never download hosts", !pubgOnly.IsDownloadHost("prod-live-cfentry.playbattlegrounds.com") &&
+            !pubgOnly.IsDownloadHost("lobby.pubg.com") && !pubgOnly.IsDownloadHost("cache1-sgp1.steamcontent.com"), "PUBG name treated as download");
+        var other = app with { Id = "pubg", Scope = ["playbattlegrounds.com"], Excluded = [] };
+        Check("another service keeps the old path", !other.SplitsBeforeTunnel("prod-live-cfentry.playbattlegrounds.com"), "split first");
+    }
+
+    /// <summary>
     /// VNPT 2026-10-07: accounts.pubg.com's warm-up /32 caught 13.227.185.127, a CloudFront HAN edge it shares with
     /// prod-live-cfentry, and the game's 12 MB from cfentry rode the relay. A name answered for the line drops such an
     /// address while it has others; with none left it is answered as is.

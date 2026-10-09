@@ -129,6 +129,7 @@ internal sealed class LocalResolver : IAsyncDisposable
                 {
                     LobbyProxies = policy.LobbyProxies ?? [],
                     IsProxied = name => policy.ClaimedBy(name)?.ViaLobbyProxy(name) == true,
+                    NeverRelay = name => policy.ClaimedBy(name)?.IsDownloadHost(name) == true,
                 };
             }
         }
@@ -140,6 +141,12 @@ internal sealed class LocalResolver : IAsyncDisposable
     /// dead one waits on it for seconds before trying the next. See WorkingEdges._keepFresh.
     /// </summary>
     internal static readonly TimeSpan TunnelKeepFresh = TimeSpan.FromSeconds(30);
+
+    /// <summary>Steam names the line cuts that the split proxy carries - see UnblockApp.SplitsBeforeTunnel.</summary>
+    private readonly ConcurrentDictionary<string, byte> _splitFirst = new(StringComparer.Ordinal);
+
+    /// <summary>How long a cut name's answer waits for the split verdict: a probe is 3 s at most (SplitProxy.ProbeHandshake).</summary>
+    private static readonly TimeSpan SplitJudgeWait = TimeSpan.FromSeconds(4);
 
     /// <summary>Sent through the tunnel for a cut a short while ago - see <see cref="_cut"/>.</summary>
     private bool TunnelledForCut(string name) =>
@@ -340,7 +347,7 @@ internal sealed class LocalResolver : IAsyncDisposable
             // The profile's tunnel names: over the line through the proxy rather than the relay - split where the line
             // cuts them whole, whole where it does not filter them - see SplitProxy for the order and why. A records name the proxy; AAAA is answered
             // empty while they do, or a game preferring IPv6 would go round it, straight into the line's filter.
-            if (_split is not null && app.RoutesThroughTunnel(name) && _split.Answers(name))
+            if (_split is not null && (app.RoutesThroughTunnel(name) || _splitFirst.ContainsKey(name)) && _split.Answers(name))
             {
                 if (type == DnsWire.TypeA || type == DnsWire.TypeAaaa)
                 {
@@ -362,6 +369,19 @@ internal sealed class LocalResolver : IAsyncDisposable
                 var edges = viaTunnel
                     ? await _tunnelEdges!.ForAsync(name, sibling: null, ct).ConfigureAwait(false)
                     : await _edges.ForAsync(name, app.Canary, ct).ConfigureAwait(false);
+
+                // The line was seen cutting this very name: over the line with the hello split, if that works, before any
+                // /32 is routed and for download hosts too, which never go through the tunnel - see SplitsBeforeTunnel.
+                if (edges is null && !viaTunnel && _split is not null && _edges.CutByName(name) && app.SplitsBeforeTunnel(name) &&
+                    await _split.AnswersAfterJudgingAsync(name, SplitJudgeWait, ct).ConfigureAwait(false))
+                {
+                    if (_splitFirst.TryAdd(name, 0))
+                        _log($"Unblock: {name} is cut by name - answered by the split proxy over the line, not routed into the tunnel.");
+                    Interlocked.Increment(ref _scoped);
+                    var viaProxy = DnsWire.BuildAnswer(query, [SplitProxy.ListenAddress], SplitProxy.AnswerTtl);
+                    DnsWire.WriteId(viaProxy, id);
+                    return viaProxy;
+                }
 
                 // Nothing on the line works and the line was seen cutting this very name: the tunnel, listed or
                 // not. See UnblockApp.MayTunnelWhenCut.

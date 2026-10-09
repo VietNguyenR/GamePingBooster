@@ -13,7 +13,8 @@ internal sealed record UnblockApp(
     IReadOnlyList<string> Excluded,
     string Canary,
     IReadOnlyList<string>? Tunnel = null,
-    IReadOnlyList<string>? Proxied = null)
+    IReadOnlyList<string>? Proxied = null,
+    IReadOnlyList<string>? Downloads = null)
 {
     /// <summary>
     /// Whether the name's connections go to the profile's lobby proxies first: on the tunnel list AND on the proxied
@@ -35,16 +36,45 @@ internal sealed record UnblockApp(
         Claims(name) && (Tunnel ?? []).Any(suffix => Matches(name, suffix));
 
     /// <summary>
+    /// A Steam name the line cuts by name, to be carried over the line with the hello split. Download hosts too, which
+    /// never go through the tunnel: on 2026-10-09 Steam's own content log showed every manifest request to
+    /// cache*-sgp1.steamcontent.com (HTTPS, 443) closed at once - "No Connection", 0 bytes - because the line resets
+    /// a handshake naming them, and an update could not start. A split hello is the one thing that gets past that, and
+    /// the bytes after it travel the line, not the relay's cap. Not the profile's listed names (those always had the
+    /// proxy), and not the connection servers (<c>steamserver.net</c>: their ports and handshakes are not the web's,
+    /// and the split was never measured on them).
+    ///
+    /// Web names too, for a second reason: they sit on shared Fastly and Akamai addresses. A /32 routed into the
+    /// tunnel for shared.steamstatic.com was also the address of fastly.cdn.steampipe.steamcontent.com, so the Steam
+    /// window loaded at 60 KB/s through the relay's cap. A name sent over the line split needs no route at all.
+    /// </summary>
+    public bool SplitsBeforeTunnel(string name) =>
+        Id == "steam" && Claims(name) && !RoutesThroughTunnel(name) && !Matches(name, "steamserver.net");
+
+    /// <summary>
     /// Download hosts, never sent through the tunnel unless a profile names them itself. A relay caps a session at
     /// 256 KB/s each way, shared with the game's own packets, so a game update riding it would be slow AND drop the
     /// match's packets while it ran - and Steam's downloads come from caches inside Vietnam anyway (10 ms against
     /// 30-43 abroad, 2026-09-20), so a line that cut them would need a different fix, not a relay.
     /// </summary>
-    private static readonly string[] DownloadHosts =
+    internal static readonly string[] DefaultDownloadHosts =
     [
         "steamcontent.com", "steampipe.akamaized.net", "steamcdn-a.akamaihd.net", "steamusercontent.com",
-        "client-update.akamai.steamstatic.com", "client-update.steamstatic.com",
+        "client-update.akamai.steamstatic.com", "client-update.fastly.steamstatic.com", "client-update.steamstatic.com",
     ];
+
+    /// <summary>
+    /// A download host: its bytes never ride the relay, whatever else fails (SplitProxy resets the connection instead,
+    /// and the game's client moves to another content server).
+    /// </summary>
+    public bool IsDownloadHost(string name) =>
+        Claims(name) && !RoutesThroughTunnel(name) && DownloadHostList.Any(host => Matches(name, host));
+
+    /// <summary>
+    /// The profile's download list, or the built-in one when the profile does not carry the field (a server older than
+    /// it). A delivered empty list means none: switching the rule off stays a server-side edit.
+    /// </summary>
+    private IReadOnlyList<string> DownloadHostList => Downloads ?? DefaultDownloadHosts;
 
     /// <summary>
     /// Whether the resolver may send <paramref name="name"/> through the tunnel once the line is seen cutting it by
@@ -56,7 +86,7 @@ internal sealed record UnblockApp(
     /// is always behind it. A listed download host is allowed: the profile named it, which is a decision.
     /// </summary>
     public bool MayTunnelWhenCut(string name) =>
-        RoutesThroughTunnel(name) || (Claims(name) && !DownloadHosts.Any(host => Matches(name, host)));
+        RoutesThroughTunnel(name) || (Claims(name) && !DownloadHostList.Any(host => Matches(name, host)));
 
     /// <summary>The namespaces the Windows policy is given. A leading dot is what NRPT expects for a suffix.</summary>
     public IReadOnlyList<string> Namespaces => [.. Scope.Select(s => "." + s)];
@@ -167,7 +197,8 @@ internal sealed record UnblockPolicy(IReadOnlyList<UnblockApp> Apps, string Sour
                 Clean(entry.Excluded),
                 canary,
                 Clean(entry.Tunnel),
-                Clean(entry.Proxied)));
+                Clean(entry.Proxied),
+                entry.Downloads is null ? null : Clean(entry.Downloads)));
         }
 
         return apps.Count == 0

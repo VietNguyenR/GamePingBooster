@@ -143,6 +143,13 @@ internal sealed class SplitProxy : IAsyncDisposable
     /// <summary>Whether the name is on the profile's proxied list. See <see cref="LobbyProxies"/>.</summary>
     internal Func<string, bool> IsProxied { get; init; } = _ => false;
 
+    /// <summary>
+    /// Names whose connections never go through the tunnel, even when the split fails: Steam's download hosts. A relay
+    /// caps a session at 256 KB/s shared with the game, so a failed split is a reset - Steam then asks another content
+    /// server - not a detour. Decided 2026-10-09 after the owner ruled the fallback out for downloads.
+    /// </summary>
+    internal Func<string, bool> NeverRelay { get; init; } = _ => false;
+
     /// <summary>How long the proxies go unused after none of them answered a connection.</summary>
     private static readonly TimeSpan ProxyDownFor = TimeSpan.FromMinutes(3);
 
@@ -296,6 +303,23 @@ internal sealed class SplitProxy : IAsyncDisposable
         }
         if (now - verdict.At > Fresh) ProbeInBackground(name);
         return verdict.Split && verdict.Held <= now;
+    }
+
+    /// <summary>
+    /// <see cref="Answers"/>, but when there is no usable verdict it waits for the probe (at most <paramref name="wait"/>)
+    /// instead of answering "no". For a name about to be sent through the tunnel: the answer to "can it go over the line
+    /// instead" has to come BEFORE a /32 is routed, because a route cannot be taken back without cutting a live flow.
+    /// </summary>
+    public async Task<bool> AnswersAfterJudgingAsync(string name, TimeSpan wait, CancellationToken ct)
+    {
+        if (Answers(name)) return true;
+        if (_verdicts.TryGetValue(name, out var verdict) && DateTimeOffset.UtcNow - verdict.At <= UsableFor) return false;
+        if (_probing.TryGetValue(name, out var probe))
+        {
+            try { await Task.WhenAny(probe, Task.Delay(wait, ct)).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return false; }
+        }
+        return Answers(name);
     }
 
     private void ProbeInBackground(string name)
@@ -519,6 +543,15 @@ internal sealed class SplitProxy : IAsyncDisposable
             }
             if (edge is null)
             {
+                if (NeverRelay(name))
+                {
+                    // Reset, so the client sees a failure at once and tries another content server.
+                    if (_said.TryAdd("r" + name, 0))
+                        _log($"Unblock: {name} is a download host and the split did not carry it - reset, not sent through the relay.");
+                    try { client.LingerState = new LingerOption(true, 0); } catch (Exception) { }
+                    return;
+                }
+
                 // Through the tunnel with the hello as the game sent it - nothing has reached the game yet, so it
                 // never knows. Also where a connection lands that was answered just before the name went back.
                 edge = await ThroughTunnelAsync(name, verdict!.Edges, record, ct).ConfigureAwait(false);

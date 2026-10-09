@@ -109,6 +109,13 @@ public sealed class UnblockEntry
     /// not also in the tunnel list is ignored). Absent or empty sends nothing there.
     /// </summary>
     [JsonPropertyName("proxied")] public List<string> Proxied { get; set; } = [];
+
+    /// <summary>
+    /// Claimed names (or suffixes) that are big downloads: never sent through the tunnel and never through the relay,
+    /// whatever else fails. Absent (null, a server older than the field) means the client's built-in Steam list;
+    /// present and empty means none.
+    /// </summary>
+    [JsonPropertyName("downloads")] public List<string>? Downloads { get; set; }
 }
 
 public sealed class GameEntry
