@@ -264,7 +264,7 @@
       "unverifiedPath": "observed-fc27-unverified.txt",
       "manualCidrPath": "manual-cidrs-fc27.txt",
       "profilePath": "../../profiles/fc27-vn.json",
-      "awsRegions": ["ap-east-1"],
+      "awsRegions": ["ap-east-1", "ap-southeast-1"],
       "azureRegions": [],
       "asns": [],
       "note": "Captured 2026-10-05, one session: gameplay is UDP 21144 to a single address, 18.166.237.178 (16100 pkts / 538 s = 30/s), AWS ap-east-1 (Hong Kong, 18.166.0.0/15). Declared as ap-east-1 only; no ASN on purpose (AS16509 would admit every Amazon region). TCP seen but never routed: 3.40.136.182:15223, 99.81.255.166:11000, 54.229.157.171:10010 are eu-west-1 (Ireland), 98.85.38.9:8095/9000 us-east-1 - backend/telemetry, not gameplay; 125.235.36.x and 171.236.61.21 are Vietnamese CDN. Only one match captured: capture more matches before trusting the /20 around it."

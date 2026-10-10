@@ -134,28 +134,59 @@ internal static partial class Program
         // 2 s ticks. 41 KB/s is what the Hong Kong box gave on 2026-10-07 with the player's route throttled.
         var watch = new SplitProxy.ProxySpeedWatch();
         string? why = null;
-        for (var i = 0; i < 3 && why is null; i++) why = watch.Observe(82_000, 2, open: 4);
+        for (var i = 0; i < 3 && why is null; i++) why = watch.Observe(82_000, 2, open: 4, streaming: 1);
         Check($"a download moving at 41 KB/s for three ticks is slow ({why})", why is not null, "never judged slow");
 
         watch = new SplitProxy.ProxySpeedWatch();
         why = null;
-        for (var i = 0; i < 20; i++) why ??= watch.Observe(2_000_000, 2, open: 4);
+        for (var i = 0; i < 20; i++) why ??= watch.Observe(2_000_000, 2, open: 4, streaming: 1);
         Check("1 MB/s never is", why is null, why);
 
         watch = new SplitProxy.ProxySpeedWatch();
         why = null;
-        for (var i = 0; i < 20; i++) why ??= watch.Observe(6_000, 2, open: 4);
+        for (var i = 0; i < 20; i++) why ??= watch.Observe(6_000, 2, open: 4, streaming: 1);
         Check("chatter - a few KB a tick - is not a download", why is null, why);
 
         watch = new SplitProxy.ProxySpeedWatch();
         why = null;
-        foreach (var bytes in new long[] { 82_000, 82_000, 2_000_000, 82_000, 82_000 }) why ??= watch.Observe(bytes, 2, open: 4);
+        foreach (var bytes in new long[] { 82_000, 82_000, 2_000_000, 82_000, 82_000 }) why ??= watch.Observe(bytes, 2, open: 4, streaming: 1);
         Check("one fast tick clears the count", why is null, why);
 
         watch = new SplitProxy.ProxySpeedWatch();
         why = null;
-        for (var i = 0; i < 10; i++) why ??= watch.Observe(82_000, 2, open: 0);
+        for (var i = 0; i < 10; i++) why ??= watch.Observe(82_000, 2, open: 0, streaming: 0);
         Check("nothing is judged with no proxied connection open", why is null, why);
+
+        // VNPT 2026-10-10: the bundle had come at ~1 MB/s; then 1-50 KB files, one round trip to the mainland each.
+        watch = new SplitProxy.ProxySpeedWatch();
+        why = null;
+        for (var i = 0; i < 10; i++) why ??= watch.Observe(58_000, 2, open: 16, streaming: 0);
+        Check("29 KB/s of small files, no large answer coming, is the game asking slowly - not slow", why is null, why);
+
+        // A connection's answer, timed: 2 s ticks from 0.
+        var run = new SplitProxy.ProxyRun();
+        run.Up();
+        for (var ms = 0L; ms <= 4000; ms += 100) run.Down(4_100, ms);   // 41 KB/s, one answer
+        Check("a large answer arriving all through a tick is streaming", run.StreamedThrough(2000, 4000), "not streaming");
+        Check("not in a tick that began before it did", !run.StreamedThrough(-100, 2000), "streaming from before it began");
+
+        run = new SplitProxy.ProxyRun();
+        for (var ms = 0L; ms <= 4000; ms += 350)
+        {
+            run.Up();                // the next small file asked for
+            run.Down(30_000, ms);    // and answered in one go
+        }
+        Check("back-to-back small answers are not", !run.StreamedThrough(2000, 4000), "streaming");
+
+        run = new SplitProxy.ProxyRun();
+        run.Up();
+        for (var ms = 0L; ms <= 1500; ms += 100) run.Down(20_000, ms);   // 320 KB, done at 1.5 s
+        Check("an answer that finished early in the tick is not", !run.StreamedThrough(2000, 4000), "streaming");
+
+        run = new SplitProxy.ProxyRun();
+        run.Up();
+        for (var ms = 0L; ms <= 4000; ms += 100) run.Down(1_000, ms);   // 41 KB in all
+        Check("nor is a small one that trickles", !run.StreamedThrough(2000, 4000), "streaming");
         return Task.CompletedTask;
     }
 
@@ -191,6 +222,37 @@ internal static partial class Program
         Check("and the proxies are left alone for a while: the next connection goes straight to the line",
             again.StartsWith("HTTP/1.1 200", StringComparison.Ordinal) && proxy.SplitConnections == 2 && proxy.ProxiedConnections == 0,
             $"proxied {proxy.ProxiedConnections}, line {proxy.SplitConnections}");
+    }
+
+    private static async Task ANameHeldOnTheRelaySkipsTheLobbyProxy()
+    {
+        using var certificate = SelfSigned();
+        await using var lobbyProxy = new LineFilter("never.matches.example", reassembles: false, certificate);
+        await using var edge = new LineFilter("never.matches.example", reassembles: false, certificate);
+
+        // The line stalled on .cn a moment ago (VNPT, 2026-10-10 13:16:23): the name is on the relay for a while.
+        var verdicts = new ConcurrentDictionary<string, SplitProxy.Verdict>(StringComparer.OrdinalIgnoreCase)
+        {
+            [LobbyName] = new(false, [EdgeAddress], DateTimeOffset.UtcNow, "a connection over the line stopped mid-way",
+                Held: DateTimeOffset.UtcNow.AddMinutes(3)),
+        };
+        var routes = new SplitRoutes();
+        await using var proxy = new SplitProxy(new DohUpstream(_ => { }), routes, s => Log.Enqueue(s), verdicts,
+            new IPEndPoint(IPAddress.Loopback, 0), edge.Port, _ => LineAddress)
+        {
+            LobbyProxies = [new GamePingBooster.Core.Profiles.LobbyProxyEntry { Id = "t", Host = "127.0.0.1", Port = lobbyProxy.Port }],
+            IsProxied = name => name == LobbyName,
+        };
+        proxy.Start();
+
+        Check("a proxied name held on the relay is not answered with the proxy", !proxy.Answers(LobbyName), "answered");
+
+        // A connection that was answered with the proxy just before the hold still arrives here.
+        var status = await GetThroughAsync(proxy.Endpoint, LobbyName);
+        Check($"and a connection for it goes through the tunnel, not the lobby proxy ({status})",
+            status.StartsWith("HTTP/1.1 200", StringComparison.Ordinal) && proxy.ProxiedConnections == 0 && proxy.FellBack == 1
+            && routes.Names.Contains(LobbyName),
+            $"proxied {proxy.ProxiedConnections}, line {proxy.SplitConnections}, fell back {proxy.FellBack}");
     }
 
     private static async Task TheResolverAnswersAListedSplitNameWithTheProxy()

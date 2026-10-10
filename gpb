@@ -43,6 +43,8 @@
 #   ./gpb lag [seconds]          where the lag is: PC, home, ISP or relay (Windows) <~ tu dong detect xem tai sao ping lai cao, do personal network hay do relay server
 #   ./gpb logs | status | stop | publish | diag                           (Windows)
 #   ./gpb installer [version]    package a setup .exe                     (Windows)
+#   ./gpb defendercheck [x.y.z]  does Defender flag the published release, and which file to
+#                                submit to Microsoft (installed files too, if that version)  (Windows)
 #   ./gpb version [x.y.z]        show or set the product version          (Windows)
 #   ./gpb reset                  strip this machine back to before install (Windows)
 #
@@ -1307,7 +1309,7 @@ case "$verb" in
 
     release) release "$@" ;;
 
-    dev | capture | etw | profile | push-profile | check | lag | logs | status | stop | publish | diag | installer | reset | version)
+    dev | capture | etw | profile | push-profile | check | lag | logs | status | stop | publish | diag | installer | defendercheck | reset | version)
         delegate "$verb" "$@"
         ;;
 

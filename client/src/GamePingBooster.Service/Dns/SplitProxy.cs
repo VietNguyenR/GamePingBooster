@@ -163,7 +163,8 @@ internal sealed class SplitProxy : IAsyncDisposable
     private long _proxyDownUntilTicks;
     private long _viaProxy;
     private long _proxyBytes;
-    private readonly ConcurrentDictionary<Socket, byte> _proxied = new();
+    private readonly ConcurrentDictionary<Socket, ProxyRun> _proxied = new();
+    private readonly Stopwatch _proxyClock = Stopwatch.StartNew();
 
     /// <summary>How often the lobby proxies' throughput is looked at.</summary>
     internal TimeSpan ProxyTick { get; init; } = TimeSpan.FromSeconds(2);
@@ -179,22 +180,82 @@ internal sealed class SplitProxy : IAsyncDisposable
     /// <summary>
     /// Told the bytes the proxied connections received in one tick; says when the proxies are too slow. A tick with
     /// under <see cref="MinTransfer"/> of data is chatter (keep-alives, a log post), not a download, and neither
-    /// counts as slow nor clears the count.
+    /// counts as slow nor clears the count. Nor does a tick in which no connection was in the middle of a large answer
+    /// (<paramref name="streaming"/> 0 in <see cref="Observe"/>): VNPT, 2026-10-10, the whole 7.9 MB lobby bundle came
+    /// through vn-5 at ~1 MB/s, then the game asked for 1-50 KB files one after another, each a round trip to the
+    /// mainland - 29 KB/s of asking, not of carrying - and the watch reset every connection and sent .cn to a line that
+    /// timed out.
     /// </summary>
     internal sealed class ProxySpeedWatch(long minBytesPerSecond = 150_000, int slowTicks = 3, long minTransfer = 20_000)
     {
         private int _slow;
 
+        /// <param name="streaming">Proxied connections that were receiving one large answer all through the tick
+        /// (<see cref="ProxyRun.StreamedThrough"/>) - only then is the rate the path's, not the game's.</param>
         /// <returns>Why the proxies are too slow, or null.</returns>
-        public string? Observe(long bytes, double seconds, int open)
+        public string? Observe(long bytes, double seconds, int open, int streaming)
         {
             if (open == 0) { _slow = 0; return null; }
             if (bytes < minTransfer * seconds / 2.0) return null;
+            if (streaming == 0) return null;
             var rate = bytes / seconds;
             if (rate >= minBytesPerSecond) { _slow = 0; return null; }
             if (++_slow < slowTicks) return null;
             _slow = 0;
-            return $"{rate / 1000:0} KB/s for {slowTicks} ticks, under {minBytesPerSecond / 1000} KB/s";
+            return $"{rate / 1000:0} KB/s for {slowTicks} ticks while a large answer was coming, under {minBytesPerSecond / 1000} KB/s";
+        }
+    }
+
+    /// <summary>
+    /// One proxied connection's current answer: the bytes received since the game last sent anything, or since a quiet
+    /// spell. The proxy sees TLS only, so "the game sent something" stands in for "a new request". Thread-safe: the up
+    /// and down copies call in from their own tasks. Internal for TunnelCheck.
+    /// </summary>
+    internal sealed class ProxyRun
+    {
+        /// <summary>An answer this large is a download, not a page's small file.</summary>
+        internal const long LargeAnswer = 128 * 1024;
+
+        /// <summary>No byte for this long and the next one starts a new answer.</summary>
+        private const long QuietMs = 1000;
+
+        /// <summary>The last byte may be this old at the end of a tick and the answer still counts as coming.</summary>
+        private const long StillComingMs = 500;
+
+        private readonly Lock _lock = new();
+        private bool _asked = true;
+        private long _startMs;
+        private long _lastMs;
+        private long _bytes;
+
+        public void Up()
+        {
+            lock (_lock) _asked = true;
+        }
+
+        public void Down(int n, long nowMs)
+        {
+            lock (_lock)
+            {
+                if (_asked || nowMs - _lastMs > QuietMs)
+                {
+                    _asked = false;
+                    _startMs = nowMs;
+                    _bytes = 0;
+                }
+                _bytes += n;
+                _lastMs = nowMs;
+            }
+        }
+
+        /// <summary>
+        /// A large answer that had started by <paramref name="fromMs"/> and was still arriving at
+        /// <paramref name="toMs"/>: the connection was carrying as fast as the path let it all through the tick.
+        /// </summary>
+        public bool StreamedThrough(long fromMs, long toMs)
+        {
+            lock (_lock)
+                return !_asked && _bytes >= LargeAnswer && _startMs <= fromMs && toMs - _lastMs <= StillComingMs;
         }
     }
 
@@ -204,13 +265,13 @@ internal sealed class SplitProxy : IAsyncDisposable
         {
             using var timer = new PeriodicTimer(ProxyTick);
             long last = 0;
-            var clock = Stopwatch.StartNew();
-            var lastMs = 0L;
+            var lastMs = _proxyClock.ElapsedMilliseconds;
             while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
             {
                 var now = Interlocked.Read(ref _proxyBytes);
-                var ms = clock.ElapsedMilliseconds;
-                var why = SpeedWatch.Observe(now - last, Math.Max(0.001, (ms - lastMs) / 1000.0), _proxied.Count);
+                var ms = _proxyClock.ElapsedMilliseconds;
+                var streaming = _proxied.Values.Count(run => run.StreamedThrough(lastMs, ms));
+                var why = SpeedWatch.Observe(now - last, Math.Max(0.001, (ms - lastMs) / 1000.0), _proxied.Count, streaming);
                 last = now;
                 lastMs = ms;
                 if (why is null) continue;
@@ -236,8 +297,14 @@ internal sealed class SplitProxy : IAsyncDisposable
     /// <summary>Connections carried by a lobby proxy.</summary>
     public long ProxiedConnections => Interlocked.Read(ref _viaProxy);
 
+    /// <summary>
+    /// Not while the name is held on the relay: VNPT, 2026-10-10, the proxies came back from a slow spell 32 s after the
+    /// line had stalled on .cn and took the name again - the lobby went on alternating between the two paths that had
+    /// just failed (29 KB/s through the proxy), never the relay, until the player restarted the game.
+    /// </summary>
     private bool ProxyUsable(string name) =>
-        LobbyProxies.Count > 0 && IsProxied(name) && DateTime.UtcNow.Ticks >= Interlocked.Read(ref _proxyDownUntilTicks);
+        LobbyProxies.Count > 0 && IsProxied(name) && DateTime.UtcNow.Ticks >= Interlocked.Read(ref _proxyDownUntilTicks)
+        && !(_verdicts.TryGetValue(name, out var verdict) && verdict.Held > DateTimeOffset.UtcNow);
 
     /// <summary>The address and port this listens on - for TunnelCheck, which listens on a free port.</summary>
     public IPEndPoint Endpoint => (IPEndPoint?)_listener?.LocalEndPoint ?? _listen;
@@ -561,8 +628,14 @@ internal sealed class SplitProxy : IAsyncDisposable
             // Only a connection over the line is watched: one through the tunnel has nowhere better to go.
             var overLine = reply is not null && !viaProxy;
             if (reply is not null) await client.SendAsync(reply, SocketFlags.None, ct).ConfigureAwait(false);
-            if (viaProxy) _proxied[client] = 0;
-            if (await PumpAsync(client, edge, overLine, ct, viaProxy ? n => Interlocked.Add(ref _proxyBytes, n) : null).ConfigureAwait(false) is { } dead)
+            var run = viaProxy ? new ProxyRun() : null;
+            if (run is not null) _proxied[client] = run;
+            Action<int>? downBytes = run is null ? null : n =>
+            {
+                Interlocked.Add(ref _proxyBytes, n);
+                run.Down(n, _proxyClock.ElapsedMilliseconds);
+            };
+            if (await PumpAsync(client, edge, overLine, ct, downBytes, run is null ? null : _ => run.Up()).ConfigureAwait(false) is { } dead)
             {
                 // Reset, not closed: the game must see a failure at once and open the connection again - and the
                 // name is on the relay by then, so the new one goes through the tunnel.
@@ -790,12 +863,12 @@ internal sealed class SplitProxy : IAsyncDisposable
     /// <see cref="StallWatch"/> and <see cref="LineDropped"/>.
     /// </summary>
     private static async Task<string?> PumpAsync(Socket client, Socket edge, bool overLine, CancellationToken ct,
-        Action<int>? downBytes = null)
+        Action<int>? downBytes = null, Action<int>? upBytes = null)
     {
         using var done = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var flow = new Flow();
         if (overLine) KeepAliveFast(edge);
-        var up = CopyAsync(client, edge, flow.Up, null, done.Token);
+        var up = CopyAsync(client, edge, flow.Up, null, done.Token, upBytes);
         var down = CopyAsync(edge, client, flow.Down, overLine ? code => flow.Dead(LineDropped(code, flow.Waiting)) : null, done.Token,
             downBytes);
         var watch = overLine ? WatchAsync(edge, flow, done) : Task.CompletedTask;

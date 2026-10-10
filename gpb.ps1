@@ -36,6 +36,9 @@
         .\gpb.ps1 publish             Native AOT build and install into ProgramData
         .\gpb.ps1 diag                collect a diagnostics bundle to send
         .\gpb.ps1 installer [version] build, then package a setup .exe (needs Inno Setup 6)
+        .\gpb.ps1 defendercheck [x.y.z]  after a release: download it from GitHub, update Defender,
+                                      scan it (and the installed files if that version is
+                                      installed) and say which file to submit to Microsoft
         .\gpb.ps1 release-profiles    stand the committed example profiles in for missing real ones
         .\gpb.ps1 version [x.y.z]     show or set the version everything is stamped with
         .\gpb.ps1 reset               remove EVERYTHING this software installed, to test setup
@@ -959,6 +962,13 @@ switch ($Verb.ToLowerInvariant()) {
         $gitBash = Get-GitBash
         if (-not $gitBash) { throw "Git's bash not found. Install Git for Windows, or run ./gpb release from Git Bash." }
         & $gitBash ((Join-Path $root 'gpb') -replace '\\', '/') release $Arg1
+        exit $LASTEXITCODE
+    }
+
+    'defendercheck' {
+        # Its own file: every step there exists to make the scan see what a player's PC sees, and
+        # the reasons have to stay next to the steps. Defaults to VERSION, i.e. the release just made.
+        & (Join-Path $tools 'Check-Defender.ps1') -Version $Arg1
         exit $LASTEXITCODE
     }
 

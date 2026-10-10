@@ -75,6 +75,7 @@ internal static partial class Program
             ("Lobby proxy: a proxied name goes through it", AProxiedNameGoesThroughTheLobbyProxy),
             ("Lobby proxy: a slow proxy is left alone", ASlowLobbyProxyIsLeftAlone),
             ("Lobby proxy: a proxy that does not answer leaves the name to the line", ADeadLobbyProxyLeavesTheNameToTheLine),
+            ("Lobby proxy: a name held on the relay skips it", ANameHeldOnTheRelaySkipsTheLobbyProxy),
             ("Split: the resolver answers a listed name with the proxy", TheResolverAnswersAListedSplitNameWithTheProxy),
             ("Unblock: Steam web names the line cuts try the split before the tunnel", () => { SteamWebNamesTrySplitFirst(); return Task.CompletedTask; }),
             ("Unblock: a line answer leaves out addresses routed into the tunnel", () => { ALineAnswerLeavesOutTunnelledAddresses(); return Task.CompletedTask; }),
