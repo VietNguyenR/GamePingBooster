@@ -1,13 +1,16 @@
 namespace GamePingBooster.Core.Quality;
 
-/// <summary>One way into a relay, measured by a round of Probes: its median round trip to relayd, and what went unanswered.</summary>
-public sealed record WaySample(string Id, double? MedianMs, PingLoss Loss)
+/// <summary>
+/// One way into a relay, measured by a round of Probes: its median round trip to relayd, what went unanswered, and how
+/// much more it swung than the calmest way measured with it (<see cref="Jitter"/>), when known.
+/// </summary>
+public sealed record WaySample(string Id, double? MedianMs, PingLoss Loss, double? JitterMs = null)
 {
-    /// <summary>What the check compares: the median, plus the loss penalty; no answer at all is worst of all.</summary>
-    public double Score => MedianMs is { } ms ? RelayLoss.Score(ms, Loss) : double.PositiveInfinity;
+    /// <summary>What the check compares: the median, plus the loss and jitter penalties; no answer at all is worst of all.</summary>
+    public double Score => MedianMs is { } ms ? RelayLoss.Score(ms, Loss) + Jitter.Penalty(JitterMs) : double.PositiveInfinity;
 
     public override string ToString() => MedianMs is { } ms
-        ? $"{Id} {ms:F0} ms{(Loss.IsLossy ? $", losing packets ({Loss})" : RelayLoss.Note(Loss))}"
+        ? $"{Id} {ms:F0} ms{(Loss.IsLossy ? $", losing packets ({Loss})" : RelayLoss.Note(Loss))}{Jitter.Note(JitterMs)}"
         : $"{Id} no answer";
 }
 
@@ -28,8 +31,9 @@ public sealed record WayChoice(string? MoveTo, string Reason, bool Return = fals
 /// every other way on a socket of its own, which the tunnel then moves onto: a socket's port picks the ISP's link
 /// (LanePick), so each number is the lane the tunnel rides or would ride, not one drawn at random. The bars are the
 /// policy's: another way must be better by <see cref="DoorSwitchPolicy.Margin"/>, on the score (a way losing packets
-/// counts <see cref="RelayLoss.PenaltyMs"/> slower); and the way the tunnel left - the relay's direct road, when the
-/// tunnel is on an entry - is gone back to once it is faster by <see cref="DoorSwitchPolicy.ReturnMargin"/> and clean.
+/// counts <see cref="RelayLoss.PenaltyMs"/> slower, and one that swings counts <see cref="Jitter.Penalty"/> slower); and
+/// the way the tunnel left - the relay's direct road, when the tunnel is on an entry - is gone back to once it is faster
+/// by <see cref="DoorSwitchPolicy.ReturnMargin"/> and clean: not losing packets, and not swinging.
 /// Pure: numbers in, a decision out.
 /// </summary>
 public static class WayCheck
@@ -68,7 +72,7 @@ public static class WayCheck
         // Going back to the road the tunnel was put off: the lower bar, as the policy's return rule, and only clean.
         if (left is not null && !string.Equals(left, current, StringComparison.OrdinalIgnoreCase) &&
             others.FirstOrDefault(w => string.Equals(w.Id, left, StringComparison.OrdinalIgnoreCase)) is { } road &&
-            !road.Loss.IsLossy && here.MedianMs is { } hereMs && road.MedianMs!.Value <= hereMs - DoorSwitchPolicy.ReturnMargin &&
+            !road.Loss.IsLossy && Jitter.Penalty(road.JitterMs) == 0 && here.MedianMs is { } hereMs && road.MedianMs!.Value <= hereMs - DoorSwitchPolicy.ReturnMargin &&
             road.Score <= here.Score)
         {
             return new WayChoice(road.Id, $"{road}, the way left earlier, has recovered - {here} now", Return: true);

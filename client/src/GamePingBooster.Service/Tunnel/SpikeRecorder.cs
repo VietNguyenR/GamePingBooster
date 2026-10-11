@@ -196,6 +196,35 @@ internal sealed class SpikeRecorder : IQualitySink
     /// </summary>
     private readonly Dictionary<string, DoorSwitchPolicy> _policies = new(StringComparer.OrdinalIgnoreCase);
 
+    private readonly JitterMemory? _jitter;
+
+    /// <summary>How often each relay's two-minute window is read into <see cref="_jitter"/>.</summary>
+    private const int LearnEveryTicks = 15 * SpikeDetector.TicksPerSecond;
+
+    /// <summary>
+    /// What the last two minutes showed of each way into <paramref name="relayId"/> - which swing more than the calmest
+    /// (DoorSwitchPolicy.WayJitter) - kept for the choices that measure for a second or two: the relay list, connect, the
+    /// rescan between matches. Says in the log when a way is first remembered, and when it is forgotten for being steady.
+    /// </summary>
+    private void Learn(string relayId, DoorSwitchPolicy policy) => Learn(relayId, policy.WayJitter());
+
+    private void Learn(string relayId, IReadOnlyDictionary<string, double>? excess)
+    {
+        if (_jitter is null || excess is null) return;
+        var (remembered, forgotten) = _jitter.Observe(excess, DateTimeOffset.UtcNow);
+        foreach (var way in remembered)
+        {
+            _log($"Jitter: {way} swung {excess[way]:F0} ms more than the calmest way into {relayId} over the last " +
+                 $"{DoorSwitchPolicy.JitterWindowTicks / SpikeDetector.TicksPerSecond / 60} minutes - counted " +
+                 $"{Jitter.Penalty(excess[way]):F0} ms slower when relays are chosen, for {JitterMemory.KeepFor.TotalHours:F0} h on this network.");
+        }
+        foreach (var way in forgotten)
+        {
+            _log($"Jitter: {way} has been steady for the last {DoorSwitchPolicy.JitterWindowTicks / SpikeDetector.TicksPerSecond / 60} " +
+                 "minutes - no longer counted slower.");
+        }
+    }
+
     private DoorSwitchPolicy PolicyFor(string relayId)
     {
         if (!_policies.TryGetValue(relayId, out var policy)) _policies[relayId] = policy = new DoorSwitchPolicy();
@@ -266,11 +295,14 @@ internal sealed class SpikeRecorder : IQualitySink
     /// Asked when the switch policy decides the tunnel should move to another way into its relay; true when
     /// the engine will make the move. Only called when moves are enabled at all.
     /// </param>
-    public SpikeRecorder(Func<Context> context, Action<string> log, Func<DoorDecision, bool>? requestMove = null)
+    /// <param name="jitter">Where what entry switching sees of each way's swing is kept for the short choices - see <see cref="Learn"/>.</param>
+    public SpikeRecorder(Func<Context> context, Action<string> log, Func<DoorDecision, bool>? requestMove = null,
+        JitterMemory? jitter = null)
     {
         _context = context;
         _log = log;
         _requestMove = requestMove ?? (_ => false);
+        _jitter = jitter;
         _file = new QualityFile(log);
     }
 
@@ -487,9 +519,24 @@ internal sealed class SpikeRecorder : IQualitySink
             {
                 // Only the policy of the relay whose ways the tick compared. The others see a hole in their ticks
                 // when they are next fed, and start their window again - what they were judging was not measured meanwhile.
-                if (settled.DoorRelayId is { } relayId && PolicyFor(relayId).Feed(settled) is { } decision)
+                if (settled.DoorRelayId is { } relayId)
                 {
-                    (decisions ??= []).Add(decision);
+                    // Read before the tick is fed: a decision starts the policy's window again, and the two minutes that
+                    // made a jitter decision would be gone before they were learnt from - so that decision says its own.
+                    var policy = PolicyFor(relayId);
+                    if (settled.Index % LearnEveryTicks == 0) Learn(relayId, policy);
+                    if (policy.Feed(settled) is { } decision)
+                    {
+                        (decisions ??= []).Add(decision);
+                        if (decision is { Jitter: true, FromJitterMs: { } fromJitter })
+                        {
+                            Learn(relayId, new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase)
+                            {
+                                [decision.From] = fromJitter,
+                                [decision.To] = decision.ToJitterMs ?? 0,
+                            });
+                        }
+                    }
                 }
                 if (Follow(settled) is { } done) (followed ??= []).Add(done);
                 TrackLobby(settled, context);
@@ -811,6 +858,8 @@ internal sealed class SpikeRecorder : IQualitySink
             if (_nic is null || now - _nicFoundAt > Stopwatch.Frequency * 60 || !Equals(relay, _nicFor))
             {
                 (_nic, _gateway) = FindPhysicalAdapter(relay);
+                // The network a swing was seen on: this adapter and its router. Another one starts the memory again.
+                if (_nic is not null) _jitter?.OnNetwork($"{_nic.Id}|{_gateway}");
                 _nicFor = relay;
                 _nicFoundAt = now;
                 _lineAt = 0;
@@ -1005,7 +1054,11 @@ internal sealed class SpikeRecorder : IQualitySink
                 ? "not moving - the tunnel is not connected right now"
                 : "recorded, not moved (entrySwitching is \"record\")";
         var seconds = decision.WindowTicks / SpikeDetector.TicksPerSecond;
-        _log(decision.Return
+        _log(decision.Jitter
+            ? $"Entry switching: {decision.From} swings {decision.FromJitterMs:F0} ms more than the calmest way in over the last " +
+              $"{seconds} s, and {decision.To} is steadier by more than the median it gives away - {Figures(decision.ToStats)}" +
+              $"{Jitter.Note(decision.ToJitterMs)} against {Figures(decision.FromStats)}; {what}."
+            : decision.Return
             ? $"Entry switching: {decision.To}, left earlier, has recovered - faster than {decision.From} in " +
               $"{decision.WorseShare:P0} of the last {seconds} s, {Figures(decision.ToStats)} against " +
               $"{Figures(decision.FromStats)}; {(requested ? "going back to it" : what)}."

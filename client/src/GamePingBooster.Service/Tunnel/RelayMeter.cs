@@ -78,6 +78,7 @@ internal sealed class RelayMeter : IDisposable
 
     private readonly Func<Credentials?> _credentials;
     private readonly Action<string> _log;
+    private readonly JitterMemory? _jitter;
     private readonly Dictionary<string, Target> _targets = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _gate = new();
 
@@ -86,10 +87,12 @@ internal sealed class RelayMeter : IDisposable
     private Task? _loop;
     private bool _disposed;
 
-    public RelayMeter(Func<Credentials?> credentials, Action<string> log)
+    /// <param name="jitter">Ways seen swinging on this network, judged with what the window measured - see <see cref="Pick"/>.</param>
+    public RelayMeter(Func<Credentials?> credentials, Action<string> log, JitterMemory? jitter = null)
     {
         _credentials = credentials;
         _log = log;
+        _jitter = jitter;
     }
 
     // ------------------------------------------------------- asking
@@ -157,6 +160,10 @@ internal sealed class RelayMeter : IDisposable
     /// The way <see cref="DoorChoice"/> picks into <paramref name="relayId"/> from what was measured, with every way's
     /// reading - or null when the relay gave no ticket, is not being measured, or nothing answered within
     /// <see cref="FreshFor"/>.
+    ///
+    /// Each way's swing is counted over the calmest way into the same relay, measured in the same seconds (Jitter), or
+    /// what entry switching last saw of it on this network when that was more: five seconds of probes miss a swing now
+    /// and then, and the list would then show - and a connect start on - the road that swings.
     /// </summary>
     public (DoorPick Pick, IReadOnlyList<DoorReading> Readings)? Pick(string relayId)
     {
@@ -166,7 +173,13 @@ internal sealed class RelayMeter : IDisposable
             if (!_targets.TryGetValue(relayId, out var target) || target.Ticket is null) return null;
             if (now - target.LastAnswerAt > Ticks(FreshFor)) return null;
 
-            var readings = target.Ways.Select(w => w.Reading(now)).ToList();
+            var raw = target.Ways.Select(w => w.Reading(now)).ToList();
+            var excess = Jitter.OverCalmest(raw.Select(r => r.JitterMs).ToList());
+            var utcNow = DateTimeOffset.UtcNow;
+            var readings = raw.Select((r, i) => r with
+            {
+                JitterMs = _jitter is null ? excess[i] : _jitter.Floor(r.DoorId, excess[i], utcNow),
+            }).ToList();
             var pick = DoorChoice.Pick(readings);
             return pick.Door is null ? null : (pick, readings);
         }
@@ -513,7 +526,10 @@ internal sealed class RelayMeter : IDisposable
             }
         }
 
-        /// <summary>The median of the window's answers, and its loss over the probes old enough to have been answered.</summary>
+        /// <summary>
+        /// The median of the window's answers, its loss over the probes old enough to have been answered, and - in
+        /// <see cref="DoorReading.JitterMs"/> - its own spread, which <see cref="Pick"/> turns into the excess over the calmest way.
+        /// </summary>
         public DoorReading Reading(long now)
         {
             lock (_gate)
@@ -527,7 +543,7 @@ internal sealed class RelayMeter : IDisposable
                     : answered.Count % 2 == 1
                         ? answered[answered.Count / 2]
                         : (answered[answered.Count / 2 - 1] + answered[answered.Count / 2]) / 2;
-                return new DoorReading(DoorId, Direct, median, loss);
+                return new DoorReading(DoorId, Direct, median, loss, Jitter.Spread(answered));
             }
         }
 

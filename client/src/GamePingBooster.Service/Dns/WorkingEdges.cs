@@ -136,6 +136,15 @@ internal sealed class WorkingEdges
     private readonly Action<string, IReadOnlyList<IPAddress>>? _beforeProbe;
 
     /// <summary>
+    /// The tunnel's instance: told the name's own addresses that did not even take a connection, and the ones that did.
+    /// The caller decides whether the second set proves the tunnel works for the name (some of it must be routed) - then
+    /// the relay cannot reach the first, and their routes only black-hole them (see IUnblockRoutes.Withdraw). FPT,
+    /// 2026-10-11: 118.69.16.x, FPT's own Akamai cache, answers api/login.steampowered.com on the line and nothing from
+    /// Singapore.
+    /// </summary>
+    private readonly Action<string, IReadOnlyList<IPAddress>, IReadOnlyList<IPAddress>>? _unreachable;
+
+    /// <summary>
     /// Told the name when its own addresses took the connection and still nothing completed a handshake: the
     /// line is cutting it by name. Feeds the unblock report (UnblockReporter, trigger "filtered").
     /// </summary>
@@ -186,7 +195,8 @@ internal sealed class WorkingEdges
     public WorkingEdges(DohUpstream doh, Action<string> log, Action<string, IReadOnlyList<IPAddress>>? beforeProbe = null,
         Action<string>? onFiltered = null, Func<string, bool>? tunnelFirst = null, bool inCountry = false,
         bool preferPlayersNetwork = false, Memory? memory = null, CancellationToken background = default,
-        TimeSpan? keepFresh = null, Func<string, bool>? keepFreshFor = null)
+        TimeSpan? keepFresh = null, Func<string, bool>? keepFreshFor = null,
+        Action<string, IReadOnlyList<IPAddress>, IReadOnlyList<IPAddress>>? unreachable = null)
     {
         memory ??= new Memory();
         _known = memory.Known;
@@ -198,6 +208,7 @@ internal sealed class WorkingEdges
         _doh = doh;
         _log = log;
         _beforeProbe = beforeProbe;
+        _unreachable = unreachable;
         _onFiltered = onFiltered;
         _tunnelFirst = tunnelFirst;
         _keepFresh = keepFreshFor is null ? null : keepFresh;
@@ -262,12 +273,15 @@ internal sealed class WorkingEdges
     /// </summary>
     private async Task<IPAddress[]> KeepAsync(string name, IPAddress[] was, CancellationToken ct)
     {
-        var checks = was.Select(a => EdgeProber.WorksAsync(a, name, ct)).ToArray();
+        var connected = new bool[was.Length];
+        var checks = was.Select((a, i) => EdgeProber.WorksAsync(a, name, ct, () => connected[i] = true)).ToArray();
         var works = await Task.WhenAll(checks).ConfigureAwait(false);
         IPAddress[] still = [.. was.Where((_, i) => works[i])];
+        IPAddress[] noConnection = [.. was.Where((_, i) => !works[i] && !connected[i])];
 
         if (still.Length > 0)
         {
+            Unreachable(name, noConnection, still);
             var now = DateTimeOffset.UtcNow;
             _known[name] = new Entry(still, now.Add(_lifetime), now.Add(UsableFor));
             if (still.Length < was.Length)
@@ -279,9 +293,17 @@ internal sealed class WorkingEdges
         }
 
         var fresh = await ProbeAsync(name, null, ct, quiet: true).ConfigureAwait(false);
+        Unreachable(name, [.. noConnection.Except(fresh)], fresh);
         _log($"Unblock: kept {name} fresh - none of {string.Join(", ", was.Select(a => a.ToString()))} answered any more; " +
              (fresh.Length > 0 ? $"now {string.Join(", ", fresh.Select(a => a.ToString()))}." : "nothing else did either, relaying the upstream answer."));
         return fresh;
+    }
+
+    /// <summary>Tells <see cref="_unreachable"/> when something failed to connect and something else did.</summary>
+    private void Unreachable(string name, IReadOnlyList<IPAddress> failed, IReadOnlyList<IPAddress> reached)
+    {
+        if (_unreachable is null || failed.Count == 0 || reached.Count == 0) return;
+        _unreachable(name, failed, reached);
     }
 
     public long Probed => Interlocked.Read(ref _probed);
@@ -443,6 +465,8 @@ internal sealed class WorkingEdges
 
         var working = settled.Where(a => a.Task.Result.Works).ToArray();
         var bad = settled.Length - working.Length;
+        Unreachable(name, [.. settled.Where(a => a.Own && !a.Connected).Select(a => a.Address)],
+            [.. attempts.Where(a => a.Own && a.Connected).Select(a => a.Address)]);
         var abandoned = attempts.Count - settled.Length;
 
         // The name's own addresses whenever one of them works. A borrowed edge only proved that it

@@ -151,7 +151,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                 () => _tunnel is { } home ? AllGameUdpPackets(home) : null, _discoveryUploader.WhyNotSend, _discoveryUploader.Report, log);
         }
         _presence = new PresenceReporter(() => _config.LicenceUrl, () => _token, _device.Key, () => _config.ShareQuality, log);
-        _meter = new RelayMeter(MeterCredentials, log);
+        _meter = new RelayMeter(MeterCredentials, log, _jitter);
         if (_token is not null)
         {
             log($"Licence token loaded, expires {TokenStore.ExpiryOf(_token):u}.");
@@ -812,6 +812,13 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     /// <summary>Every way into the listed relays, timed through relayd with measurement tickets. See RelayMeter.</summary>
     private readonly RelayMeter _meter;
 
+    /// <summary>
+    /// The ways seen swinging on this network (Jitter): learnt by entry switching from minutes of probes in the lobby and
+    /// in matches, read by every choice that measures only for a second or two - the relay list, connect, the rescan
+    /// between matches and another tunnel's ways. One for the service's life; it forgets on another network.
+    /// </summary>
+    private readonly JitterMemory _jitter = new();
+
     /// <summary>Answers per way a list round waits for before it is shown, and the longest it waits.</summary>
     private const int ListAnswers = 3;
     private static readonly TimeSpan ListWait = TimeSpan.FromMilliseconds(1500);
@@ -1383,6 +1390,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     "the endpoints in the profile, and that the PSK matches.");
             }
 
+            RememberJitter(probes);
             var best = ChooseByEndToEnd(scored, target);
             best = await ChooseDoorAsync(best, probes, psk, ct).ConfigureAwait(false);
             var tunnel = await OpenChosenAsync(best, probes, psk, ct).ConfigureAwait(false);
@@ -1538,7 +1546,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             }
         }
 
-        // On the score, not the round trip alone: a way in that loses packets is no faster road (RelayLoss).
+        // On the score, not the round trip alone: a way in that loses packets, or swings, is no faster road (RelayLoss, Jitter).
+        RememberJitter(measured);
         var fastest = measured.MinBy(p => p.LegOneScore)!;
         if (ReferenceEquals(fastest, best) || best.LegOneScore - fastest.LegOneScore < GamePingBooster.Core.Quality.DoorSwitchPolicy.Margin(fastest.LegOneScore))
         {
@@ -1805,14 +1814,37 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         /// <summary>The pings of the burst that measured <see cref="LegOneMs"/>. Unknown - never lossy - when there was none.</summary>
         public PingLoss Loss { get; init; } = PingLoss.Unknown;
 
-        /// <summary>What a comparison ranks this path on: the round trip, plus the penalty when it loses packets.</summary>
-        public double? EndToEndScore => EndToEndMs is { } ms ? RelayLoss.Score(ms, Loss) : null;
+        /// <summary>The spread of the echoes that measured <see cref="EndToEndMs"/>, when there were enough (Jitter.Spread).</summary>
+        public double? SpreadMs { get; init; }
 
-        public double LegOneScore => RelayLoss.Score(LegOneMs, Loss);
+        /// <summary>
+        /// How much more this path swings than the calmest one compared with it, or than it was last seen to on this
+        /// network (JitterMemory) - set by the comparison, which knows what else was measured. Null when unknown.
+        /// </summary>
+        public double? JitterMs { get; set; }
+
+        /// <summary>What a comparison ranks this path on: the round trip, plus the penalties when it loses packets or swings.</summary>
+        public double? EndToEndScore => EndToEndMs is { } ms ? RelayLoss.Score(ms, Loss) + Jitter.Penalty(JitterMs) : null;
+
+        public double LegOneScore => RelayLoss.Score(LegOneMs, Loss) + Jitter.Penalty(JitterMs);
     }
 
-    /// <summary>", losing packets (lost 4 of 16 pings (25%))" for a lossy probe, "" otherwise.</summary>
-    private static string LossyNote(RelayProbe probe) => probe.Loss.IsLossy ? $", losing packets ({probe.Loss})" : "";
+    /// <summary>
+    /// ", losing packets (lost 4 of 16 pings (25%))" for a lossy probe, ", swinging 8 ms (counted 10 ms slower)" for one
+    /// that swings, both, or "".
+    /// </summary>
+    private static string LossyNote(RelayProbe probe) =>
+        (probe.Loss.IsLossy ? $", losing packets ({probe.Loss})" : "") + Jitter.Note(probe.JitterMs);
+
+    /// <summary>
+    /// Raises each probe's swing to what entry switching last saw of that way on this network: a connect measures each
+    /// way for a moment, and a way that swings in bursts may have been calm in it. See JitterMemory.
+    /// </summary>
+    private void RememberJitter(IEnumerable<RelayProbe> probes)
+    {
+        var now = DateTimeOffset.UtcNow;
+        foreach (var probe in probes) probe.JitterMs = _jitter.Floor(probe.Relay.Id, probe.JitterMs, now);
+    }
 
     /// <summary>
     /// What the chosen relay measured on the way to the game's datacentre, kept for the status.
@@ -2286,7 +2318,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     /// </summary>
     private void StartSpikeRecorder(CancellationToken ct)
     {
-        var recorder = new SpikeRecorder(() => SpikeContext(), _log, RequestDoorMove);
+        var recorder = new SpikeRecorder(() => SpikeContext(), _log, RequestDoorMove, _jitter);
         _recorder = recorder;
         _spikeRecorder = Task.Run(() => recorder.RunAsync(ct), ct);
     }

@@ -387,7 +387,7 @@ internal static partial class Program
         var open = new HashSet<IPAddress>();
         var inner = new SplitRoutes();
         var lines = new ConcurrentQueue<string>();
-        var guard = new LineGuard(inner, lines.Enqueue, () => open, () => now);
+        var guard = new LineGuard(inner, lines.Enqueue, () => open, () => now, () => new HashSet<IPAddress>());
         string Routed() => inner.Routed.IsEmpty ? "" : string.Join(", ", (IEnumerable<IPAddress>)inner.Routed.Last());
 
         guard.AnsweredForLine(cfentry, [Ip("100"), Ip("109"), Ip("127")]);
@@ -532,6 +532,7 @@ internal static partial class Program
         public HashSet<IPAddress> InTunnel { get; } = [];
         public bool Ready => true;
         public ConcurrentQueue<IPAddress[]> Routed { get; } = [];
+        public ConcurrentQueue<IPAddress[]> Withdrawn { get; } = [];
         public bool Route(string name, IReadOnlyList<IPAddress> addresses)
         {
             Names.Add(name);
@@ -539,6 +540,93 @@ internal static partial class Program
             return true;
         }
         public bool Tunnelled(IPAddress address) => InTunnel.Contains(address);
+        public void Withdraw(string name, IReadOnlyList<IPAddress> addresses, string why)
+        {
+            Withdrawn.Enqueue([.. addresses]);
+            InTunnel.ExceptWith(addresses);
+        }
+    }
+
+    /// <summary>
+    /// FPT, 2026-10-11: Steam was connected to its CMs over the line, every one of their addresses was "in use on the
+    /// line", and the old rule routed them all anyway - 3 s before PUBG asked Steam for a ticket, "failed to authenticate
+    /// with the external provider". Another program's established connection now keeps its address off the tunnel even
+    /// then; an address merely answered for the line, or still opening, is routed as before.
+    /// </summary>
+    private static void ALiveConnectionOverTheLineIsNeverRouted()
+    {
+        var tyo = IPAddress.Parse("45.121.184.100");
+        var sea = IPAddress.Parse("205.196.6.133");
+        var open = new HashSet<IPAddress> { tyo, sea };
+        var live = new HashSet<IPAddress> { tyo };
+        var inner = new SplitRoutes();
+        var lines = new ConcurrentQueue<string>();
+        var guard = new LineGuard(inner, lines.Enqueue, () => open, null, () => live);
+
+        var routed = guard.Route("cmp1-tyo3.steamserver.net", [tyo]);
+        Check("an address with another program's live connection is not routed, even as the name's only one",
+            !routed && inner.Routed.IsEmpty, string.Join(" | ", lines));
+        Check("and that is said", lines.Any(l => l.Contains("carries another program's live connection", StringComparison.Ordinal)),
+            string.Join(" | ", lines));
+
+        guard.Route("cmp2-sea1.steamserver.net", [sea]);
+        Check("an address only opening over the line (a cut handshake, say) is still routed as before",
+            inner.Routed.LastOrDefault() is [var only] && only.Equals(sea), string.Join(" | ", lines));
+
+        guard.Route("steam.example", [tyo, sea]);
+        Check("with every address in use, all but the live one are routed",
+            inner.Routed.Last().SequenceEqual([sea]), string.Join(", ", (IEnumerable<IPAddress>)inner.Routed.Last()));
+
+        inner.InTunnel.Add(tyo);
+        guard.Route("cmp1-tyo3.steamserver.net", [tyo]);
+        Check("a live connection already through the tunnel does not hold its address back",
+            inner.Routed.Last().SequenceEqual([tyo]), string.Join(" | ", lines));
+
+        // The table the guard reads: this process's own connections are not "another program's".
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        client.Connect((IPEndPoint)listener.LocalEndpoint);
+        using var server = listener.AcceptSocket();
+        var target = (IPEndPoint)listener.LocalEndpoint;
+        var row = TcpConnections.Established().FirstOrDefault(r => r.Remote.Equals(target));
+        Check("the established-connection table names this process as the owner of its own connection",
+            row.Remote is not null && row.Pid == (uint)Environment.ProcessId,
+            row.Remote is null ? "not found" : $"owner {row.Pid}, this process {Environment.ProcessId}");
+        listener.Stop();
+    }
+
+    /// <summary>
+    /// FPT, 2026-10-11: api.steampowered.com was routed with 118.69.16.229/.223 - FPT's own Akamai cache, which takes
+    /// no connection from Singapore - and the routes stayed for the whole connection. A probe through the tunnel that
+    /// finds some routed addresses dead while others connect THROUGH THE TUNNEL now takes those routes back; nothing is
+    /// taken back on the word of an address the guard kept on the line, nor from an address another program is using.
+    /// </summary>
+    private static void ARouteTheRelayCannotReachIsTakenBack()
+    {
+        IPAddress Ip(string text) => IPAddress.Parse(text);
+        var cache = Ip("118.69.16.229");
+        var akamai = Ip("23.35.148.145");
+        var line = Ip("118.69.16.206");
+        var inner = new SplitRoutes();
+        inner.InTunnel.UnionWith([cache, akamai]);
+        var live = new HashSet<IPAddress>();
+        var guard = new LineGuard(inner, _ => { }, () => new HashSet<IPAddress>(), null, () => live);
+
+        LocalResolver.TakeBackUnreachable(guard, "api.steampowered.com", [cache], [line]);
+        Check("an address that connected over the line proves nothing about the relay - nothing taken back",
+            inner.Withdrawn.IsEmpty, "withdrawn");
+
+        LocalResolver.TakeBackUnreachable(guard, "api.steampowered.com", [cache, line], [akamai]);
+        Check("a routed address that took no connection while another did through the tunnel is taken back",
+            inner.Withdrawn.LastOrDefault() is [var gone] && gone.Equals(cache),
+            inner.Withdrawn.IsEmpty ? "nothing" : string.Join(", ", (IEnumerable<IPAddress>)inner.Withdrawn.Last()));
+
+        inner.InTunnel.Add(cache);
+        live.Add(cache);
+        var before = inner.Withdrawn.Count;
+        LocalResolver.TakeBackUnreachable(guard, "api.steampowered.com", [cache], [akamai]);
+        Check("not while another program has an established connection to it", inner.Withdrawn.Count == before, "withdrawn");
     }
 
     /// <summary>

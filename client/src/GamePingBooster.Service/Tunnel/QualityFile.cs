@@ -309,7 +309,15 @@ internal sealed class QualityFile(Action<string> log)
         if (moved && onMeasured is { } measured) w.WriteString("socket", measured ? "measured" : "fresh");
         w.WriteString("from", decision.From);
         w.WriteString("to", decision.To);
-        w.WriteString("reason", decision.Return ? "return" : decision.Steady ? "steady" : "worse");
+        w.WriteString("reason", decision.Return ? "return" : decision.Steady ? "steady" : decision.Jitter ? "jitter" : "worse");
+        // For "jitter": how much more each way swung than the calmest way into the relay (DoorSwitchPolicy.WayJitter).
+        if (decision.Jitter)
+        {
+            w.WriteStartObject("jitterMs");
+            if (decision.FromJitterMs is { } fromJitter) w.WriteNumber("from", Math.Round(fromJitter, 1));
+            if (decision.ToJitterMs is { } toJitter) w.WriteNumber("to", Math.Round(toJitter, 1));
+            w.WriteEndObject();
+        }
         w.WriteNumber("windowSeconds", decision.WindowTicks / SpikeDetector.TicksPerSecond);
         w.WriteNumber("worseShare", Math.Round(decision.WorseShare, 2));
         w.WriteNumber("comparable", decision.Comparable);

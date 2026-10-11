@@ -156,7 +156,7 @@ internal sealed partial class TunnelEngine
         {
             WayChoice? choice = null;
             var (samples, socket) = await ProbeWaysKeepingAsync(other.Client.SessionId, ways, WayCheck.Rounds,
-                WayCheck.SpacingFor(ways.Count), measured => (choice = WayCheck.Choose(other.Way.Id, measured, other.LeftDoor)).MoveTo,
+                WayCheck.SpacingFor(ways.Count), measured => (choice = WayCheck.Choose(other.Way.Id, WithMemory(measured), other.LeftDoor)).MoveTo,
                 ct, own: other.Client, ownWay: other.Way.Id).ConfigureAwait(false);
             return (samples, choice!, socket);
         }
@@ -169,6 +169,16 @@ internal sealed partial class TunnelEngine
             _log($"  Could not measure the ways into {other.Way.Name} ({ex.Message}).");
             return null;
         }
+    }
+
+    /// <summary>
+    /// <paramref name="ways"/> with each way's swing raised to what entry switching last saw of it on this network, when
+    /// that was more: sixteen Probes over two seconds can fall between a swinging way's bursts.
+    /// </summary>
+    private List<WaySample> WithMemory(IReadOnlyList<WaySample> ways)
+    {
+        var now = DateTimeOffset.UtcNow;
+        return ways.Select(w => w with { JitterMs = _jitter.Floor(w.Id, w.JitterMs, now) }).ToList();
     }
 
     /// <summary>
@@ -267,6 +277,7 @@ internal sealed partial class TunnelEngine
             DrainOwn();
 
             var samples = new List<WaySample>(ways.Count);
+            var spreads = new List<double?>(ways.Count);
             lock (gate)
             {
                 for (var slot = 0; slot < ways.Count; slot++)
@@ -276,11 +287,15 @@ internal sealed partial class TunnelEngine
                     {
                         if (best[slot, r] is { } ms) answered.Add(ms);
                     }
+                    spreads.Add(Jitter.Spread(answered));
                     samples.Add(new WaySample(ways[slot].Id,
                         DoorSwitchPolicy.Stats(answered, rounds, rounds - answered.Count).P50,
                         new PingLoss(rounds, answered.Count)));
                 }
             }
+            // Each way's swing over the calmest one beside it, all measured in the same rounds (Jitter).
+            var excess = Jitter.OverCalmest(spreads);
+            samples = samples.Select((w, i) => w with { JitterMs = excess[i] }).ToList();
 
             var kept = keep(samples) is { } id && ways.FirstOrDefault(w => w.Id.Equals(id, StringComparison.OrdinalIgnoreCase)) is { } way
                 ? probes.Take(way.Id, way.Endpoint, sessionId)

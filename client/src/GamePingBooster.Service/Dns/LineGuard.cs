@@ -17,7 +17,12 @@ namespace GamePingBooster.Service.Dns;
 ///   - a TCP connection to it is open and not already through the tunnel - a route added now would move that flow
 ///     into the relay mid-way, where it dies. This catches flows older than the window and unclaimed names.
 /// Only some of a name's addresses are ever held: when all of them would be, all are routed as before - a listed name
-/// must still work on a line that cuts it (FPT). Nothing here ever withdraws a route.
+/// must still work on a line that cuts it (FPT) - except the ones another program has an ESTABLISHED connection to.
+/// Such a flow proves the line serves that address, and the route would kill it. FPT, 2026-10-11: Steam's live CM
+/// connections (cmp1-tyo3, cmp2-sea1, cmp1-lax1, ext1-maa2 - cut by name for TLS, but Steam was connected to them
+/// over the line) and its 118.69.16.x connections for api.steampowered.com were all routed 3 s before PUBG started,
+/// and PUBG said "failed to authenticate with the external provider" - the error Steam being offline gives.
+/// A route is taken back only through <see cref="Withdraw"/>, and never from an address with a live connection.
 /// </summary>
 internal sealed class LineGuard : IUnblockRoutes
 {
@@ -30,6 +35,7 @@ internal sealed class LineGuard : IUnblockRoutes
     private readonly IUnblockRoutes _inner;
     private readonly Action<string> _log;
     private readonly Func<IReadOnlySet<IPAddress>> _openRemotes;
+    private readonly Func<IReadOnlySet<IPAddress>> _liveRemotes;
     private readonly Func<DateTimeOffset> _now;
 
     /// <summary>Address -> the name it was answered for on the line, and until when it is held.</summary>
@@ -38,11 +44,12 @@ internal sealed class LineGuard : IUnblockRoutes
     private readonly ConcurrentDictionary<string, byte> _said = new();
 
     public LineGuard(IUnblockRoutes inner, Action<string> log, Func<IReadOnlySet<IPAddress>>? openRemotes = null,
-        Func<DateTimeOffset>? now = null)
+        Func<DateTimeOffset>? now = null, Func<IReadOnlySet<IPAddress>>? liveRemotes = null)
     {
         _inner = inner;
         _log = log;
         _openRemotes = openRemotes ?? TcpConnections.OpenRemotes;
+        _liveRemotes = liveRemotes ?? TcpConnections.LiveRemotesOfOthers;
         _now = now ?? (() => DateTimeOffset.UtcNow);
     }
 
@@ -94,6 +101,21 @@ internal sealed class LineGuard : IUnblockRoutes
 
         if (held.Count == addresses.Count)
         {
+            // Routed as before, all but the addresses another program is using over the line right now.
+            var live = _liveRemotes();
+            List<IPAddress> busy = [.. addresses.Where(a => live.Contains(a) && !_inner.Tunnelled(a))];
+            if (busy.Count == addresses.Count)
+            {
+                Say(name, $"Unblock: every address for {name} carries another program's live connection over the line - " +
+                          $"not routed through the tunnel, which would cut it; the line evidently serves them.");
+                return false;
+            }
+            if (busy.Count > 0)
+            {
+                Say(name, $"Unblock: every address for {name} is in use on the line - routed through the tunnel as before, " +
+                          $"except {string.Join(", ", busy)}, which another program has a live connection to over the line.");
+                return _inner.Route(name, [.. addresses.Except(busy)]);
+            }
             Say(name, $"Unblock: every address for {name} is in use on the line ({held[0].Why}) - routed through the tunnel as before.");
             return _inner.Route(name, addresses);
         }
@@ -104,6 +126,19 @@ internal sealed class LineGuard : IUnblockRoutes
         }
         var keep = held.Select(h => h.Address).ToHashSet();
         return _inner.Route(name, [.. addresses.Where(a => !keep.Contains(a))]);
+    }
+
+    /// <summary>
+    /// Passed on without any address another program has an established connection to: that flow would die with the
+    /// route. One still opening is not spared - through a tunnel that cannot reach the address it is waiting for nothing,
+    /// and is exactly what the withdrawal is for.
+    /// </summary>
+    public void Withdraw(string name, IReadOnlyList<IPAddress> addresses, string why)
+    {
+        if (!_inner.Ready || addresses.Count == 0) return;
+        var live = _liveRemotes();
+        List<IPAddress> free = [.. addresses.Where(a => !live.Contains(a))];
+        if (free.Count > 0) _inner.Withdraw(name, free, why);
     }
 
     private void Say(string key, string line)

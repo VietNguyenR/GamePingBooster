@@ -244,17 +244,28 @@ internal sealed partial class TunnelEngine
                 return;
             }
 
-            // Compared on the score: the round trip, plus the penalty for a path losing packets (RelayLoss).
-            var hereScore = RelayLoss.Score(hereMs, hereLoss);
+            // Compared on the score: the round trip, plus the penalties for a path losing packets (RelayLoss) and for one
+            // that swings more than the calmest path measured with it, or than it was last seen to here (Jitter). The
+            // median alone moved FPT players onto vn-2 between matches all evening on 2026-10-10: 38 ms against a steady
+            // 42, and a match that swung 38 to 60.
+            var hereJitter = JudgeJitter(current.Id, Jitter.Spread(hereSamples.OfType<double>()), probes);
+            var hereScore = RelayLoss.Score(hereMs, hereLoss) + Jitter.Penalty(hereJitter);
             var best = probes.Where(p => p.EndToEndMs is not null).MinBy(p => p.EndToEndScore!.Value);
             if (best is null || (!forGame && !RescanScore.WorthMoving(hereScore, best.EndToEndScore!.Value)))
             {
                 _log(best is null
                     ? $"Between matches: no other relay could be measured - staying on {current.Name}."
-                    : $"Between matches: staying on {current.Name} at {hereMs:F0} ms{(hereLoss.IsLossy ? ", losing packets" : "")} - " +
-                      $"the best other path, {best.Relay.Name} [{best.Relay.Id}] at {best.EndToEndMs!.Value:F0} ms" +
-                      $"{(best.Loss.IsLossy ? ", losing packets" : "")}, is not better by {RelayPaths.HelpMargin(hereScore):F0} ms or more.");
+                    : $"Between matches: staying on {current.Name} at {hereMs:F0} ms{(hereLoss.IsLossy ? ", losing packets" : "")}" +
+                      $"{Jitter.Note(hereJitter)} - the best other path, {best.Relay.Name} [{best.Relay.Id}] at " +
+                      $"{best.EndToEndMs!.Value:F0} ms{(best.Loss.IsLossy ? ", losing packets" : "")}{Jitter.Note(best.JitterMs)}, " +
+                      $"is not better by {RelayPaths.HelpMargin(hereScore):F0} ms or more.");
                 return;
+            }
+            if (!forGame && Jitter.Penalty(hereJitter) > Jitter.Penalty(best.JitterMs))
+            {
+                _log($"Between matches: {current.Name} swings ({hereMs:F0} ms{Jitter.Note(hereJitter)}) and " +
+                     $"{best.Relay.Name} [{best.Relay.Id}] is steadier - moving at {best.EndToEndMs!.Value:F0} ms" +
+                     $"{Jitter.Note(best.JitterMs)}.");
             }
             if (!forGame && hereLoss.IsLossy && !best.Loss.IsLossy)
             {
@@ -306,6 +317,19 @@ internal sealed partial class TunnelEngine
                 probe.Client = null;
             }
         }
+    }
+
+    /// <summary>
+    /// Sets each probe's <see cref="RelayProbe.JitterMs"/> - its echoes' spread over the calmest path measured in this
+    /// round, the way in use included, or what JitterMemory holds for that way when more - and returns the same for the
+    /// way in use, <paramref name="hereId"/>, whose spread was <paramref name="hereSpread"/>.
+    /// </summary>
+    private double? JudgeJitter(string hereId, double? hereSpread, List<RelayProbe> probes)
+    {
+        var excess = Jitter.OverCalmest([hereSpread, .. probes.Select(p => p.SpreadMs)]);
+        var now = DateTimeOffset.UtcNow;
+        for (var i = 0; i < probes.Count; i++) probes[i].JitterMs = _jitter.Floor(probes[i].Relay.Id, excess[i + 1], now);
+        return _jitter.Floor(hereId, excess[0], now);
     }
 
     /// <summary>True, and says so, once the game has sent UDP into the tunnel since the gap began.</summary>
@@ -376,7 +400,10 @@ internal sealed partial class TunnelEngine
                 ? $"  {way.Name} [{way.Id}]: {legOne:F0} ms to the relay, {ms:F0} ms to {path.RegionName}"
                 : $"  {way.Name} [{way.Id}]: {legOne:F0} ms to the relay, too few answers from {path.RegionName} to compare") +
                 RelayLoss.Note(loss));
-            return new RelayProbe(way, legOne, median) { Client = client, Loss = loss };
+            return new RelayProbe(way, legOne, median)
+            {
+                Client = client, Loss = loss, SpreadMs = Jitter.Spread(samples.OfType<double>()),
+            };
         }
         catch (OperationCanceledException)
         {

@@ -3,13 +3,16 @@ namespace GamePingBooster.Core.Quality;
 /// <summary>
 /// One way into a relay as the relay list measured it: relayd's round trip down that way, the median of the last
 /// few seconds, and how many of its probes went unanswered. <see cref="Direct"/> is the relay's own address, not an entry.
+/// <see cref="JitterMs"/> is how much more it swings than the calmest way measured with it (<see cref="Jitter"/>), or null.
 /// </summary>
-public sealed record DoorReading(string DoorId, bool Direct, double? MedianMs, PingLoss Loss)
+public sealed record DoorReading(string DoorId, bool Direct, double? MedianMs, PingLoss Loss, double? JitterMs = null)
 {
-    /// <summary>What the rule ranks on: the median, plus the loss penalty. Null when nothing answered.</summary>
-    public double? Score => MedianMs is { } ms ? RelayLoss.Score(ms, Loss) : null;
+    /// <summary>What the rule ranks on: the median, plus the loss and jitter penalties. Null when nothing answered.</summary>
+    public double? Score => MedianMs is { } ms ? RelayLoss.Score(ms, Loss) + Jitter.Penalty(JitterMs) : null;
 
-    public override string ToString() => MedianMs is { } ms ? $"{DoorId} {ms:F0} ms{RelayLoss.Note(Loss)}" : $"{DoorId} no answer";
+    public override string ToString() => MedianMs is { } ms
+        ? $"{DoorId} {ms:F0} ms{RelayLoss.Note(Loss)}{Jitter.Note(JitterMs)}"
+        : $"{DoorId} no answer";
 }
 
 /// <summary>What <see cref="DoorChoice.Pick"/> decided: the way to use, or null when none answered, and the line for the log.</summary>
@@ -30,6 +33,9 @@ public sealed record DoorPick(DoorReading? Door, string Reason);
 /// best-of-three. The 10 ms "worse" bar is for a lag in progress and kept players 6-9 ms slower than an entry beside
 /// them (pubg-relay-selection-gaps, 2026-10-07). Ties go to the relay's own address: an entry is a detour, and one
 /// more box that can fail.
+///
+/// Ranked on the score, so a way that swings counts slower than its median (<see cref="Jitter"/>, since 2026-10-11): the
+/// list put FPT players on vn-2-sg5 at a 49 ms median against sg-5's steady 59, and the match swung 38 to 60.
 ///
 /// Pure: numbers in, a decision out.
 /// </summary>

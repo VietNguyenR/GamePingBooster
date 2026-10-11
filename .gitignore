@@ -110,3 +110,4 @@ tools/Watch-LobbyPath.ps1
 relay/cmd/lobbyproxy/main_test.go
 relay/cmd/lobbyproxy/main.go
 relay/deploy/lobbyproxy.service
+profiles/fortnite-vn.json

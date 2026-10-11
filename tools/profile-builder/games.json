@@ -268,6 +268,22 @@
       "azureRegions": [],
       "asns": [],
       "note": "Captured 2026-10-05, one session: gameplay is UDP 21144 to a single address, 18.166.237.178 (16100 pkts / 538 s = 30/s), AWS ap-east-1 (Hong Kong, 18.166.0.0/15). Declared as ap-east-1 only; no ASN on purpose (AS16509 would admit every Amazon region). TCP seen but never routed: 3.40.136.182:15223, 99.81.255.166:11000, 54.229.157.171:10010 are eu-west-1 (Ireland), 98.85.38.9:8095/9000 us-east-1 - backend/telemetry, not gameplay; 125.235.36.x and 171.236.61.21 are Vietnamese CDN. Only one match captured: capture more matches before trusting the /20 around it."
+    },
+
+    "fortnite": {
+      "name": "Fortnite",
+      "watchProcess": "FortniteClient-Win64-Shipping",
+      "probePort": null,
+      "observedPath": "observed-fortnite.txt",
+      "landmarkPath": null,
+      "tcpSessionsPath": "tcp-sessions-fortnite.txt",
+      "unverifiedPath": "observed-fortnite-unverified.txt",
+      "manualCidrPath": "manual-cidrs-fortnite.txt",
+      "profilePath": "../../profiles/fortnite-vn.json",
+      "awsRegions": ["ap-southeast-1", "ap-east-1", "ap-northeast-1", "ap-northeast-2"],
+      "azureRegions": [],
+      "asns": [],
+      "note": "Not captured yet (declared 2026-10-10). Epic hosts match servers mostly on AWS; the four Asian regions are a guess to be narrowed after the first captures, as with fc27. An address outside them (Google Cloud, another AWS region) lands in observed-fortnite-unverified.txt for a person to look at - it is not routed. No ASN on purpose: Epic's own ranges would also carry its launcher and store. No datacentre probe port known, so no landmarks."
     }
   }
 }

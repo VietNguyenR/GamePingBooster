@@ -118,6 +118,10 @@ internal static partial class Program
         DoorChoiceChecks();
 
         Console.WriteLine();
+        Console.WriteLine("Paths that swing (Jitter):");
+        JitterChecks();
+
+        Console.WriteLine();
         Console.WriteLine("Which edges the unblock resolver probes and hands out (EdgeRanking):");
         EdgeRankingChecks();
 
