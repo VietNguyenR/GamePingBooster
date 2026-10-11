@@ -444,6 +444,22 @@ internal sealed class RouteManager
         }
     }
 
+    /// <summary>
+    /// Removes some of the unblock resolver's host routes - only ones it holds, so a game or lobby route for the same
+    /// prefix stays. Returns the prefixes removed.
+    /// </summary>
+    public List<string> RemoveUnblockRoutes(uint tunInterfaceIndex, IEnumerable<string> hostRoutes)
+    {
+        lock (_unblockPrefixes)
+        {
+            List<string> gone = [.. hostRoutes.Distinct().Where(_unblockPrefixes.Contains)];
+            if (gone.Count == 0) return gone;
+            DeleteRoutes(gone, tunInterfaceIndex);
+            _unblockPrefixes.RemoveAll(gone.Contains);
+            return gone;
+        }
+    }
+
     /// <summary>Removes the unblock resolver's host routes.</summary>
     public void RemoveUnblockRoutes(uint tunInterfaceIndex)
     {

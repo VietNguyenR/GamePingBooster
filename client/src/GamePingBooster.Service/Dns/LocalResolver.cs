@@ -122,7 +122,8 @@ internal sealed class LocalResolver : IAsyncDisposable
             // Routed before they are probed, so the probe crosses the tunnel the way the program's connection will.
             _tunnelEdges = new WorkingEdges(_doh, log, beforeProbe: (name, addresses) => routes.Route(name, addresses),
                 preferPlayersNetwork: true, memory: memory?.Tunnel, background: _stopping.Token,
-                keepFresh: TunnelKeepFresh, keepFreshFor: name => _policy.ClaimedBy(name)?.RoutesThroughTunnel(name) == true);
+                keepFresh: TunnelKeepFresh, keepFreshFor: name => _policy.ClaimedBy(name)?.RoutesThroughTunnel(name) == true,
+                unreachable: (name, failed, reached) => TakeBackUnreachable(routes, name, failed, reached));
             if (split)
             {
                 _split = new SplitProxy(_doh, routes, log, memory?.Split)
@@ -141,6 +142,23 @@ internal sealed class LocalResolver : IAsyncDisposable
     /// dead one waits on it for seconds before trying the next. See WorkingEdges._keepFresh.
     /// </summary>
     internal static readonly TimeSpan TunnelKeepFresh = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// A probe through the tunnel found some of a name's routed addresses taking no connection while others did: the
+    /// relay cannot reach those, so their routes come off - see IUnblockRoutes.Withdraw. Only when what connected went
+    /// through the tunnel too: an address the guard kept on the line connecting proves nothing about the relay, and a
+    /// tunnel that briefly carries nothing must not send a cut name's edges back to the line. Internal for TunnelCheck.
+    /// </summary>
+    internal static void TakeBackUnreachable(IUnblockRoutes routes, string name, IReadOnlyList<IPAddress> failed,
+        IReadOnlyList<IPAddress> reached)
+    {
+        var viaTunnel = reached.Where(routes.Tunnelled).Take(3).ToArray();
+        if (viaTunnel.Length == 0) return;
+        List<IPAddress> routed = [.. failed.Where(routes.Tunnelled)];
+        if (routed.Count == 0) return;
+        routes.Withdraw(name, routed,
+            $"they took no connection on 443 through the relay, while {string.Join(", ", (IEnumerable<IPAddress>)viaTunnel)} did");
+    }
 
     /// <summary>Steam names the line cuts that the split proxy carries - see UnblockApp.SplitsBeforeTunnel.</summary>
     private readonly ConcurrentDictionary<string, byte> _splitFirst = new(StringComparer.Ordinal);

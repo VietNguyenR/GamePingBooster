@@ -24,7 +24,11 @@ internal static partial class TcpConnections
 
     // MIB_TCP_STATE_*: 2 is LISTEN, 3 SYN_SENT ... 10 LAST_ACK, 11 TIME_WAIT, 12 DELETE_TCB.
     private const uint StateListen = 2;
+    private const uint StateEstablished = 5;
     private const uint StateTimeWait = 11;
+
+    private const uint AfInet = 2;
+    private const int TcpTableOwnerPidAll = 5;
     private const uint StateDeleteTcb = 12;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -39,11 +43,17 @@ internal static partial class TcpConnections
         public readonly override string ToString() =>
             $"{new IPAddress(LocalAddress)}:{Port(LocalPort)} -> {new IPAddress(RemoteAddress)}:{Port(RemotePort)}";
 
+        public readonly int RemotePortNumber => Port(RemotePort);
+
         private static int Port(uint raw) => (int)(((raw & 0xFF) << 8) | ((raw >> 8) & 0xFF));
     }
 
     [LibraryImport(Dll)]
     private static partial uint GetTcpTable(nint table, ref uint size, [MarshalAs(UnmanagedType.Bool)] bool order);
+
+    [LibraryImport(Dll)]
+    private static partial uint GetExtendedTcpTable(nint table, ref uint size, [MarshalAs(UnmanagedType.Bool)] bool order,
+        uint addressFamily, int tableClass, uint reserved);
 
     [LibraryImport(Dll)]
     private static partial uint SetTcpEntry(in Row row);
@@ -64,6 +74,67 @@ internal static partial class TcpConnections
     /// cannot be read.
     /// </summary>
     public static HashSet<IPAddress> OpenRemotes() => [.. Open(_ => true).Select(row => new IPAddress(row.RemoteAddress))];
+
+    /// <summary>
+    /// The remote address of every ESTABLISHED connection owned by another process - a flow some program is using
+    /// right now, not one still opening or closing, and not this service's own (the split proxy, the probes). Empty
+    /// when the table cannot be read.
+    ///
+    /// Why established and someone else's: LineGuard treats such a connection as proof the line serves that address.
+    /// FPT, 2026-10-11: Steam held its CM connections (cmp1-tyo3, cmp2-sea1, ...) over the line, the resolver routed
+    /// those addresses into the tunnel 3 s before PUBG started, and PUBG said "failed to authenticate with the external
+    /// provider" - Steam was reconnecting to its CM when the game asked it for a ticket.
+    /// </summary>
+    public static HashSet<IPAddress> LiveRemotesOfOthers()
+    {
+        var self = (uint)Environment.ProcessId;
+        return [.. Established().Where(row => row.Pid != self).Select(row => row.Remote.Address)];
+    }
+
+    /// <summary>
+    /// Every ESTABLISHED IPv4 connection with the process that owns it (GetExtendedTcpTable, TCP_TABLE_OWNER_PID_ALL).
+    /// Empty when the table cannot be read. Internal for TunnelCheck.
+    /// </summary>
+    internal static List<(IPEndPoint Remote, uint Pid)> Established()
+    {
+        var result = new List<(IPEndPoint Remote, uint Pid)>();
+        uint size = 0;
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            var buffer = size == 0 ? 0 : Marshal.AllocHGlobal((int)size);
+            try
+            {
+                var error = GetExtendedTcpTable(buffer, ref size, order: false, AfInet, TcpTableOwnerPidAll, 0);
+                if (error == ErrorInsufficientBuffer) continue;
+                if (error != NoError || buffer == 0) return result;
+
+                // MIB_TCPROW_OWNER_PID: six DWORDs - state, local address, local port, remote address, remote port, pid.
+                var count = Marshal.ReadInt32(buffer);
+                for (var i = 0; i < count; i++)
+                {
+                    var at = 4 + i * 24;
+                    if ((uint)Marshal.ReadInt32(buffer, at) != StateEstablished) continue;
+                    var remote = new Row { RemotePort = (uint)Marshal.ReadInt32(buffer, at + 16) };
+                    result.Add((new IPEndPoint(new IPAddress((uint)Marshal.ReadInt32(buffer, at + 12)), remote.RemotePortNumber),
+                        (uint)Marshal.ReadInt32(buffer, at + 20)));
+                }
+                return result;
+            }
+            catch (Exception) when (attempt < 3)
+            {
+                // As in Open: try once more, then give up.
+            }
+            catch (Exception)
+            {
+                return result;
+            }
+            finally
+            {
+                if (buffer != 0) Marshal.FreeHGlobal(buffer);
+            }
+        }
+        return result;
+    }
 
     private static List<Row> Open(Func<Row, bool> wanted)
     {

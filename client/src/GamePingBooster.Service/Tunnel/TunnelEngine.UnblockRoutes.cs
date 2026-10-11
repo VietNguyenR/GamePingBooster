@@ -60,6 +60,28 @@ internal sealed partial class TunnelEngine : IUnblockRoutes
         }
     }
 
+    public void Withdraw(string name, IReadOnlyList<IPAddress> addresses, string why)
+    {
+        var adapter = _adapter;
+        var routes = _routes;
+        if (!Ready || adapter is null || routes is null || addresses.Count == 0) return;
+
+        List<string> prefixes = [.. addresses
+            .Where(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+            .Select(a => $"{a}/32")];
+        try
+        {
+            var gone = routes.RemoveUnblockRoutes(adapter.InterfaceIndex, prefixes);
+            if (gone.Count == 0) return;
+            lock (_unblockWanted) _unblockWanted.ExceptWith(gone);
+            _log($"Unblock: took {string.Join(", ", gone)} back off the tunnel for {name} - {why}.");
+        }
+        catch (Exception ex)
+        {
+            _log($"Unblock: could not take {name}'s unreachable routes off the tunnel: {ex.Message}");
+        }
+    }
+
     /// <summary>
     /// Asks the live routing table rather than this engine's own /32 sets, which would miss game ranges and region
     /// routes. RouteManager.GetRouteTo is no use here: it only ever names a physical gateway.

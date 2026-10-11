@@ -34,4 +34,12 @@ internal interface IUnblockRoutes
     /// one name would carry another name's 12 MB through the relay.
     /// </summary>
     bool Tunnelled(IPAddress address);
+
+    /// <summary>
+    /// Takes back the unblock routes for <paramref name="addresses"/> - only those, never a game, lobby or region route:
+    /// the relay cannot reach them while it reaches the name's other edges, so the route only black-holes them. FPT,
+    /// 2026-10-11: api/login.steampowered.com were routed with 118.69.16.x, FPT's own in-network Akamai cache, which
+    /// answers nothing from Singapore - and Steam's next connections to it hung. Nothing for an address not routed.
+    /// </summary>
+    void Withdraw(string name, IReadOnlyList<IPAddress> addresses, string why) { }
 }
