@@ -183,6 +183,72 @@ function Get-AppExe {
     Join-Path $client 'src\GamePingBooster.App\bin\Debug\net9.0-windows\win-x64\GamePingBooster.exe'
 }
 
+# Code signing for `installer`. Off unless GPB_SIGN_THUMBPRINT names the certificate, so a
+# contributor without one still builds. The release workflow sets it and GPB_REQUIRE_SIGNED=1,
+# which turns "no certificate" from a warning into a failure: a release never ships unsigned by
+# accident.
+#
+# The certificate is Certum's cloud one: the key stays in Certum's HSM and SimplySign Desktop
+# mounts a certificate for it in CurrentUser\My while it is logged in. Not in the store means not
+# logged in, and signtool would then fail one file at a time with an error naming neither.
+function Get-SigningSetup {
+    $thumb = "$env:GPB_SIGN_THUMBPRINT".Trim().ToUpperInvariant()
+    if (-not $thumb) {
+        if ($env:GPB_REQUIRE_SIGNED -eq '1') {
+            throw "GPB_REQUIRE_SIGNED=1 but GPB_SIGN_THUMBPRINT is empty - refusing to build an unsigned installer."
+        }
+        return $null
+    }
+
+    $cert = Get-ChildItem Cert:\CurrentUser\My -ErrorAction SilentlyContinue |
+        Where-Object { $_.Thumbprint -eq $thumb } | Select-Object -First 1
+    if (-not $cert) {
+        throw "Signing certificate $thumb is not in CurrentUser\My. Log in to SimplySign Desktop " +
+              "(email + the code from the phone app) and run this again."
+    }
+    if ($cert.NotAfter -lt (Get-Date)) {
+        throw "Signing certificate $thumb expired on $($cert.NotAfter.ToString('yyyy-MM-dd'))."
+    }
+
+    # Not on PATH on a normal PC. The newest Windows Kit wins; x64 always, because SimplySign's
+    # virtual card driver is 64-bit.
+    $signtool = $env:GPB_SIGNTOOL
+    if (-not $signtool) {
+        $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending -ErrorAction SilentlyContinue |
+            Select-Object -First 1 -ExpandProperty FullName
+    }
+    if (-not $signtool -or -not (Test-Path $signtool)) {
+        throw "signtool.exe not found. Install the Windows SDK, or set GPB_SIGNTOOL to its path."
+    }
+
+    [pscustomobject]@{
+        Thumbprint = $thumb
+        Subject    = $cert.Subject
+        SignTool   = $signtool
+        # Shared by signtool here and by Inno's SignTool line, so both sign the same way.
+        Args       = "sign /sha1 $thumb /fd sha256 /tr http://time.certum.pl /td sha256"
+    }
+}
+
+function Invoke-Sign($signing, [string[]]$files) {
+    foreach ($f in $files) {
+        & $signing.SignTool ($signing.Args -split ' ') /q $f
+        if ($LASTEXITCODE -ne 0) { throw "signtool failed on $f" }
+        Assert-Signed $signing $f
+    }
+}
+
+# Status Valid AND our certificate: Valid alone would also accept a file someone else signed.
+function Assert-Signed($signing, [string]$file) {
+    $sig = Get-AuthenticodeSignature $file
+    if ($sig.Status -ne 'Valid') { throw "$file signature is '$($sig.Status)', expected Valid." }
+    if ($sig.SignerCertificate.Thumbprint -ne $signing.Thumbprint) {
+        throw "$file is signed by $($sig.SignerCertificate.Thumbprint), expected $($signing.Thumbprint)."
+    }
+    if (-not $sig.TimeStamperCertificate) { throw "$file has no timestamp - it would stop verifying when the certificate expires." }
+}
+
 # Every profile the installer ships, read from the .iss itself rather than listed again here, so a
 # game added there comes along everywhere without anyone having to remember to.
 #
@@ -1048,6 +1114,11 @@ switch ($Verb.ToLowerInvariant()) {
             Say "Version $version - pass one to change it: .\gpb.ps1 installer 0.2.0"
         }
 
+        # Before the build, so a SimplySign that is not logged in fails in seconds rather than
+        # after the whole AOT publish.
+        $signing = Get-SigningSetup
+        if ($signing) { Say "Signing with $($signing.Subject)" }
+
         # Publish first. Packaging whatever happens to be lying in the publish folder is how an
         # installer ends up shipping last week's binary, and nothing about the result would say
         # so.
@@ -1085,14 +1156,33 @@ switch ($Verb.ToLowerInvariant()) {
         # version resource is four numbers and nothing else. Splitting here rather than in the
         # .iss because Inno's preprocessor has no string split worth reading.
         $numeric = ($version -split '-')[0]
-        & $iscc "/DAppVersion=$version" "/DAppVersionNumeric=$numeric" (Join-Path $root 'installer\GamePingBooster.iss')
+        $isccArgs = @("/DAppVersion=$version", "/DAppVersionNumeric=$numeric")
+        if ($signing) {
+            # Our own two executables, signed in the publish folder so the installer packs the
+            # signed copies. Not the DLLs beside them: wintun.dll is WireGuard's signature, and
+            # Skia/HarfBuzz/ANGLE are third-party binaries we did not write.
+            Say "Signing the service and the UI"
+            Invoke-Sign $signing @($required['the service'], $required['the UI'])
+
+            # Inno signs the setup .exe and the uninstaller it embeds. /S defines the tool the
+            # .iss names with SignTool=gpbsign; $q is a quote, $f the file Inno is signing.
+            $isccArgs += "/DSignInstaller"
+            $isccArgs += "/Sgpbsign=`$q$($signing.SignTool)`$q $($signing.Args) /q `$f"
+        }
+        & $iscc @isccArgs (Join-Path $root 'installer\GamePingBooster.iss')
         if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
 
         $out = Join-Path $root 'installer\dist'
+        $setup = Join-Path $out "GamePingBooster-Setup-$version.exe"
         Say "Installer written to $out" 'Green'
         Say "  GamePingBooster-Setup-$version.exe" 'Green'
-        Warn "It is NOT code signed. Windows SmartScreen will warn every person who runs it,"
-        Warn "and many will stop there. Signing needs a certificate you have to buy."
+        if ($signing) {
+            Assert-Signed $signing $setup
+            Say "Signed and timestamped: setup, uninstaller, gpb-service.exe, GamePingBooster.exe" 'Green'
+        } else {
+            Warn "It is NOT code signed (GPB_SIGN_THUMBPRINT is not set). Windows SmartScreen and"
+            Warn "Defender treat an unsigned installer far more harshly. Fine for a local test build."
+        }
     }
 
     'entry' {

@@ -24,7 +24,14 @@
       - Verify the tag is reachable from main  the tag does not exist yet; ./gpb release checks main itself
       - Install Inno Setup                      installs software; the local Inno Setup 6 is used
       - Create GitHub Release                   publishes
-    `uses:` steps (checkout, setup-dotnet, setup-go) are the local toolchain instead.
+    `uses:` steps (checkout, setup-dotnet, setup-go, the Certum login) are the local toolchain instead.
+
+    A step's env: is reproduced, with two expressions: ${{ env.NAME }} (the workflow's env:) and
+    ${{ steps.<id>.outputs.<name> }}, which is empty here because the uses: step that would set it
+    is not run. Signing is never rehearsed: the GPB_SIGN*/GPB_REQUIRE_SIGNED variables are dropped and
+    the line says so. CI signs with its own Certum login, which a local build cannot reproduce, and a
+    rehearsal that signed would spend 4 of the certificate's signings (Certum caps them at 5000 a month)
+    and need the phone code before every release, for files that are thrown away.
 
     It is strict on purpose. A step with a key, a shell or an expression this file does not know how
     to rehearse fails the rehearsal and says what to teach it, rather than being run approximately.
@@ -107,7 +114,7 @@ while ($i -lt $lines.Count) {
     $l = $lines[$i]
     if ($l -notmatch '^(\s*)- name:\s*(.+?)\s*$') { $i++; continue }
     $itemIndent = $Matches[1].Length
-    $step = [ordered]@{ Name = $Matches[2].Trim('"', "'"); Uses = $null; Run = $null; Env = $false; Other = @() }
+    $step = [ordered]@{ Name = $Matches[2].Trim('"', "'"); Uses = $null; Run = $null; Env = $null; Other = @() }
     $keyIndent = $itemIndent + 2
     $i++
     while ($i -lt $lines.Count) {
@@ -126,7 +133,14 @@ while ($i -lt $lines.Count) {
         switch ($key) {
             'uses' { $step.Uses = $value.Trim() }
             'with' { }
-            'env' { $step.Env = $true }
+            'env' {
+                $step.Env = [ordered]@{}
+                foreach ($b in $body) {
+                    if (IsBlankOrComment $b) { continue }
+                    if ($b -notmatch '^\s+([A-Za-z_][A-Za-z0-9_]*):\s*(.*?)\s*$') { throw "release.yml, step '$($step.Name)': env: line not understood: $b" }
+                    $step.Env[$Matches[1]] = $Matches[2].Trim('"', "'")
+                }
+            }
             'run' {
                 if ($value.Trim() -ne '|') { throw "release.yml, step '$($step.Name)': run: must be a literal block (run: |)." }
                 while ($body.Count -gt 0 -and $body[$body.Count - 1].Trim() -eq '') { $body.RemoveAt($body.Count - 1) }
@@ -147,6 +161,18 @@ foreach ($name in $skipped.Keys) {
 }
 
 # ------------------------------------------------------------------ run it
+
+# The two expressions a step's env: may use; anything else fails the rehearsal by name.
+function Resolve-StepValue([string]$stepName, [string]$value) {
+    $evaluator = [System.Text.RegularExpressions.MatchEvaluator] {
+        param($m)
+        $e = $m.Groups[1].Value
+        if ($e -match '^env\.([A-Za-z_][A-Za-z0-9_]*)$') { return [string]$stepEnv[$Matches[1]] }
+        if ($e -match '^steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+$') { return '' }
+        throw "Step '$stepName' uses the expression `${{ $e }} in env:, which this rehearsal cannot evaluate. Teach $PSCommandPath."
+    }
+    return [regex]::Replace($value, '\$\{\{\s*(.*?)\s*\}\}', $evaluator)
+}
 
 $shellExe = (Get-Command $Shell -ErrorAction SilentlyContinue).Source
 if (-not $shellExe) {
@@ -181,8 +207,15 @@ try {
         if ($step.Other.Count -gt 0) {
             throw "Step '$($step.Name)' uses $($step.Other -join ', '), which this rehearsal does not know how to reproduce. Teach $PSCommandPath."
         }
+        # This step's own env:, on top of the job's, for this step only.
+        $ownEnv = [ordered]@{}
+        $note = ''
         if ($step.Env) {
-            throw "Step '$($step.Name)' sets env:, which this rehearsal does not reproduce. Teach $PSCommandPath."
+            foreach ($k in $step.Env.Keys) { $ownEnv[$k] = Resolve-StepValue $step.Name $step.Env[$k] }
+            if ($ownEnv.Contains('GPB_SIGN_THUMBPRINT')) {
+                foreach ($k in 'GPB_SIGN_THUMBPRINT', 'GPB_REQUIRE_SIGNED', 'GPB_SIGNTOOL') { $ownEnv.Remove($k) }
+                $note = ' (unsigned on purpose - CI signs)'
+            }
         }
 
         $script = $step.Run.Replace('${{ github.ref_name }}', $Tag).Replace('${{ github.repository }}', $Repository)
@@ -197,6 +230,7 @@ try {
         [System.IO.File]::WriteAllText($file, $wrapped, (New-Object System.Text.UTF8Encoding($true)))
 
         foreach ($k in $stepEnv.Keys) { Set-Item -Path "env:$k" -Value $stepEnv[$k] }
+        foreach ($k in $ownEnv.Keys) { Set-Item -Path "env:$k" -Value $ownEnv[$k] }
 
         Write-Host -NoNewline $label
         LogText "`r`n==== step: $($step.Name)`r`n"
@@ -210,6 +244,8 @@ try {
             -WorkingDirectory $root -NoNewWindow -Wait -PassThru `
             -RedirectStandardOutput $out -RedirectStandardError $err
         $code = $proc.ExitCode
+        # A step's env: is that step's alone; this process starts the next step too.
+        foreach ($k in $ownEnv.Keys) { if (-not $stepEnv.Contains($k)) { Remove-Item -Path "env:$k" -ErrorAction SilentlyContinue } }
         foreach ($f in $out, $err) { if (Test-Path $f) { LogText ([System.IO.File]::ReadAllText($f)) } }
         if ($code -ne 0) {
             Line "FAILED (exit $code)" 'Red'
@@ -217,7 +253,7 @@ try {
             $failed = $true
             break
         }
-        Line 'ok' 'Green'
+        Line "ok$note" 'Green'
 
         # KEY=VALUE lines a step appended to GITHUB_ENV, for the steps after it. The multi-line form
         # (KEY<<DELIMITER) is refused rather than half-read.

@@ -25,6 +25,10 @@ env:
   # Pinned to what client/native/wintun/README.md documents as the current build. Bump both
   # together when wintun.net ships a new release.
   WINTUN_VERSION: "0.14.1"
+  # The Certum cloud certificate (CN=Tien Viet Nguyen, valid to 2027-10-11). Public, not a
+  # secret: it is in every signed file. Pinned so the build refuses any other certificate the
+  # login happens to mount. Renewing the certificate means changing this line.
+  CERTUM_CERT_SHA1: "04A7242EFFEDCAD52742F63F95C04769B7C692E7"
 
 jobs:
   build-and-release:
@@ -33,6 +37,18 @@ jobs:
     # service). The Go relay cross-compiles for linux/amd64 fine from Windows too (CGO disabled),
     # so one job builds everything - no artifact hand-off between jobs needed.
     runs-on: windows-latest
+    # Code signing. The Certum login secrets (CERTUM_USERNAME, CERTUM_TOTP_SECRET) live ONLY in
+    # this environment, not as repository secrets, and the environment requires the owner's
+    # approval and only accepts v* tags. So a pushed tag waits for a click before anything can
+    # sign, a fork's pull request never sees the secrets, and a workflow edited on another branch
+    # cannot reach them either. The TOTP secret plus the email IS the signing key in practice:
+    # if it leaks, re-issue the SimplySign QR code on Certum's site, which voids the old one.
+    environment: release
+    # One SimplySign login at a time: two runs in the same 30 s TOTP window would both type the
+    # same one-time code, and Certum accepts it once.
+    concurrency:
+      group: certum-signing
+      cancel-in-progress: false
     defaults:
       run:
         shell: pwsh
@@ -145,7 +161,30 @@ jobs:
           $ErrorActionPreference = 'Stop'
           .\gpb.ps1 release-profiles
 
+      - name: Log in to Certum SimplySign
+        id: certum
+        # Installs Certum's own SimplySign Desktop, types the email and a TOTP code computed from
+        # the secret, and waits for the certificate to appear in CurrentUser\My. Third-party
+        # action (jay0lee), so pinned to a full commit, never a tag: a tag can be moved to code
+        # that sends the secret elsewhere. Reviewed at this commit on 2026-10-11 - its only
+        # network call is the MSI from files.certum.eu, and debug screenshots stay off.
+        uses: jay0lee/certum-cloud-code-sign@a3324503499c49090869856eeeecfe95fb613d87
+        with:
+          username: ${{ secrets.CERTUM_USERNAME }}
+          totp_secret: ${{ secrets.CERTUM_TOTP_SECRET }}
+          # Read it from the otpauth:// URI (algorithm=...). Certum's is SHA-256 per the action;
+          # set the CERTUM_TOTP_ALGORITHM variable only if the URI says otherwise.
+          totp_algorithm: ${{ vars.CERTUM_TOTP_ALGORITHM || 'SHA-256' }}
+          cert_sha1: ${{ env.CERTUM_CERT_SHA1 }}
+
       - name: Build client and package the installer
+        env:
+          # gpb.ps1 signs gpb-service.exe and GamePingBooster.exe, then Inno signs the setup and
+          # its uninstaller. REQUIRE_SIGNED makes a missing certificate a failure: a release is
+          # never unsigned by accident.
+          GPB_SIGN_THUMBPRINT: ${{ env.CERTUM_CERT_SHA1 }}
+          GPB_REQUIRE_SIGNED: "1"
+          GPB_SIGNTOOL: ${{ steps.certum.outputs.signtool-path }}
         # Reuses gpb.ps1's own `installer` verb end to end: it Native-AOT publishes both the
         # service and the UI (-c Release -r win-x64), checks every file the installer needs is
         # there, then runs Inno Setup. No version argument: VERSION was already validated above
@@ -158,6 +197,12 @@ jobs:
           $installer = "installer\dist\GamePingBooster-Setup-$env:VERSION.exe"
           if (-not (Test-Path $installer)) { throw "Expected installer not found: $installer" }
           Write-Host "Installer OK: $installer"
+
+      - name: Log out of Certum SimplySign
+        # Right after the last signature, not at the end of the job, and even when the build
+        # failed: the session should be open for as short a time as possible.
+        if: always() && steps.certum.outcome != 'skipped'
+        uses: jay0lee/certum-cloud-code-sign/teardown@a3324503499c49090869856eeeecfe95fb613d87
 
       # There is deliberately no client zip. Releases up to v0.2.1 shipped
       # GamePingBooster-Client-x.y.z-win-x64.zip beside the installer, and players kept downloading

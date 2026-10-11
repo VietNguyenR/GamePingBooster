@@ -70,6 +70,14 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 
+; Code signing, only when gpb.ps1 passes /DSignInstaller together with /Sgpbsign=<signtool line>
+; (see Get-SigningSetup there). Inno then signs this setup .exe and the uninstaller it writes into
+; {app}; the two program .exes were already signed in the publish folder before packaging.
+#ifdef SignInstaller
+SignTool=gpbsign
+SignedUninstaller=yes
+#endif
+
 ; The service must be registered as LocalSystem and the driver installed, so this cannot run
 ; unelevated. Asking up front is better than failing halfway through.
 PrivilegesRequired=admin
