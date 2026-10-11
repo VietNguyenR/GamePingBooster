@@ -160,6 +160,7 @@ internal sealed partial class TunnelEngine
 
         var started = Stopwatch.GetTimestamp();
         var packetsAtStart = tunnel.Destinations.UdpPackets;
+        var matchRate = forGame ? new UdpRate(started, packetsAtStart) : null;
         var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
         var probes = new List<RelayProbe>();
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -227,7 +228,7 @@ internal sealed partial class TunnelEngine
                 lock (stopGate)
                 {
                     if (stopSaid) return true;
-                    stopSaid = MatchStarted(tunnel, packetsAtStart) || (!forGame && TooLate(tunnel, current));
+                    stopSaid = MatchStarted(tunnel, packetsAtStart, matchRate) || (!forGame && TooLate(tunnel, current));
                     return stopSaid;
                 }
             }
@@ -273,14 +274,14 @@ internal sealed partial class TunnelEngine
                      $"is not - moving at {best.EndToEndMs!.Value:F0} ms against {hereMs:F0} ms.");
             }
 
-            if (MatchStarted(tunnel, packetsAtStart) || (!forGame && TooLate(tunnel, current))) return;
+            if (MatchStarted(tunnel, packetsAtStart, matchRate) || (!forGame && TooLate(tunnel, current))) return;
             if (!ReferenceEquals(tunnel, _tunnel) || _state != TunnelState.Connected || !(_watcher?.IsGameRunning ?? false)) return;
 
             var client = await OpenChosenAsync(best, probes, psk, token).ConfigureAwait(false);
             probes.Clear();
 
             // The last word before the swap: a match's first packets would have gone out by now.
-            if (MatchStarted(tunnel, packetsAtStart) || (!forGame && TooLate(tunnel, current)))
+            if (MatchStarted(tunnel, packetsAtStart, matchRate) || (!forGame && TooLate(tunnel, current)))
             {
                 client.Dispose();
                 return;
@@ -332,12 +333,55 @@ internal sealed partial class TunnelEngine
         return _jitter.Floor(hereId, excess[0], now);
     }
 
-    /// <summary>True, and says so, once the game has sent UDP into the tunnel since the gap began.</summary>
-    private bool MatchStarted(TunnelClient tunnel, long packetsAtStart)
+    /// <summary>
+    /// The game's UDP into the tunnel, per second, that makes a move off a relay not used for the game a match starting -
+    /// the rate discovery takes for a match on the tunnel. A match sends tens a second from its first moment.
+    /// </summary>
+    private const double GameOpenMatchPerSecond = 10;
+
+    /// <summary>
+    /// True, and says so, once a match has begun since the measuring started: any game UDP into the tunnel between
+    /// matches; for a move made because the game just opened (<paramref name="rate"/> given), a match's rate of it over
+    /// the last few seconds. The game sends a few packets into the tunnel in its first seconds, long before a match;
+    /// counting those dropped the move off Hong Kong for PUBG on 2026-10-11 nine seconds in, and the first match was
+    /// played at 60 ms on the relay the operator took PUBG off, against 48 through Singapore.
+    /// </summary>
+    private bool MatchStarted(TunnelClient tunnel, long packetsAtStart, UdpRate? rate)
     {
-        if (tunnel.Destinations.UdpPackets == packetsAtStart) return false;
+        var packets = tunnel.Destinations.UdpPackets;
+        if (packets == packetsAtStart) return false;
+        if (rate is not null && rate.Feed(Stopwatch.GetTimestamp(), packets) < GameOpenMatchPerSecond) return false;
         _log("Between matches: the game started sending to a server - the next match is loading, so the tunnel stays where it is.");
         return true;
+    }
+
+    /// <summary>
+    /// A packet count's rate over the shortest stretch of at least <see cref="MinSpan"/> that ends now, from the counts
+    /// it has been fed - so a match starting late in a long measure is not averaged away by the quiet lobby before it.
+    /// Called from more than one measuring task at once, under the caller's lock or its own.
+    /// </summary>
+    private sealed class UdpRate(long startedAt, long packetsAtStart)
+    {
+        private static readonly long MinSpan = 2 * Stopwatch.Frequency;
+        private readonly List<(long At, long Packets)> _samples = [(startedAt, packetsAtStart)];
+
+        public double Feed(long now, long packets)
+        {
+            lock (_samples)
+            {
+                var from = _samples[0];
+                foreach (var sample in _samples)
+                {
+                    if (now - sample.At < MinSpan) break;
+                    from = sample;
+                }
+                _samples.RemoveAll(sample => sample.At < from.At);
+                _samples.Add((now, packets));
+                // Under the span (a check right at the start): rated as if the span had passed, so a burst is not a rate.
+                var seconds = Math.Max(now - from.At, MinSpan) / (double)Stopwatch.Frequency;
+                return (packets - from.Packets) / seconds;
+            }
+        }
     }
 
     /// <summary>True, and says so, once the game has been silent too long for a move to be safe before the next match.</summary>
