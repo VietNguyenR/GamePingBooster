@@ -3818,6 +3818,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     /// </summary>
     private void ApplySelfHostedRelay()
     {
+        ApplyTestRelays();
         if (_profile is null || _config.RelayEndpoints.Count == 0) return;
 
         // Each is named after its own address. A single friendly label across several relays
@@ -3833,6 +3834,33 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
 
         _log($"Using {_profile.Relays.Count} self-hosted relay(s) and ignoring the profile's list: " +
              string.Join(", ", _config.RelayEndpoints));
+    }
+
+    /// <summary>
+    /// config.json testRelays: keeps only the relays it names and sets each to carry every game, so nothing the profile
+    /// says about games can move the tunnel off them. A test switch for one machine - see ServiceConfig.TestRelays.
+    /// </summary>
+    private void ApplyTestRelays()
+    {
+        if (_profile is null || _config.TestRelays is not { Count: > 0 } patterns) return;
+
+        static bool Matches(string id, string pattern) => pattern.EndsWith('*')
+            ? id.StartsWith(pattern[..^1], StringComparison.OrdinalIgnoreCase)
+            : id.Equals(pattern, StringComparison.OrdinalIgnoreCase);
+
+        var kept = _profile.Relays.Where(r => patterns.Any(p => Matches(r.Id, p))).ToList();
+        if (kept.Count == 0)
+        {
+            _log($"TEST: testRelays in config.json ({string.Join(", ", patterns)}) matches no relay in the profile - ignored.");
+            return;
+        }
+        foreach (var relay in kept)
+        {
+            relay.Games = [];
+            relay.SecondaryGames = [];
+        }
+        _profile.Relays = kept;
+        _log($"TEST: testRelays in config.json - only {string.Join(", ", kept.Select(r => r.Id))} are used, for every game.");
     }
 
     /// <summary>

@@ -210,6 +210,16 @@ public sealed class ServiceConfig
     public Dictionary<string, string>? RegionRoutingForce { get; set; }
 
     /// <summary>
+    /// FOR TESTING ONE MACHINE: relay ids - a trailing '*' matches a prefix, e.g. ["hk-*"] - that become the ONLY relays
+    /// in the profile, each set to carry every game. Written 2026-10-11 to play PUBG through Hong Kong, which the profile
+    /// takes off PUBG, and capture whether a lobby address on an HK-routed range is what puts matches in Korea. Entries in
+    /// front of a kept relay stay. Applied after every profile load and logged loudly. Unset and never written while unset.
+    /// </summary>
+    [JsonPropertyName("testRelays")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string>? TestRelays { get; set; }
+
+    /// <summary>
     /// Re-measuring every relay and entry in the gap after a match, and moving to a clearly faster one before
     /// the next - see TunnelEngine.RescanBetweenMatchesAsync. Only on automatic relay choice: a relay picked
     /// from the list is never left. Unset means on; false is the way to stop it on one machine. Never written
