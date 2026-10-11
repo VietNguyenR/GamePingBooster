@@ -117,6 +117,7 @@ internal sealed record RegionPlanEntry(
 /// <c>"type":"switch"</c> is one decision of entry switching and the minute after it - see WriteMove.
 /// <c>"type":"regionPlan"</c> is one pass of the region planner - see WriteRegionPlan.
 /// <c>"type":"lobby"</c> is one stretch of the game open with no match, and the ways in compared over it - see WriteLobby.
+/// <c>"type":"probeRound"</c> is the game's own datacentre probes before a match - see WriteProbeRound.
 /// Spikes also carry <c>door</c>, the way into the relay in use, and <c>ticks.doors</c>, the probes down
 /// the others, when entry switching is not off.
 ///
@@ -566,6 +567,53 @@ internal sealed class QualityFile(Action<string> log)
         foreach (var door in lobby.DoorIds) Series(w, door, lobby.Ticks, t => DoorValue(t, door));
         w.WriteEndObject();
         w.WriteEndObject();
+
+        w.WriteEndObject();
+    }
+
+    /// <summary>
+    /// The game's own datacentre probes before one match, as ETW saw them: <c>"type":"probeRound"</c> - see
+    /// Discovery.ProbeTap for why. <c>utc</c> is when the match began, <c>matchOn</c> whether it went into the tunnel
+    /// ("tunnel") or not ("off-tunnel"). Each endpoint is a landmark named by region and its place in that region's
+    /// list, or an unmapped one (region null) the game probed on the same port; round trips in ms, null with none
+    /// answered. The match itself is the "match" record closest after <c>utc</c>. No addresses, like every record here.
+    /// </summary>
+    public void WriteProbeRound(Discovery.ProbeRound round, string matchOn, QualityMeta meta) =>
+        Append((w, id) => WriteProbeRoundJson(w, id, round, matchOn, meta));
+
+    /// <summary>
+    /// The line <see cref="WriteProbeRound"/> appends, apart from the file so TunnelCheck can hold it to
+    /// testdata/probe-round-record.json - the shape the licence server parses - without touching the real queue.
+    /// </summary>
+    internal static void WriteProbeRoundJson(Utf8JsonWriter w, string id, Discovery.ProbeRound round, string matchOn, QualityMeta meta)
+    {
+        w.WriteStartObject();
+        w.WriteString("id", id);
+        w.WriteString("type", "probeRound");
+        w.WriteNumber("schema", Schema);
+        w.WriteString("utc", round.MatchUtc);
+        WriteMeta(w, meta);
+
+        w.WriteString("matchOn", matchOn);
+        w.WriteNumber("firstSecondsBeforeMatch", Round(round.FirstSecondsBeforeMatch));
+        w.WriteBoolean("receivesVerified", round.ReceivesVerified);
+
+        w.WriteStartArray("endpoints");
+        foreach (var endpoint in round.Endpoints)
+        {
+            w.WriteStartObject();
+            String(w, "region", endpoint.Region);
+            w.WriteNumber("index", endpoint.Index);
+            w.WriteNumber("sent", endpoint.Sent);
+            w.WriteNumber("received", endpoint.Received);
+            w.WriteNumber("answered", endpoint.Answered);
+            Number(w, "minMs", endpoint.MinMs, 1);
+            Number(w, "p50Ms", endpoint.MedianMs, 1);
+            Number(w, "maxMs", endpoint.MaxMs, 1);
+            w.WriteNumber("lastSecondsBeforeMatch", Round(endpoint.LastSecondsBeforeMatch));
+            w.WriteEndObject();
+        }
+        w.WriteEndArray();
 
         w.WriteEndObject();
     }

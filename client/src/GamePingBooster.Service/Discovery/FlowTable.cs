@@ -77,6 +77,7 @@ internal sealed class FlowTable : IUdpEventSink
     private volatile DecodingRules? _rules;
     private volatile ConcurrentQueue<RawUdpEvent>? _ownEvents;
     private volatile HashSet<uint> _gamePids = [];
+    private volatile ProbeTap? _probes;
 
     private long _untracked;
     private long _gameEvents;
@@ -109,6 +110,13 @@ internal sealed class FlowTable : IUdpEventSink
 
     public void StopCapturingOwnEvents() => _ownEvents = null;
 
+    /// <summary>Where the game's packets to and from its probe endpoints also go - see ProbeTap. Null: nowhere.</summary>
+    public ProbeTap? Probes
+    {
+        get => _probes;
+        set => _probes = value;
+    }
+
     /// <summary>Which process ids belong to the game right now - only used to count their events.</summary>
     public void SetGamePids(IEnumerable<uint> pids) => _gamePids = [.. pids];
 
@@ -124,7 +132,8 @@ internal sealed class FlowTable : IUdpEventSink
         var rules = _rules;
         if (rules is null) return;
 
-        if (_gamePids.Contains(e.Pid)) Interlocked.Increment(ref _gameEvents);
+        var isGame = _gamePids.Contains(e.Pid);
+        if (isGame) Interlocked.Increment(ref _gameEvents);
 
         bool remoteIsDestination;
         if (e.Direction == NetDirection.Send)
@@ -146,6 +155,7 @@ internal sealed class FlowTable : IUdpEventSink
         var port = remoteIsDestination ? e.DportRaw : e.SportRaw;
         if (!e.IsV6 && rules.SwapIpv4) lo = BinaryPrimitives.ReverseEndianness((uint)lo);
         if (rules.SwapPorts) port = BinaryPrimitives.ReverseEndianness(port);
+        if (isGame && !e.IsV6 && _probes is { } probes) probes.Observe(e.Direction == NetDirection.Send, (uint)lo, port, e.Timestamp);
 
         var key = new Key(e.Pid, e.IsV6, hi, lo);
         lock (_gate)

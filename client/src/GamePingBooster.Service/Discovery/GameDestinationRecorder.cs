@@ -49,6 +49,11 @@ namespace GamePingBooster.Service.Discovery;
 /// under the same switch as connection quality: switched off, or with no licence server or token to
 /// send with, discovery does not listen at all.
 ///
+/// While it listens it also keeps the game's own datacentre probes (<see cref="ProbeTap"/>): when a match starts -
+/// on the tunnel or off it - the probing of the minutes before is handed to <c>probeRound</c>, so what the game
+/// measured when it chose that datacentre is on record beside the match. Only while listening, which is the
+/// lobby; a probe sent while resting is not seen.
+///
 /// Start and stop come from the process watcher's thread and are queued onto one chain; the rest
 /// runs on a two-second timer. ETW's consumer thread runs at BelowNormal, so under CPU pressure it
 /// loses events rather than taking time from the tunnel's pumps.
@@ -122,6 +127,7 @@ internal sealed class GameDestinationRecorder : IDisposable
     private readonly Func<bool> _enabled;
     private readonly Func<string?> _whyDisabled;
     private readonly Action<DiscoveredServer> _report;
+    private readonly Action<GameEntry, ProbeRound, string>? _probeRound;
     private readonly Action<string> _log;
     private readonly object _gate = new();
     private Task _chain = Task.CompletedTask;
@@ -133,9 +139,12 @@ internal sealed class GameDestinationRecorder : IDisposable
     /// <param name="whyDisabled">Null when a finding could be sent, otherwise why not. Read every poll;
     /// non-null stops listening.</param>
     /// <param name="report">Where a new server goes. Called on the poll timer's thread.</param>
+    /// <param name="probeRound">Where the game's probing before a match goes, with "tunnel" or "off-tunnel" for
+    /// where that match went. Called on the poll timer's thread. Null keeps none.</param>
     public GameDestinationRecorder(Func<long?> tunnelUdpPackets, Func<string?> whyDisabled, Action<DiscoveredServer> report,
-        Action<string> log)
+        Action<string> log, Action<GameEntry, ProbeRound, string>? probeRound = null)
     {
+        _probeRound = probeRound;
         _tunnelUdpPackets = tunnelUdpPackets;
         _whyDisabled = whyDisabled;
         _enabled = () => whyDisabled() is null;
@@ -224,6 +233,14 @@ internal sealed class GameDestinationRecorder : IDisposable
         private readonly HashSet<IPAddress> _landmarks = game.Regions.SelectMany(r => r.Landmarks)
             .Select(l => IPAddress.TryParse(l, out var a) ? a : null)
             .Where(a => a is not null).Select(a => a!).ToHashSet();
+
+        /// <summary>
+        /// The game's probes to its landmarks, for <see cref="EmitProbes"/>. None for a game without landmarks, or
+        /// whose landmarks are routed (CS2): there the "landmark" is the match server itself, not a probe endpoint.
+        /// </summary>
+        private readonly ProbeTap? _probes = owner._probeRound is null || game.LandmarksRouted
+            ? null
+            : new ProbeTap(game.Regions.Select(r => (r.Id, (IReadOnlyList<string>)r.Landmarks))) is { HasLandmarks: true } tap ? tap : null;
 
         /// <summary>Settled once from the profile, so every comparison in this session uses one number
         /// and the log line that names it cannot drift from the one that decides.</summary>
@@ -353,6 +370,8 @@ internal sealed class GameDestinationRecorder : IDisposable
                          "the match is on a server the profile covers. Not listening.");
                     _phase = Phase.Tunnelled;
                     _waitingOn = null;   // whatever match a rest was waiting on is over: this one is on the tunnel
+                    // Seen up to TunnelWindow after the match began; the round says how long before this its probes ended.
+                    EmitProbes("tunnel", now);
                 }
                 return;
             }
@@ -450,6 +469,7 @@ internal sealed class GameDestinationRecorder : IDisposable
 
             table.Rules = _rules;
             table.SetGamePids(_gamePids);
+            table.Probes = _probes;
             _trace = trace;
             _table = table;
             _listenStarted = now;
@@ -530,6 +550,7 @@ internal sealed class GameDestinationRecorder : IDisposable
                     // a thousand packets into those seconds; that is a match on the tunnel, not off it.
                     if (seconds >= Window.TotalSeconds * 0.8 && _knownLogged.Add(row.Address))
                     {
+                        EmitProbes("off-tunnel", row.FirstTimestamp);
                         _log($"Discovery: KNOWN server {Destinations.Mask(row.Address)} - {packets:N0} packets in {seconds:F0} s, " +
                              "inside the profile's ranges but not on the tunnel. Not reported; if the tunnel was up with " +
                              "routes in place, that is worth a look.");
@@ -558,6 +579,7 @@ internal sealed class GameDestinationRecorder : IDisposable
                 {
                     _reports++;
                     _waitingOn = row.Address;
+                    EmitProbes("off-tunnel", row.FirstTimestamp);
                     _log($"Discovery: NEW server {masked} - {packets:N0} packets in {seconds:F0} s, outside the profile's " +
                          $"ranges. Reporting it; not listening for {Describe(RestAfterReport)}.");
                     owner._report(new DiscoveredServer(
@@ -567,6 +589,25 @@ internal sealed class GameDestinationRecorder : IDisposable
                 StopListening(RestAfterReport);
                 return;
             }
+        }
+
+        /// <summary>
+        /// Hands the probing before a match that began at <paramref name="matchAt"/> (QPC) to the owner, and logs it
+        /// with addresses masked. Nothing when the game probed no landmark in the window before it.
+        /// </summary>
+        private void EmitProbes(string matchOn, long matchAt)
+        {
+            if (_probes is null || owner._probeRound is not { } emit) return;
+            var round = _probes.Take(matchAt, _rules?.ReceiveRemoteIsDestination is not null);
+            if (round is null) return;
+
+            var parts = round.Endpoints.Select(e =>
+                $"{e.Region ?? "unmapped " + Destinations.Mask(e.Address)}: {e.Answered}/{e.Sent}" +
+                (e.MedianMs is { } median ? $" {median:F0} ms" : ""));
+            _log($"Discovery: {Game.Name}'s own probes before this match ({matchOn}), last " +
+                 $"{round.FirstSecondsBeforeMatch:F0} s: {string.Join(", ", parts)}" +
+                 (round.ReceivesVerified ? "." : " - receives unverified on this Windows, sends only."));
+            emit(Game, round, matchOn);
         }
 
         private void Guard(long now)

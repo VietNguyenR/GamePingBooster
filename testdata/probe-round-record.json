@@ -1,0 +1,61 @@
+{
+  "id": "00000000000000000000000000000000",
+  "type": "probeRound",
+  "schema": 2,
+  "utc": "2026-10-11T08:00:30+00:00",
+  "app": "0.4.7",
+  "game": "pubg",
+  "relay": "sg-3",
+  "entry": "vn-5-sg3",
+  "region": "Korea (Seoul)",
+  "link": "wired",
+  "matchOn": "off-tunnel",
+  "firstSecondsBeforeMatch": 30,
+  "receivesVerified": true,
+  "endpoints": [
+    {
+      "region": "asia-sg",
+      "index": 0,
+      "sent": 5,
+      "received": 4,
+      "answered": 4,
+      "minMs": 55,
+      "p50Ms": 58,
+      "maxMs": 59,
+      "lastSecondsBeforeMatch": 25.9
+    },
+    {
+      "region": "asia-sg",
+      "index": 1,
+      "sent": 5,
+      "received": 5,
+      "answered": 5,
+      "minMs": 58,
+      "p50Ms": 58,
+      "maxMs": 58,
+      "lastSecondsBeforeMatch": 25.9
+    },
+    {
+      "region": "asia-kr",
+      "index": 0,
+      "sent": 5,
+      "received": 5,
+      "answered": 5,
+      "minMs": 100,
+      "p50Ms": 102,
+      "maxMs": 104,
+      "lastSecondsBeforeMatch": 25.9
+    },
+    {
+      "region": null,
+      "index": 0,
+      "sent": 3,
+      "received": 2,
+      "answered": 2,
+      "minMs": 60,
+      "p50Ms": 70,
+      "maxMs": 70,
+      "lastSecondsBeforeMatch": 22.9
+    }
+  ]
+}

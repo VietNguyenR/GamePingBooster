@@ -953,6 +953,9 @@ internal sealed class SpikeRecorder : IQualitySink
     /// <summary>One pass of the region planner. See QualityFile.WriteRegionPlan.</summary>
     public void WriteRegionPlan(RegionPlanRecord plan, QualityMeta meta) => _file.WriteRegionPlan(plan, meta);
 
+    /// <summary>The game's own probes before a match. See QualityFile.WriteProbeRound.</summary>
+    public void WriteProbeRound(Discovery.ProbeRound round, string matchOn, QualityMeta meta) => _file.WriteProbeRound(round, matchOn, meta);
+
     private QualityMeta Meta(Context context) => new(
         AppVersion,
         context.GameId,

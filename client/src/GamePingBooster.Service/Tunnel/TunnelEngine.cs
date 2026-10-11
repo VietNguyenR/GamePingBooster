@@ -148,7 +148,12 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             // too. Counting home alone turned ETW on mid-match and called that server "not on the tunnel"
             // (2026-09-26). A tunnel closing lowers the sum, which the recorder takes as a restart.
             _discovery = new GameDestinationRecorder(
-                () => _tunnel is { } home ? AllGameUdpPackets(home) : null, _discoveryUploader.WhyNotSend, _discoveryUploader.Report, log);
+                () => _tunnel is { } home ? AllGameUdpPackets(home) : null, _discoveryUploader.WhyNotSend, _discoveryUploader.Report, log,
+                // The game's own probes before each match, beside the match in the quality record. No recorder, no record.
+                (game, round, matchOn) =>
+                {
+                    if (_recorder is { } recorder) recorder.WriteProbeRound(round, matchOn, recorder.CurrentMeta() with { GameId = game.Id });
+                });
         }
         _presence = new PresenceReporter(() => _config.LicenceUrl, () => _token, _device.Key, () => _config.ShareQuality, log);
         _meter = new RelayMeter(MeterCredentials, log, _jitter);
