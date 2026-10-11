@@ -3,7 +3,7 @@
 # builds on the VN boxes), two echoing "game servers", and tc netem to make any one way into a relay slow or lossy.
 #
 #   wsl -d Ubuntu -u root -- bash tools/multi-tunnel-rig/rig.sh up        start everything, print the addresses
-#   wsl -d Ubuntu -u root -- bash tools/multi-tunnel-rig/rig.sh degrade <way> <delay-ms> [loss-%]
+#   wsl -d Ubuntu -u root -- bash tools/multi-tunnel-rig/rig.sh degrade <way> <delay-ms> [loss-%] [jitter-ms]
 #   wsl -d Ubuntu -u root -- bash tools/multi-tunnel-rig/rig.sh lanes <way> <delay-ms>   ECMP lanes on one way
 #   wsl -d Ubuntu -u root -- bash tools/multi-tunnel-rig/rig.sh heal       every way back to normal
 #   wsl -d Ubuntu -u root -- bash tools/multi-tunnel-rig/rig.sh status
@@ -109,32 +109,34 @@ heal() {
 
 degrade() {
     addresses
-    local way="$1" delay="${2:-0}" loss="${3:-0}" src
+    local way="$1" delay="${2:-0}" loss="${3:-0}" jitter="${4:-0}" src
     case "$way" in
         a) src="$A" ;; b) src="$B" ;; e) src="$E" ;; f) src="$F" ;; c) src="$C" ;; g) src="$G" ;;
         *) echo "way must be a, b, c, e, f or g" >&2; exit 2 ;;
     esac
     # One netem per shaped way, each in a band of its own - rebuilt whole, so ways can be shaped together.
     touch "$state/shaped-$way"
-    echo "$delay $loss" >"$state/shaped-$way"
+    echo "$delay $loss $jitter" >"$state/shaped-$way"
     tc qdisc del dev "$dev" root 2>/dev/null || true
     local ways=(); for f in "$state"/shaped-*; do [ -e "$f" ] && ways+=("${f##*-}"); done
     local bands=$(( ${#ways[@]} + 3 ))
     tc qdisc add dev "$dev" root handle 1: prio bands "$bands" priomap 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
     local band=4
     for w in "${ways[@]}"; do
-        local d l s
-        read -r d l <"$state/shaped-$w"
+        local d l j s
+        read -r d l j <"$state/shaped-$w"
         case "$w" in a) s="$A" ;; b) s="$B" ;; e) s="$E" ;; f) s="$F" ;; c) s="$C" ;; g) s="$G" ;; esac
+        # Jitter: each reply held delay +- jitter ms, uniformly - a road that swings around its median, as vn-2's did.
+        local delayArgs=("${d}ms"); [ "${j:-0}" != "0" ] && delayArgs+=("${j}ms")
         if [ "$l" != "0" ]; then
-            tc qdisc add dev "$dev" parent "1:$band" handle "${band}0:" netem delay "${d}ms" loss "${l}%"
+            tc qdisc add dev "$dev" parent "1:$band" handle "${band}0:" netem delay "${delayArgs[@]}" loss "${l}%"
         else
-            tc qdisc add dev "$dev" parent "1:$band" handle "${band}0:" netem delay "${d}ms"
+            tc qdisc add dev "$dev" parent "1:$band" handle "${band}0:" netem delay "${delayArgs[@]}"
         fi
         tc filter add dev "$dev" protocol ip parent 1:0 prio 1 u32 match ip src "$s/32" flowid "1:$band"
         band=$((band + 1))
     done
-    echo "way $way: +${delay} ms, ${loss}% lost (shaped: ${ways[*]})"
+    echo "way $way: +${delay} ms +- ${jitter}, ${loss}% lost (shaped: ${ways[*]})"
 }
 
 # ECMP lanes on one way, as a VN datacentre's uplink has them (LanePick, measured 2026-09-30): replies down the way
@@ -257,5 +259,5 @@ case "${1:-status}" in
     logs) shift; logs "$@" ;;
     ip) echo "$dev $(base_ip | cut -d/ -f1)" ;;
     ticket) shift; ticket "$@" ;;
-    *) echo "usage: rig.sh up|down|heal|degrade <a|b|e|f> <delay-ms> [loss-%]|lanes <a|b|e|f> <delay-ms> [<slow-way> <delay-ms>]|status|logs [n]" >&2; exit 2 ;;
+    *) echo "usage: rig.sh up|down|heal|degrade <a|b|e|f> <delay-ms> [loss-%] [jitter-ms]|lanes <a|b|e|f> <delay-ms> [<slow-way> <delay-ms>]|status|logs [n]" >&2; exit 2 ;;
 esac

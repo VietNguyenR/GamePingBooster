@@ -45,6 +45,16 @@ public sealed class DoorDecision
 
     /// <summary>The quarter seconds the decision was judged over.</summary>
     public int WindowTicks { get; init; } = DoorSwitchPolicy.WindowTicks;
+
+    /// <summary>
+    /// True when the way in use swings and the other is steadier by enough to make up for any median it gives away -
+    /// the jitter rule over <see cref="DoorSwitchPolicy.JitterWindowTicks"/> (SWINGING), not a lag or a faster road.
+    /// </summary>
+    public bool Jitter { get; init; }
+
+    /// <summary>For a <see cref="Jitter"/> decision: how much more each way swung than the calmest way into the relay.</summary>
+    public double? FromJitterMs { get; init; }
+    public double? ToJitterMs { get; init; }
 }
 
 /// <summary>
@@ -126,6 +136,15 @@ public sealed class DoorDecision
 /// window is what the lower bar costs: a way that was bad must be good for two minutes, where "worse" asks
 /// eight seconds. The five minutes still apply first. A move back is not itself returned from.
 ///
+/// SWINGING. None of the above leaves a way that is fast at the median and swings: through vn-2 an FPT player sat at
+/// 38 ms half the time and 50-60 the rest, beside a steady 50 on sg-5's own address - never "worse" for eight seconds,
+/// and the steady rule never applies to a way that is SLOWER at the median. So a last bar over TWO minutes
+/// (<see cref="JitterWindowTicks"/>): each way scored as its median plus <see cref="Quality.Jitter.Penalty"/> of how much
+/// more it swings than the calmest way into the relay (<see cref="WayJitter"/>), and the tunnel moves when the way in
+/// use swings, the other way's score is lower by <see cref="SteadyMargin"/>, its 95th percentile is lower, and the other is clean. The same score
+/// keeps the steady rule from moving a player ONTO a way that swings more than the one he is on. Two minutes because a
+/// swing comes and goes in bursts of a second or two: thirty seconds can fall between them.
+///
 /// A connect that started on an entry because it was faster than the direct road (TunnelEngine.ChooseDoorAsync)
 /// is the same detour, and <see cref="StartedOnDetour"/> opens the same way back - without the five minutes,
 /// since no decision of this policy made it.
@@ -183,6 +202,9 @@ public sealed class DoorSwitchPolicy
     /// <summary>Probes the way left may lose in <see cref="ReturnWindowTicks"/> and still count as recovered.</summary>
     internal const int ReturnMaxLost = 4;
 
+    /// <summary>The window the jitter rule and <see cref="WayJitter"/> are judged over. See SWINGING above.</summary>
+    public const int JitterWindowTicks = 2 * 60 * SpikeDetector.TicksPerSecond;
+
     private readonly Queue<QualityTick> _window = new();
     private long _lastIndex = long.MinValue;
     private long _lastDecisionIndex = long.MinValue;
@@ -207,7 +229,7 @@ public sealed class DoorSwitchPolicy
         if (!comparable) return null;
 
         _window.Enqueue(tick);
-        while (_window.Count > ReturnWindowTicks) _window.Dequeue();
+        while (_window.Count > Math.Max(ReturnWindowTicks, JitterWindowTicks)) _window.Dequeue();
 
         // With the tunnel anywhere but where the last decision sent it, going back is no longer open: the
         // move was never made (record mode, or it failed), or something else has moved it since.
@@ -250,6 +272,7 @@ public sealed class DoorSwitchPolicy
     {
         var ids = last.DoorIds!;
         DoorDecision? best = null;
+        IReadOnlyDictionary<string, double>? jitter = null;
 
         for (var slot = 0; slot < ids.Length; slot++)
         {
@@ -264,6 +287,16 @@ public sealed class DoorSwitchPolicy
                             fast.Comparable >= MinComparableShare * WindowTicks && fast.Share >= WorseShareToMove
                 ? Decide(last, slot, fast, WindowTicks)
                 : null;
+
+            // Not onto a way no better once its swing is counted: "worse" by 10 ms against a way 12 ms faster at the
+            // median is no lag when that way swings 16 ms' worth - it is the way the jitter rule just left (SWINGING).
+            // A real lag on the way in use lifts its own median and swing, and still leaves.
+            if (candidate is not null &&
+                Score(candidate.ToStats, candidate.To, jitter ??= WayJitter(Math.Min(_window.Count, JitterWindowTicks))) >=
+                Score(candidate.FromStats, candidate.From, jitter))
+            {
+                candidate = null;
+            }
 
             // Or steady loss over the last thirty, against a way that lost at most two.
             if (candidate is null && _window.Count >= LossWindowTicks)
@@ -282,11 +315,17 @@ public sealed class DoorSwitchPolicy
             // way the last decision left, which has the return rule.
             if (candidate is null && !IsLeft(ids[slot]) && _window.Count >= SteadyWindowTicks)
             {
-                candidate = JudgeSteady(last, slot);
+                candidate = JudgeSteady(last, slot, jitter ??= WayJitter(Math.Min(_window.Count, JitterWindowTicks)));
+            }
+
+            // Or steadier, for two minutes, by more than the median it gives away (SWINGING) - not back to the way left.
+            if (candidate is null && !IsLeft(ids[slot]) && _window.Count >= JitterWindowTicks)
+            {
+                candidate = JudgeJitter(last, slot, jitter ??= WayJitter(Math.Min(_window.Count, JitterWindowTicks)));
             }
 
             if (candidate is null) continue;
-            if (best is null || (candidate.ToStats.P50 ?? double.MaxValue) < (best.ToStats.P50 ?? double.MaxValue))
+            if (best is null || Score(candidate.ToStats, candidate.To, jitter) < Score(best.ToStats, best.To, jitter))
             {
                 best = candidate;
             }
@@ -301,7 +340,7 @@ public sealed class DoorSwitchPolicy
     /// <see cref="SteadyTickMargin"/> in three quarters of the quarter seconds, by <see cref="SteadyMargin"/> at the
     /// median, no worse at the 95th percentile, and clean. Null when any of it does not hold.
     /// </summary>
-    private DoorDecision? JudgeSteady(QualityTick last, int slot)
+    private DoorDecision? JudgeSteady(QualityTick last, int slot, IReadOnlyDictionary<string, double>? jitter)
     {
         var t = Count(slot, SteadyWindowTicks, static _ => SteadyTickMargin);
         if (t.Other.Count == 0 || t.Current.Count == 0) return null;
@@ -313,7 +352,53 @@ public sealed class DoorSwitchPolicy
         if (from.P50 is not { } fromP50 || to.P50 is not { } toP50 || fromP50 - toP50 < SteadyMargin(toP50)) return null;
         if (from.P95 is { } fromP95 && to.P95 is { } toP95 && toP95 > fromP95) return null;
 
+        // Never onto a way that swings more than this one - over as much of the two minutes as the window holds.
+        if (Quality.Jitter.Penalty(ExcessOf(jitter, last.DoorIds![slot])) > Quality.Jitter.Penalty(ExcessOf(jitter, last.CurrentDoor!)))
+        {
+            return null;
+        }
+
         return Decide(last, slot, t, SteadyWindowTicks, steady: true);
+    }
+
+    private static double? ExcessOf(IReadOnlyDictionary<string, double>? jitter, string way) =>
+        jitter is not null && jitter.TryGetValue(way, out var e) ? e : null;
+
+    /// <summary>A way's median over a decision's window plus its jitter penalty; the worst there is with no median.</summary>
+    private static double Score(DoorStats stats, string way, IReadOnlyDictionary<string, double>? jitter) =>
+        stats.P50 is { } p50 ? p50 + Quality.Jitter.Penalty(ExcessOf(jitter, way)) : double.MaxValue;
+
+    /// <summary>
+    /// The jitter rule for the way in <paramref name="slot"/> over the last <see cref="JitterWindowTicks"/>: the way in use
+    /// swings, the other's median plus its jitter penalty is lower than the way in use's by <see cref="SteadyMargin"/>,
+    /// its 95th percentile is lower, and the other lost at most <see cref="SteadyMaxOtherLostShare"/> of its probes. Null when any of it does not hold.
+    /// </summary>
+    private DoorDecision? JudgeJitter(QualityTick last, int slot, IReadOnlyDictionary<string, double>? jitter)
+    {
+        var fromJitter = ExcessOf(jitter, last.CurrentDoor!);
+        var fromPenalty = Quality.Jitter.Penalty(fromJitter);
+        if (fromPenalty <= 0) return null;
+
+        var t = Count(slot, JitterWindowTicks);
+        if (t.Other.Count == 0 || t.Current.Count == 0) return null;
+        if (t.Comparable < MinComparableShare * JitterWindowTicks) return null;
+        if (t.OtherLost > SteadyMaxOtherLostShare * t.OtherSent) return null;
+
+        var from = Stats(t.Current, t.CurrentSent, t.CurrentLost);
+        var to = Stats(t.Other, t.OtherSent, t.OtherLost);
+        if (from.P50 is not { } fromP50 || to.P50 is not { } toP50) return null;
+        var toJitter = ExcessOf(jitter, last.DoorIds![slot]);
+        var fromScore = fromP50 + fromPenalty;
+        var toScore = toP50 + Quality.Jitter.Penalty(toJitter);
+        if (fromScore - toScore < SteadyMargin(toScore)) return null;
+
+        // A move for the swing must leave the tail lower, as the steady and return rules ask. The penalty alone has no
+        // ceiling: a way swinging 25 ms over the calmest counts 44 ms slower and would trade for a road 30-40 ms slower
+        // at the median. Replayed over prod spike records 2026-10-04..11 that move turned out worse at the 95th
+        // percentile 16% of the time, 42% when leaving a way other than vn-2; with this check 9% and 24%.
+        if (from.P95 is { } fromP95 && to.P95 is { } toP95 && toP95 >= fromP95) return null;
+
+        return Decide(last, slot, t, JitterWindowTicks, jitter: (fromJitter, toJitter));
     }
 
     /// <summary>The current way against the way in <paramref name="slot"/>, over the last <paramref name="ticks"/> of the window.</summary>
@@ -368,9 +453,13 @@ public sealed class DoorSwitchPolicy
         return t;
     }
 
-    private static DoorDecision Decide(QualityTick last, int slot, Tally t, int windowTicks, bool steady = false) => new()
+    private static DoorDecision Decide(QualityTick last, int slot, Tally t, int windowTicks, bool steady = false,
+        (double? From, double? To)? jitter = null) => new()
     {
         Steady = steady,
+        Jitter = jitter is not null,
+        FromJitterMs = jitter?.From,
+        ToJitterMs = jitter?.To,
         TickIndex = last.Index,
         AtUtc = last.StartUtc,
         From = last.CurrentDoor!,
@@ -444,6 +533,87 @@ public sealed class DoorSwitchPolicy
             WindowTicks = ReturnWindowTicks,
         };
     }
+
+    /// <summary>
+    /// How much more each way into the relay - the one in use included - swung than the calmest of them over the last
+    /// <paramref name="ticks"/> quarter seconds (<see cref="JitterWindowTicks"/> unless said), by way id; null until the window
+    /// holds that long on one path. A way answered in fewer than half the quarter seconds is left out: too little to call
+    /// it steady or not.
+    ///
+    /// What every probed way does in the same quarter second is taken out first: each tick, the smallest rise over its
+    /// own median among the probed ways (two or more of them answering). A PC that stalls, or a Wi-Fi burst, delays the
+    /// probes together - on 2026-10-10 a customer's evening showed every probed way at p95 64-84 against a steady 43.8 on
+    /// the way in use - and what they share is not any one road's. It is taken off the way in use too: a Wi-Fi burst
+    /// delays its pong as much, and a stall that delayed only the probes leaves the pong early instead, below its median,
+    /// which a spread up to the 90th percentile does not count. Then each way is counted over the calmest
+    /// (<see cref="Quality.Jitter.OverCalmest"/>).
+    /// </summary>
+    public IReadOnlyDictionary<string, double>? WayJitter(int ticks = JitterWindowTicks)
+    {
+        if (ticks <= 0 || _window.Count < ticks) return null;
+        var window = _window.Skip(_window.Count - ticks).ToList();
+        var last = window[^1];
+        var ids = last.DoorIds!;
+        var current = last.CurrentDoor!;
+
+        // Each way's median over the window: the probed ways by slot, the way in use by its pongs.
+        var medians = new double?[ids.Length];
+        for (var slot = 0; slot < ids.Length; slot++)
+        {
+            var values = window.Select(k => ProbeOf(k, slot)).OfType<double>().ToList();
+            medians[slot] = values.Count >= window.Count / 2 ? SpikeDetector.Percentile(values, 50) : null;
+        }
+        var currentValues = window.Select(k => k.RelayProcessSent ? k.RelayProcessMs : null).OfType<double>().ToList();
+        double? currentMedian = currentValues.Count >= window.Count / 2 ? SpikeDetector.Percentile(currentValues, 50) : null;
+
+        var residuals = ids.Select(_ => new List<double>(window.Count)).ToArray();
+        var currentResiduals = new List<double>(window.Count);
+        var rises = new double?[ids.Length];
+        foreach (var tick in window)
+        {
+            double? shared = null;
+            var answering = 0;
+            for (var slot = 0; slot < ids.Length; slot++)
+            {
+                rises[slot] = medians[slot] is { } median && ProbeOf(tick, slot) is { } ms ? ms - median : null;
+                if (rises[slot] is not { } rise) continue;
+                shared = shared is { } s ? Math.Min(s, rise) : rise;
+                answering++;
+            }
+            var common = answering >= 2 && shared is { } c ? Math.Max(0, c) : 0;
+            for (var slot = 0; slot < ids.Length; slot++)
+            {
+                if (rises[slot] is { } rise) residuals[slot].Add(rise - common);
+            }
+            if (currentMedian is { } cm && tick.RelayProcessSent && tick.RelayProcessMs is { } cms) currentResiduals.Add(cms - cm - common);
+        }
+
+        var names = new List<string>();
+        var spreads = new List<double?>();
+        for (var slot = 0; slot < ids.Length; slot++)
+        {
+            if (medians[slot] is null) continue;
+            names.Add(ids[slot]);
+            spreads.Add(Quality.Jitter.Spread(residuals[slot]));
+        }
+        if (currentMedian is not null)
+        {
+            names.Add(current);
+            spreads.Add(Quality.Jitter.Spread(currentResiduals));
+        }
+        if (names.Count < 2) return null;
+
+        var excess = Quality.Jitter.OverCalmest(spreads);
+        var result = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < names.Count; i++)
+        {
+            if (excess[i] is { } e) result[names[i]] = e;
+        }
+        return result;
+    }
+
+    private static double? ProbeOf(QualityTick tick, int slot) =>
+        tick.DoorSent is { } sent && slot < sent.Length && sent[slot] && tick.DoorMs is { } ms && slot < ms.Length ? ms[slot] : null;
 
     /// <summary>Median, 95th percentile and loss of one way's round trips. Public: the recorder follows a decision with the same figures.</summary>
     public static DoorStats Stats(List<double> answered, int sent, int lost) => new(

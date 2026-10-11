@@ -68,6 +68,7 @@ internal static partial class Program
             ("Real relayd: a region's tunnel leaves a slow road mid-match", RigRegionTunnelLeavesASlowRoad),
             ("Real relayd: a region's tunnel leaves a lossy road mid-match", RigRegionTunnelLeavesALossyRoad),
             ("Real relayd: home still leaves its own slow road", RigHomeLeavesItsSlowRoad),
+            ("Real relayd: home leaves a road that swings for a steady one (jitter rule)", RigHomeLeavesASwingingRoad),
             ("Real relayd: lane hunting through an entry, beside entry-switching probes", RigLaneHuntThroughAnEntry),
             ("Real relayd: entry switching lands on the lane it measured", RigDoorMoveKeepsTheMeasuredLane),
             ("Real relayd: a region's tunnel moved between matches lands on the lane WayCheck measured", RigWayCheckKeepsTheMeasuredLane),
@@ -426,6 +427,94 @@ internal static partial class Program
             string.Join("; ", decisions.Select(d => $"{d.From}->{d.To}")));
         var missing = Enumerable.Range(40, Math.Max(0, sent - 80)).Count(i => !back.ContainsKey(i));
         Check("  not one reply missing, across the move and the ones in flight at it", missing == 0, $"{missing} missing");
+    }
+
+    /// <summary>
+    /// The jitter rule end to end (2026-10-11): home's road to A swings - every reply held 0-40 ms, uniformly, by netem - and
+    /// F's is a steady 20, the same median. Never "worse" (A is 10 ms over F in a quarter of the quarter seconds) nor
+    /// steadily faster; only the swing tells them apart, as through vn-2. After the two-minute window the policy must
+    /// decide on the swing, the recorder hand it to the move, the move lose nothing, JitterMemory learn A, and the
+    /// switch record say "jitter".
+    /// </summary>
+    private static async Task RigHomeLeavesASwingingRoad()
+    {
+        using var rig = new Rig();
+        var home = await RigOpenAsync(rig, _a, 345);
+        home.StartPumping(rig.Device, rig.Cts.Token);
+        rig.Pump.SetHome(home);
+        var gate = new object();
+        string? entry = null;
+        IReadOnlyList<DoorProbes.Door> doors = [new("f", _f)];
+        var decisions = new ConcurrentQueue<DoorDecision>();
+        var memory = new JitterMemory();
+        memory.OnNetwork("rig");
+        SpikeRecorder.Context Context()
+        {
+            lock (gate) return new SpikeRecorder.Context(home, "a", entry, "A", null, null, null, "rig", true, doors, true);
+        }
+        bool Move(DoorDecision decision)
+        {
+            decisions.Enqueue(decision);
+            if (decision.To != "f") return false;
+            lock (gate)
+            {
+                home.MoveTo(_f);
+                entry = "f";
+                doors = [new("a", _a)];
+            }
+            return true;
+        }
+
+        var sent = 0;
+        var back = new ConcurrentDictionary<int, bool>();
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(rig.Cts.Token);
+        var recorder = new SpikeRecorder(Context, s => Log.Enqueue(s), Move, memory);
+        var running = Task.Run(() => recorder.RunAsync(stop.Token));
+        var sending = Task.Run(async () =>
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                rig.Device.FromWindows(RigPacket(home.InnerIp, RigSg, sent++));
+                while (rig.Device.ToWindows.TryDequeue(out var p)) if (p.Packet.Length >= 32 && Src(p.Packet) == RigSg) back.TryAdd(SequenceOf(p.Packet), true);
+                await Task.Delay(25);
+            }
+        });
+
+        RigShell("degrade a 20 0 20");
+        RigShell("degrade f 20");
+        var moved = await WaitUntil(() => decisions.Any(d => d.To == "f"), 200_000);
+        var learned = memory.ExcessOf("a", DateTimeOffset.UtcNow);
+        // The switch record follows the minute after the move.
+        var recorded = await WaitUntil(() => QualityLines().Any(l => l.Contains("\"type\":\"switch\"") && l.Contains("\"reason\":\"jitter\"")), 80_000);
+        stop.Cancel();
+        await Task.WhenAll(running, sending);
+
+        var first = decisions.FirstOrDefault();
+        Check("A swinging 0-40 ms, F a steady 20: home moves onto F, decided on the swing", moved && first is { Jitter: true, From: "a", To: "f" },
+            string.Join("; ", decisions.Select(d => $"{d.From}->{d.To} jitter={d.Jitter} steady={d.Steady} window={d.WindowTicks} " +
+                $"fromJ={d.FromJitterMs:F1} toJ={d.ToJitterMs:F1} from={d.FromStats.P50}/{d.FromStats.P95} to={d.ToStats.P50}/{d.ToStats.P95}")));
+        Check("  ...after the two-minute window, not before", first is null || first.WindowTicks == DoorSwitchPolicy.JitterWindowTicks,
+            $"window {first?.WindowTicks}");
+        Check("  ...A remembered as swinging on this network for the short choices", Jitter.Penalty(learned) > 0, $"excess {learned}");
+        Check("  ...the switch record says \"jitter\"", recorded, $"{QualityLines().Count(l => l.Contains("\"type\":\"switch\""))} switch record(s)");
+        var missing = Enumerable.Range(40, Math.Max(0, sent - 80)).Count(i => !back.ContainsKey(i));
+        Check("  not one reply missing, across the move", missing == 0, $"{missing} missing of {sent}");
+    }
+
+    private static IEnumerable<string> QualityLines()
+    {
+        var dir = QualityFile.DirectoryPath;
+        if (!Directory.Exists(dir)) return [];
+        return Directory.GetFiles(dir, "quality-*.jsonl").SelectMany(f =>
+        {
+            try
+            {
+                using var stream = new FileStream(f, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var reader = new StreamReader(stream);
+                return reader.ReadToEnd().Split('\n');
+            }
+            catch (IOException) { return []; }
+        }).ToList();
     }
 
     /// <summary>
