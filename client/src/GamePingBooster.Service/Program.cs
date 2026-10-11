@@ -158,6 +158,7 @@ public static class Program
             Path.Combine(ServiceConfig.DefaultDirectory, "logs", "gpb-service.log"),
             log);
         unblock.Trouble = unblockReports.Trouble;
+        engine.AfterMatchTrouble = unblockReports.Trouble;
 
         // When it runs. A self-hosted installation - no licence server - unblocks for as long as the service runs,
         // as every installation did until 2026-10-02. A licensed one unblocks while it is CONNECTED, by the owner's

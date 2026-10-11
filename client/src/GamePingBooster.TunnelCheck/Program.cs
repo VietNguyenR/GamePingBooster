@@ -73,6 +73,7 @@ internal static partial class Program
             ("Split: the hello is two records of the same hello", () => { TheSplitHelloIsTwoRecordsOfTheSameHello(); return Task.CompletedTask; }),
             ("Split: a filter reading the first record is passed", TheSplitHelloPassesAFilterThatReadsTheFirstRecord),
             ("After a match: what the game waits for is logged", WhatTheGameWaitsForAfterAMatchIsLogged),
+            ("After a match: a stuck lobby is reported with its lines", AStuckLobbyIsReportedWithItsLines),
             ("Split: a filter that reassembles sends it through the tunnel", AFilterThatReassemblesSendsTheConnectionThroughTheTunnel),
             ("Lobby proxy: a proxied name goes through it", AProxiedNameGoesThroughTheLobbyProxy),
             ("Lobby proxy: a slow proxy is left alone", ASlowLobbyProxyIsLeftAlone),

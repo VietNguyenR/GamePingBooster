@@ -50,10 +50,25 @@ internal static class UnblockDiagnosis
         "nextdns|cfos|netlimiter|killer|dragon|lagofast|gearup|exitlag|wtfast|noping|outfox|haste|warp",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
-    /// <summary>The service log's lines worth sending: unblocking, DoH, the profile, connecting.</summary>
+    /// <summary>
+    /// The service log's lines worth sending: unblocking, DoH, the profile, connecting - and what the game waited for
+    /// after a match (TunnelEngine.AfterMatch), which is the whole of an after-match-stuck report.
+    /// </summary>
     private static readonly Regex LogLines = new(
-        @"Unblock|NRPT|DoH|resolver|poison|profile|Connected|Disconnect|lobby route|Tunnel is down",
+        @"Unblock|NRPT|DoH|resolver|poison|profile|Connected|Disconnect|lobby route|Tunnel is down|After the match",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    /// <summary>A sealed part of a line and the key it names (LogSeal).</summary>
+    private static readonly Regex SealedBy = new(@"\[enc:([0-9a-f]{8}):", RegexOptions.CultureInvariant);
+
+    /// <summary>The line carrying a sealing key, wrapped for the server (LogSeal.KeyLine).</summary>
+    private static readonly Regex KeyLine = new(@"--- log key k=([0-9a-f]{8}) \[key:", RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// The tail sent, at most. The server keeps 96 KB of it and refuses a body over 256 KB - and after-match lines run
+    /// to a kilobyte or two each.
+    /// </summary>
+    private const int MaxLogChars = 90 * 1024;
 
     internal sealed record Context(
         string Trigger,
@@ -342,23 +357,51 @@ internal static class UnblockDiagnosis
         }
     }
 
-    /// <summary>The service log's last lines about unblocking, DoH and connecting - at most 250 of them.</summary>
-    private static string ReadLog(string? path)
+    /// <summary>
+    /// The service log's last lines about unblocking, DoH, connecting and the after-match watch - at most 250 of them and
+    /// <see cref="MaxLogChars"/> - led by the key lines their sealed parts need, or the server cannot open them: a key
+    /// line is written once per file and every few hundred sealed lines, and none of them matches <see cref="LogLines"/>.
+    /// </summary>
+    internal static string ReadLog(string? path)
     {
         if (path is null || !File.Exists(path)) return "";
         try
         {
+            // The whole file (4 MB at most, read once per report): the key a tail line needs can be at its top.
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            // The last 1 MB is plenty for 250 interesting lines, and the file can be 4 MB.
-            if (stream.Length > 1024 * 1024) stream.Seek(-1024 * 1024, SeekOrigin.End);
             using var reader = new StreamReader(stream);
-            var lines = reader.ReadToEnd().Split('\n').Select(l => l.TrimEnd('\r')).Where(l => LogLines.IsMatch(l)).ToList();
-            return string.Join('\n', lines.Skip(Math.Max(0, lines.Count - 250)));
+            return PickLogLines(reader.ReadToEnd().Split('\n').Select(l => l.TrimEnd('\r')));
         }
         catch (Exception)
         {
             return "";
         }
+    }
+
+    /// <summary>What <see cref="ReadLog"/> sends from a log's lines. Internal for TunnelCheck.</summary>
+    internal static string PickLogLines(IEnumerable<string> lines)
+    {
+        var keys = new Dictionary<string, string>(StringComparer.Ordinal);
+        var picked = new List<string>();
+        foreach (var line in lines)
+        {
+            if (KeyLine.Match(line) is { Success: true } key) keys[key.Groups[1].Value] = line;
+            else if (LogLines.IsMatch(line)) picked.Add(line);
+        }
+
+        var tail = new List<string>();
+        var size = 0;
+        for (var i = picked.Count - 1; i >= 0 && tail.Count < 250; i--)
+        {
+            size += picked[i].Length + 1;
+            if (size > MaxLogChars) break;
+            tail.Add(picked[i]);
+        }
+        tail.Reverse();
+
+        var needed = tail.SelectMany(l => SealedBy.Matches(l).Select(m => m.Groups[1].Value)).ToHashSet(StringComparer.Ordinal);
+        var keyLines = needed.Where(keys.ContainsKey).Order(StringComparer.Ordinal).Select(id => keys[id]);
+        return string.Join('\n', keyLines.Concat(tail));
     }
 
     private static string Summarise(string verdict, Context context, List<NameCheck> checks)

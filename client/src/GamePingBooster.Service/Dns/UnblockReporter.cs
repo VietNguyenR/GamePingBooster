@@ -14,12 +14,16 @@ namespace GamePingBooster.Service.Dns;
 /// /unblock-reports, where it is read on /admin/unblock/reports - so the next provider that starts blocking a game
 /// shows up there with its checks and its log, instead of as a player on a black screen in a support chat.
 ///
-/// Three things set it off, each one a failure seen on 2026-10-02:
+/// Four things set it off, the first three failures seen on 2026-10-02:
 ///
-///   enable-failed   unblocking would not turn on (an FPT machine's self-test timed out every minute)
-///   filtered        a claimed name has no edge that completes a handshake, and on its own addresses the line
-///                   cuts its handshake while another name's completes - cutting it by name (FPT, Viettel)
-///   black-screen    a game is running and a service's canary gives Windows no usable address
+///   enable-failed      unblocking would not turn on (an FPT machine's self-test timed out every minute)
+///   filtered           a claimed name has no edge that completes a handshake, and on its own addresses the line
+///                      cuts its handshake while another name's completes - cutting it by name (FPT, Viettel)
+///   black-screen       a game is running and a service's canary gives Windows no usable address
+///   after-match-stuck  the game was closed (or Disconnect pressed) before the next match and opened again soon
+///                      after - how players got out of the lobby's loading screen on 2026-10-11, which none of the
+///                      others sees (DNS is fine then). Said by TunnelEngine.AfterMatch; the log's "After the match"
+///                      lines are what it is for
 ///
 /// At most one report per trigger per network every <see cref="Quiet"/>, and only under the Settings switch that
 /// covers connection quality and discovery, signed by this device like them. Nothing is kept on disk: a report not
@@ -275,7 +279,7 @@ internal sealed class UnblockReporter : IDisposable
             json.WriteStartArray("flags");
             foreach (var flag in f.Flags) json.WriteStringValue(flag);
             json.WriteEndArray();
-            json.WriteString("summary", f.Summary);
+            json.WriteString("summary", SummaryOf(context, f));
             json.WriteString("seenAt", seenAt.UtcDateTime.ToString("O"));
             if (AppVersion is not null) json.WriteString("appVersion", AppVersion);
             json.WritePropertyName("report");
@@ -285,6 +289,13 @@ internal sealed class UnblockReporter : IDisposable
         }
         return stream.ToArray();
     }
+
+    /// <summary>
+    /// The line the dashboard lists. For a stuck lobby the DNS checks are background - what happened leads, and the
+    /// checks' finding follows in case the line did break.
+    /// </summary>
+    internal static string SummaryOf(UnblockDiagnosis.Context context, UnblockDiagnosis.Findings f) =>
+        context.Trigger == Tunnel.TunnelEngine.AfterMatchStuckTrigger ? $"{context.Detail} DNS checks: {f.Summary}" : f.Summary;
 
     public void Dispose()
     {

@@ -17,18 +17,44 @@ namespace GamePingBooster.Service.Tunnel;
 /// (which way each goes, what came down, whether the game is waiting for an answer).
 ///
 /// Starts when the supervisor sees a match end (the same gap that starts the rescan), stops when the next match starts,
-/// the game closes, the tunnel goes, or after <see cref="AfterMatchFor"/>. Addresses and names are sealed by the log.
+/// the game closes, the tunnel goes, or after <see cref="StuckWatchFor"/> (every 5 s for the first
+/// <see cref="AfterMatchFor"/>, every 30 s after). Addresses and names are sealed by the log.
+///
+/// And it reports it. Both stuck customers got out the same way: closed the game (or pressed Disconnect) before the next
+/// match and opened it again. When that is seen, <see cref="AfterMatchTrouble"/> sends an unblock report, which carries
+/// these lines - the stuck player no longer has to be asked for the log, and the reports add up by provider and relay.
 /// </summary>
 internal sealed partial class TunnelEngine
 {
     private static readonly TimeSpan AfterMatchEvery = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan AfterMatchFor = TimeSpan.FromMinutes(3);
 
+    /// <summary>After <see cref="AfterMatchFor"/> a line is written this often, until <see cref="StuckWatchFor"/>.</summary>
+    private static readonly TimeSpan AfterMatchSlowEvery = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How long after a match the game closing (or Disconnect) still counts as a way out of a stuck lobby. Longer than
+    /// the 5 s log: a player waits a minute or several before giving up, the owner waited longer than the customer.
+    /// </summary>
+    private static readonly TimeSpan StuckWatchFor = TimeSpan.FromMinutes(10);
+
+    /// <summary>The game opened again this soon after it closed (or after Disconnect) is a player getting unstuck.</summary>
+    private static readonly TimeSpan RelaunchWithin = TimeSpan.FromMinutes(5);
+
     /// <summary>Most connections named on one line; the rest are counted.</summary>
     private const int AfterMatchListed = 12;
 
     /// <summary>The unblock proxy's open connections, one clause per name and path; set by Program (UnblockDns).</summary>
     public Func<string?>? LobbyConnections { get; set; }
+
+    /// <summary>
+    /// Told (trigger, what happened, null) when a player looks stuck on the way back to the lobby; set by Program to
+    /// UnblockReporter.Trouble, which sends it with the log's tail - the "After the match" lines - to
+    /// /admin/unblock/reports. Must not block.
+    /// </summary>
+    public Action<string, string, string?>? AfterMatchTrouble { get; set; }
+
+    public const string AfterMatchStuckTrigger = "after-match-stuck";
 
     private int _afterMatchWatching;
 
@@ -41,9 +67,6 @@ internal sealed partial class TunnelEngine
             try
             {
                 await WatchAfterMatchAsync(game, tunnel, ct).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
             }
             catch (Exception ex)
             {
@@ -62,35 +85,91 @@ internal sealed partial class TunnelEngine
         var home = tunnel;
         var rate = new UdpRate(began, AllGameUdpPackets(home));
         var firstSeen = new Dictionary<(int Port, IPEndPoint Remote), long>();
+        var lastPids = GameProcessIds(game);
+        var lastLine = TimeSpan.Zero;
+        string? endedBy = null;
         string Since() => $"+{Stopwatch.GetElapsedTime(began).TotalSeconds:0} s";
 
-        while (Stopwatch.GetElapsedTime(began) < AfterMatchFor)
+        try
         {
-            await Task.Delay(AfterMatchEvery, ct).ConfigureAwait(false);
-            if (_state != TunnelState.Connected || _tunnel is not { } now) return;
-            if (!ReferenceEquals(now, home))
+            while (Stopwatch.GetElapsedTime(began) < StuckWatchFor)
             {
-                // Moved between matches: the new tunnel's count starts again.
-                home = now;
-                rate = new UdpRate(Stopwatch.GetTimestamp(), AllGameUdpPackets(home));
-            }
-            else if (rate.Feed(Stopwatch.GetTimestamp(), AllGameUdpPackets(home)) >= GameOpenMatchPerSecond)
-            {
-                _log($"After the match, {Since()}: the next match is loading - stopped watching the game's connections.");
-                return;
-            }
+                await Task.Delay(AfterMatchEvery, ct).ConfigureAwait(false);
+                if (_state is TunnelState.Disconnected or TunnelState.Faulted)
+                {
+                    endedBy = "the player disconnected";
+                    break;
+                }
+                // Connecting or Reconnecting: a move between matches, or a failover - wait for it.
+                if (_state != TunnelState.Connected || _tunnel is not { } now) continue;
+                if (!ReferenceEquals(now, home))
+                {
+                    // Moved between matches: the new tunnel's count starts again.
+                    home = now;
+                    rate = new UdpRate(Stopwatch.GetTimestamp(), AllGameUdpPackets(home));
+                }
+                else if (rate.Feed(Stopwatch.GetTimestamp(), AllGameUdpPackets(home)) >= GameOpenMatchPerSecond)
+                {
+                    _log($"After the match, {Since()}: the next match is loading - stopped watching the game's connections.");
+                    return;
+                }
 
-            var pids = GameProcessIds(game);
-            if (pids.Count == 0)
-            {
-                _log($"After the match, {Since()}: the game closed.");
-                return;
+                var pids = GameProcessIds(game);
+                if (pids.Count == 0)
+                {
+                    _log($"After the match, {Since()}: the game closed.");
+                    endedBy = "the game closed";
+                    break;
+                }
+                lastPids = pids;
+
+                var elapsed = Stopwatch.GetElapsedTime(began);
+                if (elapsed > AfterMatchFor && elapsed - lastLine < AfterMatchSlowEvery) continue;
+                lastLine = elapsed;
+                _log($"After the match, {Since()}: {DescribeGameTcp(TcpConnections.OfProcesses(pids), firstSeen)}" +
+                     (LobbyConnections?.Invoke() is { } carried ? $" | carried by the unblock proxy: {carried}" : "") + ".");
             }
-            _log($"After the match, {Since()}: {DescribeGameTcp(TcpConnections.OfProcesses(pids), firstSeen)}" +
-                 (LobbyConnections?.Invoke() is { } carried ? $" | carried by the unblock proxy: {carried}" : "") + ".");
         }
-        _log($"After the match: no match for {AfterMatchFor.TotalMinutes:0} min - stopped watching the game's connections.");
+        catch (OperationCanceledException)
+        {
+            // The supervisor's token: Disconnect, or the service stopping.
+            endedBy = "the player disconnected";
+        }
+
+        if (endedBy is null)
+        {
+            _log($"After the match: no match for {StuckWatchFor.TotalMinutes:0} min - stopped watching the game's connections.");
+            return;
+        }
+        var endedAt = Stopwatch.GetElapsedTime(began);
+        if (lastPids.Count == 0) return;   // the game was not running when the watch began
+
+        // The way out of a stuck lobby, seen on 2026-10-11 twice: close the game (or Disconnect) and open it again.
+        // Not tied to the supervisor's token - Disconnect is one of the ways, and this only reads the process list.
+        var closed = Stopwatch.GetTimestamp();
+        while (Stopwatch.GetElapsedTime(closed) < RelaunchWithin)
+        {
+            await Task.Delay(AfterMatchEvery, CancellationToken.None).ConfigureAwait(false);
+            if (!Relaunched(lastPids, GameProcessIds(game))) continue;
+
+            var detail = StuckDetail(game.Name, endedBy, endedAt, Stopwatch.GetElapsedTime(closed));
+            _log($"After the match: {detail} - reporting it.");
+            AfterMatchTrouble?.Invoke(AfterMatchStuckTrigger, detail, null);
+            return;
+        }
     }
+
+    /// <summary>
+    /// The game is running again as new processes: none of the ones running when the watch ended is left. Internal for
+    /// TunnelCheck.
+    /// </summary>
+    internal static bool Relaunched(IReadOnlySet<uint> before, IReadOnlySet<uint> now) =>
+        before.Count > 0 && now.Count > 0 && !now.Overlaps(before);
+
+    /// <summary>"PUBG: the game closed 50 s after the match ended and was opened again 40 s later". Internal for TunnelCheck.</summary>
+    internal static string StuckDetail(string game, string endedBy, TimeSpan endedAt, TimeSpan reopenedAfter) =>
+        $"{game}: {endedBy} {endedAt.TotalSeconds:0} s after the match ended and the game was opened again " +
+        $"{reopenedAfter.TotalSeconds:0} s later - stuck on the way back to the lobby?";
 
     /// <summary>The ids of the game's running processes (TslGame and its BattlEye shim, say).</summary>
     private static HashSet<uint> GameProcessIds(GameEntry game)

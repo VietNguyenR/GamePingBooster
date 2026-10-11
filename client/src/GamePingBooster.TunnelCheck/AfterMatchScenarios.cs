@@ -83,4 +83,42 @@ internal static partial class Program
         Check($"an open connection is told with its name and path ({said})",
             said?.StartsWith("prod-live-images.playbattlegrounds.com via the line whole: 1 open", StringComparison.Ordinal) == true, said ?? "null");
     }
+
+    /// <summary>
+    /// Closing the game (or Disconnect) before the next match and opening it again is how both stuck players got out on
+    /// 2026-10-11 - so that is what sends an after-match-stuck report, carrying the "After the match" lines with the key
+    /// that opens them.
+    /// </summary>
+    private static Task AStuckLobbyIsReportedWithItsLines()
+    {
+        Check("the game running again as new processes is a relaunch",
+            TunnelEngine.Relaunched(new HashSet<uint> { 10, 11 }, new HashSet<uint> { 20 }), "not a relaunch");
+        Check("the same game still running is not",
+            !TunnelEngine.Relaunched(new HashSet<uint> { 10, 11 }, new HashSet<uint> { 11, 20 }), "a relaunch");
+        Check("the game still closed is not",
+            !TunnelEngine.Relaunched(new HashSet<uint> { 10 }, new HashSet<uint>()), "a relaunch");
+        Check("nothing running when the watch began is not",
+            !TunnelEngine.Relaunched(new HashSet<uint>(), new HashSet<uint> { 20 }), "a relaunch");
+
+        var detail = TunnelEngine.StuckDetail("PUBG", "the game closed", TimeSpan.FromSeconds(50), TimeSpan.FromSeconds(41));
+        Check($"what happened is said in a line ({detail})",
+            detail == "PUBG: the game closed 50 s after the match ended and the game was opened again 41 s later - stuck on the way back to the lobby?",
+            detail);
+
+        const string key = "2026-10-11 20:40:00.000  --- log key k=1a2b3c4d [key:QUJD] ---";
+        const string other = "2026-10-11 19:00:00.000  --- log key k=99999999 [key:REVG] ---";
+        var after = "2026-10-11 20:50:05.000  After the match, +5 s: game TCP 2: [enc:1a2b3c4d:AAAA]";
+        var lines = new List<string> { other, key, "2026-10-11 20:49:00.000  Relay hk-3: 41 ms", after,
+            "2026-10-11 20:50:40.000  After the match, +40 s: the game closed." };
+        var log = UnblockDiagnosis.PickLogLines(lines);
+        Check("the after-match lines are sent, led by the key their sealed parts need, and nothing else",
+            log == string.Join((char)10, key, after, "2026-10-11 20:50:40.000  After the match, +40 s: the game closed."), log);
+
+        // Long lines: the tail stops short of what the server takes (96 KB kept, 256 KB a body).
+        var many = Enumerable.Range(0, 400).Select(i => $"After the match, +{i} s: {new string('x', 1500)}").ToList();
+        var capped = UnblockDiagnosis.PickLogLines(many);
+        Check($"the tail fits the server ({capped.Length} chars) and ends with the newest line",
+            capped.Length <= 90 * 1024 && capped.EndsWith(many[^1], StringComparison.Ordinal), $"{capped.Length} chars");
+        return Task.CompletedTask;
+    }
 }
