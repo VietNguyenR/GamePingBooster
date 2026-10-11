@@ -149,6 +149,7 @@ public static class Program
         // The engine also stands in as the tunnel for the few names the profile routes through it (UnblockApp.tunnel):
         // a line that resets a handshake by its name is past what DNS can fix.
         await using var unblock = new UnblockDns(() => engine.UnblockPolicy, log, engine);
+        engine.LobbyConnections = unblock.DescribeLobbyConnections;
 
         // When unblocking goes wrong, the line is checked the way tools\Check-Unblock.ps1 checks it and the result
         // sent to /admin/unblock/reports - under the same Settings switch as connection quality and discovery.

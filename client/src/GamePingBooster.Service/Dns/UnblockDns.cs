@@ -89,6 +89,9 @@ internal sealed class UnblockDns : IAsyncDisposable
     public IReadOnlyList<string> Services =>
         Enabled ? [.. _active.Apps.Select(a => a.Name)] : [];
 
+    /// <summary>The split proxy's open connections, one clause per name and path (SplitProxy.DescribeOpen); null for none.</summary>
+    public string? DescribeLobbyConnections() => _resolver?.Split?.DescribeOpen();
+
     /// <summary>One line for the status pipe, so the UI can say something true about this half of the product.</summary>
     public string Detail
     {

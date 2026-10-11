@@ -99,6 +99,7 @@ internal sealed partial class TunnelEngine
             due = _matchGap.Feed(NowMs(), AllGameUdpPackets(tunnel), LastSentAnyMs(tunnel));
         }
         if (!due) return;
+        StartAfterMatchWatch(tunnel, ct);
 
         // Region routing on: the regions are planned again, every relay for every region, instead of moving home for
         // the one region connect guessed. See ReplanBetweenMatchesAsync.

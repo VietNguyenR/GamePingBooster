@@ -90,10 +90,11 @@ internal sealed class SplitProxy : IAsyncDisposable
     /// <summary>
     /// What was decided for one name. Split: the proxy answers it and takes it over the line; Whole: with the hello
     /// unchanged rather than split. Edges are kept after a failure: the tunnel fallback needs them. Held: until when a
-    /// connection cut live keeps the name on the relay, whatever a probe finds in the meantime.
+    /// connection cut live keeps the name on the relay, whatever a probe finds in the meantime. CutSeen: when this line
+    /// was first seen resetting the name's whole hello - from then on it never goes whole again (see JudgeAsync).
     /// </summary>
     internal sealed record Verdict(bool Split, IPAddress[] Edges, DateTimeOffset At, string Why, DateTimeOffset Held = default,
-        bool Whole = false);
+        bool Whole = false, DateTimeOffset CutSeen = default);
 
     private readonly DohUpstream _doh;
     private readonly IUnblockRoutes? _routes;
@@ -164,6 +165,7 @@ internal sealed class SplitProxy : IAsyncDisposable
     private long _viaProxy;
     private long _proxyBytes;
     private readonly ConcurrentDictionary<Socket, ProxyRun> _proxied = new();
+    private readonly ConcurrentDictionary<Socket, OpenConnection> _open = new();
     private readonly Stopwatch _proxyClock = Stopwatch.StartNew();
 
     /// <summary>How often the lobby proxies' throughput is looked at.</summary>
@@ -176,6 +178,59 @@ internal sealed class SplitProxy : IAsyncDisposable
     /// alone for <see cref="ProxyDownFor"/>.
     /// </summary>
     internal ProxySpeedWatch SpeedWatch { get; init; } = new();
+
+    /// <summary>
+    /// One connection this carries now, for <see cref="DescribeOpen"/>: which way it goes, what it moved, and whether the
+    /// game is waiting - it sent something after the last byte came back. Thread-safe: both copies call in.
+    /// </summary>
+    internal sealed class OpenConnection(string name, string path, long openedMs)
+    {
+        private readonly Lock _lock = new();
+        private long _up, _down, _lastUpMs = -1, _lastDownMs = -1;
+
+        public string Name => name;
+        public string Path => path;
+
+        public void Up(int n, long nowMs)
+        {
+            lock (_lock) { _up += n; _lastUpMs = nowMs; }
+        }
+
+        public void Down(int n, long nowMs)
+        {
+            lock (_lock) { _down += n; _lastDownMs = nowMs; }
+        }
+
+        /// <summary>
+        /// Bytes down; how long the game has waited for an answer (null when it is not waiting); how long since the
+        /// last byte came down (an idle keep-alive is quiet too - only waiting says something is owed).
+        /// </summary>
+        public (long Down, long? WaitingMs, long QuietMs, long AgeMs) Read(long nowMs)
+        {
+            lock (_lock)
+                return (_down, _lastUpMs > _lastDownMs ? nowMs - _lastUpMs : null,
+                    nowMs - Math.Max(_lastDownMs, openedMs), nowMs - openedMs);
+        }
+    }
+
+    /// <summary>
+    /// The connections carried now, one line per name and path: how many, what came down, and the longest the game has
+    /// been waiting for an answer on one - the thing nothing else shows. FPT, 2026-10-11: the lobby stuck after a match
+    /// twice, and the log could not tell whether a connection through vn-5 had gone silent. Null when none is open.
+    /// </summary>
+    public string? DescribeOpen()
+    {
+        var now = _proxyClock.ElapsedMilliseconds;
+        var groups = _open.Values.GroupBy(c => (c.Name, c.Path)).Select(g =>
+        {
+            var reads = g.Select(c => c.Read(now)).ToArray();
+            var waiting = reads.Where(r => r.WaitingMs is not null).Select(r => r.WaitingMs!.Value).ToArray();
+            return $"{g.Key.Name} via {g.Key.Path}: {reads.Length} open, {reads.Sum(r => r.Down) / 1024} KB down, " +
+                   (waiting.Length == 0 ? "none waiting" : $"{waiting.Length} waiting, longest {waiting.Max() / 1000.0:0.0} s") +
+                   $", quiet up to {reads.Max(r => r.QuietMs) / 1000} s, oldest {reads.Max(r => r.AgeMs) / 1000} s";
+        }).ToArray();
+        return groups.Length == 0 ? null : string.Join("; ", groups);
+    }
 
     /// <summary>
     /// Told the bytes the proxied connections received in one tick; says when the proxies are too slow. A tick with
@@ -431,6 +486,8 @@ internal sealed class SplitProxy : IAsyncDisposable
     internal async Task<Verdict> JudgeAsync(string name, IReadOnlyList<IPAddress> candidates, CancellationToken ct)
     {
         var clock = Stopwatch.StartNew();
+        var before = _verdicts.TryGetValue(name, out var old) ? old : null;
+        var cutSeen = before?.CutSeen ?? default;
         Verdict verdict;
         if (candidates.Count == 0)
         {
@@ -466,17 +523,26 @@ internal sealed class SplitProxy : IAsyncDisposable
             var resetSomewhere = reached.Any(r => r.Whole.Outcome == "reset");
             IPAddress[] wholePassing = [.. results.Where(r => SplitPasses(r.Whole.Outcome)).OrderBy(r => r.Whole.Ms).Select(r => r.Address)];
 
+            // Only a reset proves a filter - a stall is as often a slow edge (the .cn mirror).
+            if (cutSeen == default && cut && reached.Any(r => r.Whole.Outcome == "reset")) cutSeen = DateTimeOffset.UtcNow;
+
             verdict = cut
                 ? passing.Length == 0
                     ? new Verdict(false, [], DateTimeOffset.UtcNow, $"the line cuts it split as well ({seen})")
                     : new Verdict(true, passing, DateTimeOffset.UtcNow, $"the line cuts it whole and lets it through split ({seen})")
+                // A line once seen resetting the name whole stays split: FPT, 2026-10-11, let prod-live-xenuine through
+                // whole on all three edges at 20:42, the name went whole, and FPT reset the game's next connection to it
+                // at 20:48. The split passes wherever whole does, so staying split costs nothing.
+                : cutSeen != default && passing.Length > 0
+                    ? new Verdict(true, passing, DateTimeOffset.UtcNow,
+                        $"the line let it through whole this time, but reset it whole at {cutSeen.ToLocalTime():HH:mm} - it stays split ({seen})")
                 : resetSomewhere || wholePassing.Length == 0
                     ? new Verdict(false, passing, DateTimeOffset.UtcNow, $"the line does not cut it on every edge ({seen})")
                     : await WholeOrRelayAsync(wholePassing, source, seen, ct).ConfigureAwait(false);
         }
+        verdict = verdict with { CutSeen = cutSeen };
 
         // A cut seen live is believed over a probe: the probe's hello is SChannel's, the game's is its own.
-        var before = _verdicts.TryGetValue(name, out var old) ? old : null;
         if (before is not null && before.Held > DateTimeOffset.UtcNow)
         {
             verdict = verdict with { Split = false, Whole = false, Held = before.Held, Why = before.Why };
@@ -630,12 +696,24 @@ internal sealed class SplitProxy : IAsyncDisposable
             if (reply is not null) await client.SendAsync(reply, SocketFlags.None, ct).ConfigureAwait(false);
             var run = viaProxy ? new ProxyRun() : null;
             if (run is not null) _proxied[client] = run;
-            Action<int>? downBytes = run is null ? null : n =>
+            var open = new OpenConnection(name,
+                viaProxy ? $"the lobby proxy {(edge.RemoteEndPoint as IPEndPoint)?.Address}"
+                : overLine ? $"the line {(verdict!.Whole ? "whole" : "split")}" : "the relay",
+                _proxyClock.ElapsedMilliseconds);
+            _open[client] = open;
+            Action<int> downBytes = n =>
             {
+                open.Down(n, _proxyClock.ElapsedMilliseconds);
+                if (run is null) return;
                 Interlocked.Add(ref _proxyBytes, n);
                 run.Down(n, _proxyClock.ElapsedMilliseconds);
             };
-            if (await PumpAsync(client, edge, overLine, ct, downBytes, run is null ? null : _ => run.Up()).ConfigureAwait(false) is { } dead)
+            Action<int> upBytes = n =>
+            {
+                open.Up(n, _proxyClock.ElapsedMilliseconds);
+                run?.Up();
+            };
+            if (await PumpAsync(client, edge, overLine, ct, downBytes, upBytes).ConfigureAwait(false) is { } dead)
             {
                 // Reset, not closed: the game must see a failure at once and open the connection again - and the
                 // name is on the relay by then, so the new one goes through the tunnel.
@@ -653,6 +731,7 @@ internal sealed class SplitProxy : IAsyncDisposable
         finally
         {
             _proxied.TryRemove(client, out _);
+            _open.TryRemove(client, out _);
             edge?.Dispose();
             client.Dispose();
         }
@@ -748,6 +827,7 @@ internal sealed class SplitProxy : IAsyncDisposable
         var clock = Stopwatch.StartNew();
         string? why = null;
         var silent = 0;
+        var resetWhole = false;
         foreach (var address in edges.Take(ProbedEdges))
         {
             if (_source(address) is not { } source) { why = "no way out over the line"; break; }
@@ -799,19 +879,24 @@ internal sealed class SplitProxy : IAsyncDisposable
             }
             catch (SocketException ex)
             {
-                why = $"{address} {(ex.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted ? "reset" : ex.SocketErrorCode.ToString())} the {how} hello";
+                var reset = ex.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted;
+                resetWhole = reset && whole;
+                why = $"{address} {(reset ? "reset" : ex.SocketErrorCode.ToString())} the {how} hello";
             }
             break;   // a reset or close after the hello is the line's, not the edge's: no point trying the next
         }
 
-        HoldOnRelay(name, $"the line cut it live ({how}): {why}");
+        HoldOnRelay(name, $"the line cut it live ({how}): {why}", resetWhole);
         _log($"Unblock: {name} - the {how} hello did not get through over the line ({why}); this connection goes through the relay, and so " +
              $"does the name for {FailedFor.TotalMinutes:0} min.");
         return (null, null);
     }
 
-    /// <summary>Back to the relay for <see cref="FailedFor"/>: the lookups that follow get the tunnel's answer, not this address.</summary>
-    private void HoldOnRelay(string name, string why)
+    /// <summary>
+    /// Back to the relay for <see cref="FailedFor"/>: the lookups that follow get the tunnel's answer, not this address.
+    /// <paramref name="resetWhole"/>: the line reset the game's whole hello - the name never goes whole again here.
+    /// </summary>
+    private void HoldOnRelay(string name, string why, bool resetWhole = false)
     {
         if (_verdicts.TryGetValue(name, out var verdict))
         {
@@ -821,6 +906,7 @@ internal sealed class SplitProxy : IAsyncDisposable
                 Whole = false,
                 Held = DateTimeOffset.UtcNow.Add(FailedFor),
                 Why = why,
+                CutSeen = verdict.CutSeen != default ? verdict.CutSeen : resetWhole ? DateTimeOffset.UtcNow : default,
             };
         }
         _said.TryRemove(name, out _);

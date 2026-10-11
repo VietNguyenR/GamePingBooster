@@ -59,6 +59,40 @@ internal static partial class Program
             Check("and judging it routes nothing into the tunnel", routes.Names.IsEmpty, string.Join(", ", routes.Names));
         }
 
+        // FPT, 2026-10-11: the line let prod-live-xenuine through whole once, the name went whole, and the next
+        // connection was reset. A name this line has reset whole before stays split when a probe finds it free.
+        var cutBefore = DateTimeOffset.UtcNow.AddHours(-1);
+        await using (var flaky = new SplitProxy(new DohUpstream(_ => { }), new SplitRoutes(), s => Log.Enqueue(s),
+            new ConcurrentDictionary<string, SplitProxy.Verdict>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["prod-live-images.playbattlegrounds.com"] = new(true, [EdgeAddress], cutBefore, "cut an hour ago", CutSeen: cutBefore),
+            },
+            new IPEndPoint(IPAddress.Loopback, 0), fpt.Port, _ => LineAddress)
+        {
+            SplitPasses = outcome => outcome is "ok" or "cert-mismatch",
+        })
+        {
+            var stays = await flaky.JudgeAsync("prod-live-images.playbattlegrounds.com", [EdgeAddress], CancellationToken.None);
+            Check("a name the line reset whole before stays split when it passes whole now", stays.Split && !stays.Whole && stays.CutSeen == cutBefore,
+                stays.Why);
+        }
+        Check("a name the probe sees reset whole is remembered as cut", verdict.CutSeen != default, verdict.Why);
+
+        // The game's own whole hello reset live marks the name the same way.
+        var wholeVerdicts = new ConcurrentDictionary<string, SplitProxy.Verdict>(StringComparer.OrdinalIgnoreCase)
+        {
+            [SplitBlocked] = new(true, [EdgeAddress], DateTimeOffset.UtcNow, "judged whole a moment ago", Whole: true),
+        };
+        await using (var wrongWhole = new SplitProxy(new DohUpstream(_ => { }), new SplitRoutes(), s => Log.Enqueue(s), wholeVerdicts,
+            new IPEndPoint(IPAddress.Loopback, 0), fpt.Port, _ => LineAddress))
+        {
+            wrongWhole.Start();
+            var through = await GetThroughAsync(wrongWhole.Endpoint, SplitBlocked);
+            Check($"a whole hello reset live still gets through, by the tunnel ({through})",
+                through.StartsWith("HTTP/1.1 200", StringComparison.Ordinal) && wrongWhole.FellBack == 1, $"fell back {wrongWhole.FellBack}");
+            Check("and the name is remembered as cut whole", wholeVerdicts[SplitBlocked].CutSeen != default, wholeVerdicts[SplitBlocked].Why);
+        }
+
         // The game's side over the line whole: the filter never sees the blocked name, so 200.
         await using (var overLine = new SplitProxy(new DohUpstream(_ => { }), new SplitRoutes(), s => Log.Enqueue(s),
             new ConcurrentDictionary<string, SplitProxy.Verdict>(StringComparer.OrdinalIgnoreCase)

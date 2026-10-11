@@ -95,9 +95,30 @@ internal static partial class TcpConnections
     /// Every ESTABLISHED IPv4 connection with the process that owns it (GetExtendedTcpTable, TCP_TABLE_OWNER_PID_ALL).
     /// Empty when the table cannot be read. Internal for TunnelCheck.
     /// </summary>
-    internal static List<(IPEndPoint Remote, uint Pid)> Established()
+    internal static List<(IPEndPoint Remote, uint Pid)> Established() =>
+        [.. OwnedRows().Where(r => r.State == StateEstablished).Select(r => (r.Remote, r.Pid))];
+
+    /// <summary>One connection of a process, for the log: what it is connected to and how far it got.</summary>
+    internal readonly record struct Owned(uint State, int LocalPort, IPEndPoint Remote, uint Pid)
     {
-        var result = new List<(IPEndPoint Remote, uint Pid)>();
+        public string StateName => State switch
+        {
+            1 => "Closed", 2 => "Listen", 3 => "SynSent", 4 => "SynReceived", 5 => "Established", 6 => "FinWait1",
+            7 => "FinWait2", 8 => "CloseWait", 9 => "Closing", 10 => "LastAck", 11 => "TimeWait", _ => $"state{State}",
+        };
+    }
+
+    /// <summary>
+    /// The connections of <paramref name="pids"/> that go somewhere - not listening, not finished (TIME_WAIT), not to
+    /// this machine except the split proxy's 127.77.x. Empty when the table cannot be read.
+    /// </summary>
+    internal static List<Owned> OfProcesses(IReadOnlySet<uint> pids) =>
+        [.. OwnedRows().Where(r => pids.Contains(r.Pid) && r.State is > StateListen and < StateTimeWait &&
+            !(IPAddress.IsLoopback(r.Remote.Address) && r.Remote.Address.GetAddressBytes()[1] != 77))];
+
+    private static List<Owned> OwnedRows()
+    {
+        var result = new List<Owned>();
         uint size = 0;
         for (var attempt = 0; attempt < 4; attempt++)
         {
@@ -113,9 +134,14 @@ internal static partial class TcpConnections
                 for (var i = 0; i < count; i++)
                 {
                     var at = 4 + i * 24;
-                    if ((uint)Marshal.ReadInt32(buffer, at) != StateEstablished) continue;
-                    var remote = new Row { RemotePort = (uint)Marshal.ReadInt32(buffer, at + 16) };
-                    result.Add((new IPEndPoint(new IPAddress((uint)Marshal.ReadInt32(buffer, at + 12)), remote.RemotePortNumber),
+                    var ports = new Row
+                    {
+                        LocalPort = (uint)Marshal.ReadInt32(buffer, at + 8),
+                        RemotePort = (uint)Marshal.ReadInt32(buffer, at + 16),
+                    };
+                    var local = new Row { RemotePort = ports.LocalPort };
+                    result.Add(new Owned((uint)Marshal.ReadInt32(buffer, at), local.RemotePortNumber,
+                        new IPEndPoint(new IPAddress((uint)Marshal.ReadInt32(buffer, at + 12)), ports.RemotePortNumber),
                         (uint)Marshal.ReadInt32(buffer, at + 20)));
                 }
                 return result;
