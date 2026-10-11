@@ -34,9 +34,10 @@ internal sealed class ProbeTap
     /// <summary>A reply later than this is not paired with that send - it is counted lost and the reply ignored.</summary>
     internal const double MaxRttMs = 2000;
 
-    /// <summary>How much probing before the match a round keeps. The game decides on its latest measurements; a
-    /// long lobby's earlier ones are another moment of the line.</summary>
-    internal static readonly TimeSpan Window = TimeSpan.FromSeconds(120);
+    /// <summary>How much probing before the match a round keeps. 600 s, not the first 120: PUBG probes in bursts
+    /// minutes apart (a 2.9 h capture holds ~190 packets per Singapore endpoint), so two minutes before the match
+    /// usually held no burst at all. Each endpoint's LastSecondsBeforeMatch says how fresh its numbers are.</summary>
+    internal static readonly TimeSpan Window = TimeSpan.FromSeconds(600);
 
     /// <summary>Events kept, oldest dropped first. Probes are tens per endpoint per round; this is many rounds.</summary>
     private const int MaxEvents = 8192;

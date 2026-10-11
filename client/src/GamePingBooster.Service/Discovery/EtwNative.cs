@@ -40,6 +40,11 @@ internal static unsafe partial class EtwNative
     internal const uint ProcessTraceModeRealTime = 0x00000100;
     internal const uint ProcessTraceModeEventRecord = 0x10000000;
 
+    /// <summary>Hands event times over in the session's own clock (<see cref="ClockQpc"/>). Without it ProcessTrace
+    /// turns every one into a FILETIME, whatever the session was started with - which is what 0.4.7 got: ProbeTap
+    /// compared FILETIMEs to Stopwatch.GetTimestamp and never kept a probe (2026-10-11, 0 rounds in 239 matches).</summary>
+    internal const uint ProcessTraceModeRawTimestamp = 0x00001000;
+
     internal const uint EnableTraceParametersVersion2 = 2;
     internal const uint EventFilterTypeEventId = 0x80000200;
 

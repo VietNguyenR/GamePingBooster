@@ -260,7 +260,7 @@ internal sealed unsafe class KernelNetworkTrace : IDisposable
         var logfile = new EventTraceLogfile
         {
             LoggerName = _loggerName,
-            ProcessTraceMode = ProcessTraceModeRealTime | ProcessTraceModeEventRecord,
+            ProcessTraceMode = ProcessTraceModeRealTime | ProcessTraceModeEventRecord | ProcessTraceModeRawTimestamp,
             EventRecordCallback = &OnEventRecord,
             Context = GCHandle.ToIntPtr(_self),
         };
@@ -376,11 +376,24 @@ internal sealed unsafe class KernelNetworkTrace : IDisposable
             Timestamp = record->TimeStamp,
         };
 
+        if (!_clockChecked)
+        {
+            // Event times are subtracted from Stopwatch.GetTimestamp (ProbeTap). An hour apart is another clock, and
+            // every probe would be silently dropped - say so once instead (0.4.7 shipped exactly that).
+            _clockChecked = true;
+            if (Math.Abs(started - record->TimeStamp) > Stopwatch.Frequency * 3600)
+            {
+                _log($"ETW event times are not on the Stopwatch clock (event {record->TimeStamp}, now {started}) - " +
+                     "probe round trips will be wrong.");
+            }
+        }
+
         _udpEvents++;
         _sink.OnUdpEvent(in e);
         _callbackTicks += Stopwatch.GetTimestamp() - started;
     }
 
+    private bool _clockChecked;
     private int _disposed;
 
     /// <summary>Safe to call twice and from two threads: the console's exit handler and the main
