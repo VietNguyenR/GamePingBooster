@@ -7,6 +7,7 @@ using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Protocol;
 using GamePingBooster.Service.Dns;
 using GamePingBooster.Service.Tunnel;
+using GamePingBooster.Service.Update;
 
 namespace GamePingBooster.Service.Ipc;
 
@@ -30,14 +31,17 @@ internal sealed class PipeServer
 {
     private readonly TunnelEngine _engine;
     private readonly UnblockDns _unblock;
+    private readonly AutoUpdater _updater;
     private readonly Action<string> _log;
     private StreamWriter? _writer;
+    private uint? _uiSession;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
 
-    public PipeServer(TunnelEngine engine, UnblockDns unblock, Action<string> log)
+    public PipeServer(TunnelEngine engine, UnblockDns unblock, AutoUpdater updater, Action<string> log)
     {
         _engine = engine;
         _unblock = unblock;
+        _updater = updater;
         _log = log;
         _engine.StatusChanged += status => _ = PushAsync(status);
     }
@@ -50,6 +54,8 @@ internal sealed class PipeServer
             {
                 using var pipe = CreatePipe();
                 await pipe.WaitForConnectionAsync(ct).ConfigureAwait(false);
+                // The session the app runs in: an update closes it, and the new service starts it again there.
+                _uiSession = UserSession.OfPipeClient(pipe.SafePipeHandle);
                 _log("UI connected.");
 
                 using var reader = new StreamReader(pipe, Encoding.UTF8, false, 4096, leaveOpen: true);
@@ -80,6 +86,7 @@ internal sealed class PipeServer
                 }
 
                 _writer = null;
+                _uiSession = null;
                 _log("UI disconnected.");
 
                 // The app has closed (or crashed). The adapter kept between connects has no reason to stay.
@@ -136,6 +143,14 @@ internal sealed class PipeServer
         switch (cmd.Verb)
         {
             case "connect":
+                // Setup has been started and closes everything within seconds; a tunnel brought up now would
+                // be torn down mid-connect. The status already says "installing", which the app shows.
+                if (_updater.Installing)
+                {
+                    _log("connect refused: an update is being installed.");
+                    await PushAsync(_engine.Snapshot()).ConfigureAwait(false);
+                    break;
+                }
                 try
                 {
                     await _engine.ConnectAsync(cmd.RelayId, cmd.GameId, ct).ConfigureAwait(false);
@@ -395,6 +410,20 @@ internal sealed class PipeServer
                 break;
             }
 
+            // Only a request to look now. Which release, whether to install it and when are AutoUpdater's.
+            case "check-update":
+                _updater.CheckNow();
+                await PushAsync(_engine.Snapshot()).ConfigureAwait(false);
+                break;
+
+            // The updater window is open (the app starts it): check now and, with a release ready, install it with
+            // the player watching. Carries nothing - the release, the file and whether it may run now are still
+            // AutoUpdater's. Progress goes to UpdateProgress, which the window reads.
+            case "update-now":
+                _updater.UpdateNow();
+                await PushAsync(_engine.Snapshot()).ConfigureAwait(false);
+                break;
+
             default:
                 _log($"Unsupported verb: {cmd.Verb}");
                 break;
@@ -415,6 +444,9 @@ internal sealed class PipeServer
         }
     }
 
+    /// <summary>The Windows session of the app attached now, or null when none is.</summary>
+    public uint? UiSession => _writer is null ? null : _uiSession;
+
     /// <summary>Pushes one status message to the UI. Swallows errors because the UI may be gone.</summary>
     public async Task PushAsync(StatusMessage status)
     {
@@ -428,6 +460,7 @@ internal sealed class PipeServer
         status.Unblock = _unblock.Enabled;
         status.UnblockDetail = _unblock.Detail;
         status.UnblockServices = [.. _unblock.Services];
+        _updater.Stamp(status);
 
         await _writeLock.WaitAsync().ConfigureAwait(false);
         try

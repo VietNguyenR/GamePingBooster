@@ -27,7 +27,9 @@ env:
   WINTUN_VERSION: "0.14.1"
   # The Certum cloud certificate (CN=Tien Viet Nguyen, valid to 2027-10-11). Public, not a
   # secret: it is in every signed file. Pinned so the build refuses any other certificate the
-  # login happens to mount. Renewing the certificate means changing this line.
+  # login happens to mount. Renewing the certificate means changing this line - AND adding the new
+  # thumbprint to Authenticode.TrustedSigners (client/src/GamePingBooster.Service/Update) in a release
+  # signed with the OLD one first: installed services refuse to auto-install anything else (0.5.0).
   CERTUM_CERT_SHA1: "04A7242EFFEDCAD52742F63F95C04769B7C692E7"
 
 jobs:
@@ -179,7 +181,7 @@ jobs:
 
       - name: Build client and package the installer
         env:
-          # gpb.ps1 signs gpb-service.exe and GamePingBooster.exe, then Inno signs the setup and
+          # gpb.ps1 signs gpb-service.exe, GamePingBooster.exe and gpb-updater.exe, then Inno signs the setup and
           # its uninstaller. REQUIRE_SIGNED makes a missing certificate a failure: a release is
           # never unsigned by accident.
           GPB_SIGN_THUMBPRINT: ${{ env.CERTUM_CERT_SHA1 }}

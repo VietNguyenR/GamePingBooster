@@ -7,6 +7,7 @@ using Avalonia.Threading;
 using GamePingBooster.App.Services;
 using GamePingBooster.App.ViewModels;
 using GamePingBooster.Core.Ipc;
+using GamePingBooster.Core.Updates;
 
 namespace GamePingBooster.App.Views;
 
@@ -340,12 +341,17 @@ public partial class MainWindow : SurfaceWindow
     {
         if (_offeredRequiredUpdate || _updateOpen || !IsVisible) return;
         if (DataContext is not MainViewModel { UpdateRequired: true, Update: { CanInstall: true } update } vm) return;
+        // The service installs it by itself as soon as nothing is connected; the footer says so.
+        if (vm.AutoUpdateCovers(update)) return;
 
         _offeredRequiredUpdate = true;
         await ShowUpdateWindow(update, vm);
     }
 
     /// <summary>
+    /// Since 0.5.0 only for a release the SERVICE will not install (AutoUpdateCovers) - otherwise it installs by
+    /// itself and the footer says so. Before that, and still in that case:
+    ///
     /// Opens the update window by itself whenever the app is opened with a newer release known: once as it
     /// starts - App calls this for the check made then - and again every time the window is brought back
     /// from the tray. No setting turns it off; Cancel closes it until the next opening (the owner's call,
@@ -359,6 +365,15 @@ public partial class MainWindow : SurfaceWindow
     {
         if (_updateOpen) return;
         if (DataContext is not MainViewModel { Update: { } update } vm) return;
+        // Whether the service installs it by itself is known from its first status; until then, wait for it.
+        if (vm.LastStatus is null)
+        {
+            vm.WhenFirstStatus(OfferUpdate);
+            return;
+        }
+        // Installed by the service with no prompt (0.5.0): nothing to offer. Only a release it refused, or a
+        // service with automatic updates switched off, still gets the window.
+        if (vm.AutoUpdateCovers(update) || vm.ServiceInstalling) return;
         if (!IsVisible)
         {
             // The start-up check can answer before the window has first appeared: offered as it does.

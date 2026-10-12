@@ -5,6 +5,7 @@ using Avalonia.Threading;
 using GamePingBooster.App.Services;
 using GamePingBooster.App.Services.Localization;
 using GamePingBooster.Core.Ipc;
+using GamePingBooster.Core.Updates;
 using GamePingBooster.Core.Protocol;
 
 namespace GamePingBooster.App.ViewModels;
@@ -192,12 +193,59 @@ public sealed class MainViewModel : INotifyPropertyChanged
         set
         {
             if (!Set(ref _update, value)) return;
-            Raise(nameof(HasUpdate));
-            Raise(nameof(UpdateFooterText));
+            RaiseUpdate();
         }
     }
 
-    public bool HasUpdate => Update is not null;
+    /// <summary>Whether the footer line is there: a newer release known, one being installed, or one just installed.</summary>
+    public bool HasUpdate => Update is not null || ServiceInstalling || UpdatedTo is not null;
+
+    // What the service's AutoUpdater says (StatusMessage.UpdateState), from 0.5.0. Absent from an older service,
+    // which reads as "the service does not install updates" - and the update window is offered as it always was.
+    private bool _serviceAutoUpdate;
+    private string? _serviceUpdateState;
+    private string? _serviceUpdateVersion;
+    private string? _updatedTo;
+
+    /// <summary>Setup is running: the app is about to be closed and started again by the service.</summary>
+    public bool ServiceInstalling => _serviceUpdateState == "installing";
+
+    /// <summary>The version the service updated to a few minutes ago, so the restart it caused is explained.</summary>
+    public string? UpdatedTo => _updatedTo;
+
+    /// <summary>
+    /// True when the service will install <paramref name="update"/> by itself, so the update window - and its UAC
+    /// prompt - is not offered: the service says it updates automatically, and it has not refused this release.
+    /// </summary>
+    public bool AutoUpdateCovers(AvailableUpdate update) =>
+        LastStatus is { AutoUpdate: true } status &&
+        !(status.UpdateState == "refused" && ReleaseFeed.SameVersion(status.UpdateVersion, update.Version));
+
+    /// <summary>The "Update →" link: only while installing is the player's to do.</summary>
+    public bool ShowUpdateAction => Update is { } update && !ServiceInstalling && !AutoUpdateCovers(update);
+
+    private void ApplyUpdateState(StatusMessage status)
+    {
+        var state = status.UpdateState;
+        var version = status.UpdateVersion;
+        var updatedTo = status.UpdatedTo;
+        if (status.AutoUpdate == _serviceAutoUpdate && state == _serviceUpdateState &&
+            version == _serviceUpdateVersion && updatedTo == _updatedTo) return;
+        _serviceAutoUpdate = status.AutoUpdate;
+        _serviceUpdateState = state;
+        _serviceUpdateVersion = version;
+        _updatedTo = updatedTo;
+        // The release the service is installing is newer than the one in the footer, or the footer has none yet.
+        RaiseUpdate();
+        Raise(nameof(CanPressAction));
+    }
+
+    private void RaiseUpdate()
+    {
+        Raise(nameof(HasUpdate));
+        Raise(nameof(UpdateFooterText));
+        Raise(nameof(ShowUpdateAction));
+    }
 
     private bool _updateRequired;
 
@@ -211,14 +259,19 @@ public sealed class MainViewModel : INotifyPropertyChanged
         set
         {
             if (!Set(ref _updateRequired, value)) return;
-            Raise(nameof(UpdateFooterText));
+            RaiseUpdate();
         }
     }
 
-    /// <summary>The footer line, and only there when a newer release exists.</summary>
-    public string UpdateFooterText => Update is null
-        ? ""
-        : Loc.F(UpdateRequired ? "main.update.required" : "main.update.available", Update.Version);
+    /// <summary>The footer line: what is happening with updates, when anything is.</summary>
+    public string UpdateFooterText =>
+        ServiceInstalling ? Loc.F("main.update.installing", _serviceUpdateVersion ?? Update?.Version ?? "")
+        : Update is { } update
+            ? AutoUpdateCovers(update)
+                ? Loc.F(UpdateRequired ? "main.update.autoRequired" : "main.update.auto", update.Version)
+                : Loc.F(UpdateRequired ? "main.update.required" : "main.update.available", update.Version)
+        : UpdatedTo is { } done ? Loc.F("main.update.done", done)
+        : "";
 
     /// <summary>
     /// The last thing the renewer had to say, if anything.
@@ -874,7 +927,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     // available. A licence that lapses while a tunnel is up must not trap the user in a session
     // they cannot end - the session was authorised when it started, and the button that ends it
     // has nothing to do with the licence.
-    public bool CanPressAction => !IsBusy && Configured
+    public bool CanPressAction => !IsBusy && Configured && !ServiceInstalling
         && (State is TunnelState.Connected or TunnelState.Connecting || !LicenceBlocked);
 
     /// <summary>
@@ -1175,6 +1228,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </summary>
     public StatusMessage? LastStatus { get; private set; }
 
+    private Action? _firstStatus;
+
+    /// <summary>Runs <paramref name="action"/> once the first status from the service is in - at once if it already is.</summary>
+    public void WhenFirstStatus(Action action)
+    {
+        if (LastStatus is not null) action();
+        else _firstStatus = action;
+    }
+
     /// <summary>Whether the service sends connection quality after each match; null from a service too old to.</summary>
     public bool? QualitySharing { get; private set; }
 
@@ -1256,6 +1318,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private void OnStatus(StatusMessage status) => Dispatcher.UIThread.Post(() =>
     {
         LastStatus = status;
+        ApplyUpdateState(status);
+        if (_firstStatus is { } first)
+        {
+            _firstStatus = null;
+            first();
+        }
 
         // Whoever is closing the app can stop waiting. Faulted counts: the tunnel is not up, and
         // holding the window open for five seconds over a teardown that already failed helps
@@ -1284,6 +1352,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         State = status.State;
         _detailKey = null;
         Detail = DetailOf(status);
+        if (ServiceInstalling) Detail = Loc.F("main.update.installing", status.UpdateVersion ?? "");
         Error = status.Error;
 
         // Signed in on another machine: SignInWatcher tears down and tells the whole story. Until it does (the relay's

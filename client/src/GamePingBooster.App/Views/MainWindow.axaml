@@ -293,13 +293,15 @@
                  Foreground="{Binding LicenceBrush}" FontSize="11"
                  Margin="0,10,0,0" />
 
-      <!-- Only there when UpdateChecker has found a newer release. Opens UpdateWindow, which asks
-           before it disconnects or installs anything. -->
+      <!-- Only there when there is something to say about updates. Since 0.5.0 the service installs them by
+           itself and this line only says so; "Update →" (UpdateWindow, UAC) shows only when it cannot. A click
+           still opens the window either way - the manual way in for a release the service is waiting on. -->
       <Button Grid.Row="5" Grid.ColumnSpan="2" Classes="update" Margin="0,10,0,0"
               Click="OnUpdateClick" IsVisible="{Binding HasUpdate}">
         <StackPanel Orientation="Horizontal" Spacing="6">
           <TextBlock Text="{Binding UpdateFooterText}" Foreground="#ababab" FontSize="11" />
-          <TextBlock Text="{DynamicResource main.update.action}" Foreground="#60A5FA" FontSize="11" FontWeight="SemiBold" />
+          <TextBlock Text="{DynamicResource main.update.action}" Foreground="#60A5FA" FontSize="11" FontWeight="SemiBold"
+                     IsVisible="{Binding ShowUpdateAction}" />
         </StackPanel>
       </Button>
     </Grid>

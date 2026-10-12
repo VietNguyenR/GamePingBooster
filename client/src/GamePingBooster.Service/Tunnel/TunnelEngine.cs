@@ -4144,6 +4144,16 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             .ToList();
     }
 
+    /// <summary>The tunnel's state now, as the next status will report it.</summary>
+    public TunnelState State => _state;
+
+    /// <summary>
+    /// Whether any game in the profile is running, connected or not. Asked by the AutoUpdater, which never installs
+    /// while one is: a player in a match without boosting may press Start boosting any second.
+    /// </summary>
+    public bool AnyGameRunning() =>
+        _profile is { } profile && profile.Games.Any(game => GameProcessWatcher.FindRunning(game.ProcessNames) is not null);
+
     /// <summary>The profile's game when it has exactly one, else null.</summary>
     private string? OnlyGameName => _profile is { Games.Count: 1 } profile ? profile.Games[0].Name : null;
 

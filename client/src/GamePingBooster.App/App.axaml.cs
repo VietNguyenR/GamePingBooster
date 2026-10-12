@@ -1,4 +1,5 @@
-﻿using Avalonia;
+﻿using System.Diagnostics;
+using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using Avalonia.Threading;
@@ -48,7 +49,12 @@ public partial class App : Application
             // on it directly, and listens on it for the service's verdict.
             var window = new MainWindow { DataContext = vm };
             window.Attach(_pipe);
-            desktop.MainWindow = window;
+            _window = window;
+            // Shown at once only when the updater window has just started this app after an update. Otherwise the
+            // updater window checks for a release first, and the main window follows when there is nothing to install
+            // (see StartUpdateGate) - it must not appear and then vanish when setup closes the app a second later.
+            if (desktop.Args?.Contains("--after-update") == true) OpenGate();
+            else StartUpdateGate();
             // Renews the licence token on its own, at half of its remaining life. It takes the
             // licence URL and device key from the status push directly, not from the view model,
             // which only sees a status once the UI thread gets round to it - see TokenRefresher.
@@ -151,14 +157,22 @@ public partial class App : Application
 
             // Start listening to the service. Bringing the tunnel up waits for the user to press
             // the button - the app never rearranges the machine's routing on its own at startup.
+            // The service is about to install an update and offers it ("ready"): show the updater window, which asks
+            // for it (update-now) and follows every step, instead of this app simply vanishing when setup closes it.
+            _pipe.StatusReceived += status =>
+            {
+                if (status.UpdateState == "ready") Dispatcher.UIThread.Post(OnUpdateReady);
+            };
+
             _pipe.Start();
             _refresher.Start();
             signIn.Start();
             _quality.Start();
 
             // Checks GitHub for a newer release as the app opens and every six hours after, and puts a
-            // line in the footer when there is one; the check made as it opens also offers the update
-            // window (MainWindow.OfferUpdate). Marshalled for the same reason as the refresher's messages.
+            // line in the footer when there is one. The service installs it by itself (0.5.0); the update
+            // window is offered (MainWindow.OfferUpdate) only when it will not. Marshalled for the same
+            // reason as the refresher's messages.
             _updates = new UpdateChecker((update, atStart) => Dispatcher.UIThread.Post(() =>
             {
                 vm.Update = update;
@@ -175,10 +189,111 @@ public partial class App : Application
                 vm.UpdateRequired = true;
                 window.OfferRequiredUpdate();
                 _updates?.CheckNow();
+                // And the service, which installs it (0.5.0): its next hourly check could be an hour away.
+                _ = _pipe?.SendAsync(new GamePingBooster.Core.Ipc.CommandMessage { Verb = "check-update" });
             });
         }
 
         base.OnFrameworkInitializationCompleted();
+    }
+
+    // ------------------------------------------------------------ the updater window (0.5.0)
+
+    private MainWindow? _window;
+
+    /// <summary>gpb-updater.exe while it is open. One at a time.</summary>
+    private Process? _updater;
+
+    /// <summary>The main window may be shown: the check at start is over, or was never needed.</summary>
+    private bool _gateOpen;
+
+    /// <summary>The main window was on screen when the updater window replaced it, and comes back if nothing is installed.</summary>
+    private bool _windowWasVisible;
+
+    /// <summary>gpb-updater.exe could not be started once: this run does without it rather than trying every second.</summary>
+    private bool _updaterUnavailable;
+
+    /// <summary>
+    /// The updater window checks for a release before the main window appears (owner, 2026-10-13: open the app and see
+    /// "checking for updates", then the install with every step, then the app). Only when it is worth it: the service
+    /// installs updates by itself, nothing is connected, and no game is running - a player who opens the app mid-game
+    /// wants to connect, not wait. No answer from the service at all and the app opens as it always did.
+    /// </summary>
+    private void StartUpdateGate()
+    {
+        if (_pipe is null)
+        {
+            OpenGate();
+            return;
+        }
+        _pipe.StatusReceived += OnGateStatus;
+        DispatcherTimer.RunOnce(OpenGate, TimeSpan.FromSeconds(1.5));
+
+        void OnGateStatus(Core.Ipc.StatusMessage status)
+        {
+            _pipe.StatusReceived -= OnGateStatus;
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (_gateOpen) return;
+                var worth = status.AutoUpdate &&
+                            status.State is Core.Ipc.TunnelState.Disconnected or Core.Ipc.TunnelState.Faulted &&
+                            !status.GameRunning &&
+                            status.UpdateState is not ("refused" or "installing");
+                if (!worth || !ShowUpdater("check")) OpenGate();
+            });
+        }
+    }
+
+    /// <summary>Shows the main window - once the check at start is over, and never while the updater window is open.</summary>
+    private void OpenGate()
+    {
+        if (_gateOpen || _updater is not null || _desktop is null || _window is null || _shuttingDown) return;
+        _gateOpen = true;
+        _desktop.MainWindow = _window;
+        _window.Show();
+    }
+
+    private void OnUpdateReady()
+    {
+        if (_updater is not null || !_gateOpen || _shuttingDown || _window is null) return;
+        _windowWasVisible = _window.IsVisible;
+        if (ShowUpdater("install") && _windowWasVisible) _window.Hide();
+    }
+
+    /// <summary>
+    /// Starts gpb-updater.exe and asks the service to go ahead (update-now). False when the window could not be started -
+    /// the update then happens as before 0.5.0's window existed. When it closes with this app still running, nothing was
+    /// installed (none to install, a game started, a download failed): the main window comes back.
+    /// </summary>
+    private bool ShowUpdater(string mode)
+    {
+        if (_updater is not null) return true;
+        if (_updaterUnavailable || _pipe is null) return false;
+
+        var process = UpdaterLauncher.Start(mode);
+        if (process is null)
+        {
+            _updaterUnavailable = true;
+            return false;
+        }
+        _updater = process;
+        process.Exited += (_, _) => Dispatcher.UIThread.Post(() =>
+        {
+            if (!ReferenceEquals(_updater, process)) return;
+            _updater = null;
+            process.Dispose();
+            if (!_gateOpen) OpenGate();
+            else if (_windowWasVisible && _window is not null && !_shuttingDown) _window.RestoreFromTray();
+            _windowWasVisible = false;
+        });
+        process.EnableRaisingEvents = true;
+
+        _ = Task.Run(async () =>
+        {
+            try { await _pipe.SendAsync(new Core.Ipc.CommandMessage { Verb = "update-now" }); }
+            catch (Exception) { /* The window gives up on its own after a few seconds of silence. */ }
+        });
+        return true;
     }
 
     /// <summary>Set while <see cref="SignedOutElsewhereAsync"/> runs, so a report from the watch and one from a renewal do it once.</summary>

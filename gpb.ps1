@@ -135,7 +135,8 @@ function Invoke-AotPublish {
     Add-VsWhereToPath
     Say "Native AOT publish"
     & dotnet build-server shutdown | Out-Null
-    foreach ($project in 'GamePingBooster.Service', 'GamePingBooster.App') {
+    # The updater window (gpb-updater.exe, 0.5.0) is the third: setup ships it beside the app.
+    foreach ($project in 'GamePingBooster.Service', 'GamePingBooster.App', 'GamePingBooster.Updater') {
         $csproj = Join-Path $client "src\$project\$project.csproj"
         & dotnet publish $csproj -c Release -r win-x64 --nologo
         if ($LASTEXITCODE -ne 0) {
@@ -1132,6 +1133,7 @@ switch ($Verb.ToLowerInvariant()) {
         $required = @{
             'the service'  = Join-Path $client 'src\GamePingBooster.Service\bin\Release\net9.0-windows\win-x64\publish\gpb-service.exe'
             'the UI'       = Join-Path $client 'src\GamePingBooster.App\bin\Release\net9.0-windows\win-x64\publish\GamePingBooster.exe'
+            'the updater'  = Join-Path $client 'src\GamePingBooster.Updater\bin\Release\net9.0-windows\win-x64\publish\gpb-updater.exe'
             'wintun.dll'   = Join-Path $client 'native\wintun\wintun.dll'
             # Avalonia's renderer. Native AOT leaves it beside the binary rather than inside it,
             # and an installer that shipped without it produced an app that crashed on launch
@@ -1161,8 +1163,8 @@ switch ($Verb.ToLowerInvariant()) {
             # Our own two executables, signed in the publish folder so the installer packs the
             # signed copies. Not the DLLs beside them: wintun.dll is WireGuard's signature, and
             # Skia/HarfBuzz/ANGLE are third-party binaries we did not write.
-            Say "Signing the service and the UI"
-            Invoke-Sign $signing @($required['the service'], $required['the UI'])
+            Say "Signing the service, the UI and the updater window"
+            Invoke-Sign $signing @($required['the service'], $required['the UI'], $required['the updater'])
 
             # Inno signs the setup .exe and the uninstaller it embeds. /S defines the tool the
             # .iss names with SignTool=gpbsign; $q is a quote, $f the file Inno is signing.
@@ -1178,7 +1180,7 @@ switch ($Verb.ToLowerInvariant()) {
         Say "  GamePingBooster-Setup-$version.exe" 'Green'
         if ($signing) {
             Assert-Signed $signing $setup
-            Say "Signed and timestamped: setup, uninstaller, gpb-service.exe, GamePingBooster.exe" 'Green'
+            Say "Signed and timestamped: setup, uninstaller, gpb-service.exe, GamePingBooster.exe, gpb-updater.exe" 'Green'
         } else {
             Warn "It is NOT code signed (GPB_SIGN_THUMBPRINT is not set). Windows SmartScreen and"
             Warn "Defender treat an unsigned installer far more harshly. Fine for a local test build."

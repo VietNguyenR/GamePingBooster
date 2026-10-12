@@ -6,6 +6,7 @@ using GamePingBooster.App.Services;
 using GamePingBooster.App.Services.Localization;
 using GamePingBooster.App.ViewModels;
 using GamePingBooster.Core.Ipc;
+using GamePingBooster.Core.Updates;
 
 namespace GamePingBooster.App.Views;
 

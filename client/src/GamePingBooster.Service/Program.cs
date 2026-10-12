@@ -67,6 +67,29 @@ public static class Program
             return Dns.DnsSelfTest.RunAsync(withPolicy, CancellationToken.None).GetAwaiter().GetResult();
         }
 
+        // What the AutoUpdater would decide, installing nothing: the release it would take for a given version, and
+        // whether a setup .exe passes its signature check. For support ("why does this PC not update") and for
+        // checking a new signing certificate before a release depends on it.
+        //
+        //   gpb-service.exe --update-check [version] [setup.exe]
+        var updateCheck = Array.FindIndex(args, a => a.Equals("--update-check", StringComparison.OrdinalIgnoreCase));
+        if (updateCheck >= 0)
+        {
+            var version = args.Length > updateCheck + 1 ? args[updateCheck + 1] : Update.AutoUpdater.CurrentVersion();
+            var cache = Path.Combine(Path.GetTempPath(), "gpb-update-check.json");
+            var update = Core.Updates.ReleaseFeed.CheckAsync(version, cache, CancellationToken.None).GetAwaiter().GetResult();
+            Console.WriteLine(update is null
+                ? $"Nothing newer than v{version}."
+                : $"v{update.Version} is newer than v{version}; installer {update.InstallerUrl ?? "(not found)"} sha256 {update.InstallerSha256 ?? "-"}");
+            if (args.Length > updateCheck + 2)
+            {
+                var problem = Update.Authenticode.Check(Path.GetFullPath(args[updateCheck + 2]));
+                Console.WriteLine(problem is null ? "Signature: trusted." : $"Signature: refused - {problem}.");
+                return problem is null ? 0 : 1;
+            }
+            return 0;
+        }
+
         if (args.Contains("--console", StringComparer.OrdinalIgnoreCase))
         {
             return RunConsoleAsync().GetAwaiter().GetResult();
@@ -135,6 +158,19 @@ public static class Program
         log($"Configuration loaded. Default game: {config.DefaultGameId}, adapter: {config.AdapterName}");
 
         await using var engine = new TunnelEngine(config, log);
+
+        // Releases are installed by the service itself, silently, while nothing is connected or playing - see
+        // AutoUpdater. Created before the rest of startup so the attempt the previous service started is closed
+        // (and the app it closed started again) whatever happens after; its first check waits 20 s.
+        PipeServer? pipe = null;
+        await using var updater = new Update.AutoUpdater(
+            enabled: config.AutoUpdate ?? true,
+            tunnelState: () => engine.State,
+            gameRunning: engine.AnyGameRunning,
+            uiSession: () => pipe?.UiSession,
+            log);
+        engine.StatusChanged += status => updater.NoteTunnel(status.State);
+        updater.Start();
 
         // Before anything else decides anything: a name resolution policy is machine-wide and
         // survives this process. If the last run was killed rather than stopped, its rules are
@@ -232,7 +268,7 @@ public static class Program
                 "It will be tried again on the next connect.");
         }
 
-        var pipe = new PipeServer(engine, unblock, log);
+        pipe = new PipeServer(engine, unblock, updater, log);
 
         log($"Listening on pipe \\\\.\\pipe\\{Core.Ipc.IpcConstants.PipeName}");
         await pipe.RunAsync(ct).ConfigureAwait(false);

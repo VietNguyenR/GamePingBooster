@@ -229,6 +229,15 @@ public sealed class ServiceConfig
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? RescanBetweenMatches { get; set; }
 
+    /// <summary>
+    /// The service installing new releases by itself (Update.AutoUpdater). Unset means on; false is the way to stop
+    /// it on one machine - a test rig, or a PC pinned to a version while something is being measured. The app then
+    /// offers its own update window, as before 0.5.0. Never written while unset.
+    /// </summary>
+    [JsonPropertyName("autoUpdate")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? AutoUpdate { get; set; }
+
     public static string DefaultDirectory =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "GamePingBooster");
 

@@ -32,7 +32,15 @@ public sealed class CommandMessage
 
     /// <summary>
     /// "connect" | "disconnect" | "status" | "reload-profile" | "set-relay" | "set-token" |
-    /// "set-profile" | "set-profiles" | "games" | "relays" | "set-relay-choice"
+    /// "set-profile" | "set-profiles" | "games" | "relays" | "set-relay-choice" | "check-update" | "update-now"
+    ///
+    /// check-update carries nothing: it asks the service's AutoUpdater to look for a release now rather
+    /// than at its next hourly check (the licence server has just refused this version as too old).
+    /// What it finds, and when it installs it, stays the service's decision.
+    ///
+    /// update-now carries nothing either: the updater window (gpb-updater.exe) is open, so check now and
+    /// install a ready release at once instead of after the quiet period. Still never while boosting or
+    /// with a game running. Its progress is written to UpdateProgress, not sent here.
     /// </summary>
     [JsonPropertyName("verb")] public string Verb { get; set; } = "status";
 
@@ -595,6 +603,30 @@ public sealed class StatusMessage
     /// <summary>The same note as a language key and its arguments. See <see cref="DetailCode"/>.</summary>
     [JsonPropertyName("relayChoiceNoteCode")] public string? RelayChoiceNoteCode { get; set; }
     [JsonPropertyName("relayChoiceNoteArgs")] public List<string>? RelayChoiceNoteArgs { get; set; }
+
+    // ------------------------------------------------------------------ updates (AutoUpdater, 0.5.0)
+    //
+    // Additive, so no contract version bump: an older UI ignores them, and a newer UI reads them as
+    // absent from an older service - which means "the service does not install updates", and the UI
+    // falls back to its own update window.
+
+    /// <summary>True when this service installs new releases by itself, with no prompt.</summary>
+    [JsonPropertyName("autoUpdate")] public bool AutoUpdate { get; set; }
+
+    /// <summary>
+    /// Where the service is with a newer release, or null when there is none:
+    /// "downloading", "waiting" (downloaded, waiting until nothing is connected or playing),
+    /// "ready" (about to install: the app opens the updater window and answers with update-now),
+    /// "installing" (setup is running - this app is about to be closed and started again), or
+    /// "refused" (this release cannot be installed by the service; the UI offers its own window).
+    /// </summary>
+    [JsonPropertyName("updateState")] public string? UpdateState { get; set; }
+
+    /// <summary>The release <see cref="UpdateState"/> is about, without the "v".</summary>
+    [JsonPropertyName("updateVersion")] public string? UpdateVersion { get; set; }
+
+    /// <summary>The version the service updated itself to, for a few minutes after it did; otherwise null.</summary>
+    [JsonPropertyName("updatedTo")] public string? UpdatedTo { get; set; }
 
     /// <summary>quality-outbox only: how many records were still waiting, this batch included.</summary>
     [JsonPropertyName("qualityPending")] public int? QualityPending { get; set; }

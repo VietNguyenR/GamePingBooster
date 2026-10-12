@@ -49,6 +49,10 @@ internal static class StringsEn
         ["main.update.available"] = "New version v{0} available",
         ["main.update.required"] = "Update to v{0} to connect again",
         ["main.update.action"] = "Update →",
+        ["main.update.auto"] = "New version v{0} installs by itself when you are not playing",
+        ["main.update.autoRequired"] = "v{0} is needed - updating automatically",
+        ["main.update.installing"] = "Updating to v{0}… the app reopens by itself",
+        ["main.update.done"] = "Updated to v{0}",
 
         // ------------------------------------------------------------------ state and values
         ["status.disconnected"] = "Not connected",

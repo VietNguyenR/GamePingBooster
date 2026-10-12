@@ -49,6 +49,10 @@ internal static class StringsVi
         ["main.update.available"] = "Đã có bản mới v{0}",
         ["main.update.required"] = "Cần cập nhật lên v{0} để kết nối",
         ["main.update.action"] = "Cập nhật →",
+        ["main.update.auto"] = "Bản mới v{0} sẽ tự cập nhật khi bạn không chơi",
+        ["main.update.autoRequired"] = "Cần bản v{0} - đang tự cập nhật",
+        ["main.update.installing"] = "Đang cập nhật lên v{0}… app sẽ tự mở lại",
+        ["main.update.done"] = "Đã cập nhật lên v{0}",
 
         // ------------------------------------------------------------------ state and values
         ["status.disconnected"] = "Chưa kết nối",
