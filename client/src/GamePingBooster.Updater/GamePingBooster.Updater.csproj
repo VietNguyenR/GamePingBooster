@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    gpb-updater.exe: the window that shows an automatic update step by step (0.5.0).
+
+    Its own small program, not a window of the app, because setup has to close the app to replace its files -
+    a window inside it would vanish right when the player most needs to know what is going on (the owner,
+    2026-10-13: "the app closing and reopening with no message looks exactly like a crash"). The app copies
+    this exe to %TEMP% and starts it from there, so setup can replace the installed copy while it runs.
+
+    Plain Win32 and GDI rather than Avalonia: a second Avalonia app would weigh tens of MB and start slowly,
+    and this draws one small window. It carries the app's own font (Inter, from Avalonia.Fonts.Inter) and colours.
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>gpb-updater</AssemblyName>
+    <RootNamespace>GamePingBooster.Updater</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\GamePingBooster.App\favicon.ico</ApplicationIcon>
+
+    <PublishAot>true</PublishAot>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <OptimizationPreference>Size</OptimizationPreference>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableAotAnalyzer>true</EnableAotAnalyzer>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\GamePingBooster.Core\GamePingBooster.Core.csproj" />
+  </ItemGroup>
+
+  <!-- Inter, the app's font (SIL Open Font Licence), extracted from Avalonia.Fonts.Inter 12.1.1. Loaded privately
+       with AddFontMemResourceEx: nothing is installed on the machine. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Fonts\Inter-Regular.ttf" LogicalName="Inter-Regular.ttf" />
+    <EmbeddedResource Include="Fonts\Inter-SemiBold.ttf" LogicalName="Inter-SemiBold.ttf" />
+    <EmbeddedResource Include="Fonts\Inter-Bold.ttf" LogicalName="Inter-Bold.ttf" />
+  </ItemGroup>
+
+</Project>
