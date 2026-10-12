@@ -72,6 +72,7 @@ internal static partial class Program
             ("Unblock: tunnel names are kept fresh", OnlyAskedListedNamesAreKeptFresh),
             ("Split: the hello is two records of the same hello", () => { TheSplitHelloIsTwoRecordsOfTheSameHello(); return Task.CompletedTask; }),
             ("Split: a filter reading the first record is passed", TheSplitHelloPassesAFilterThatReadsTheFirstRecord),
+            ("Split: a filter on some edges still sends the name split", AFilterOnSomeEdgesStillSendsTheNameSplit),
             ("After a match: what the game waits for is logged", WhatTheGameWaitsForAfterAMatchIsLogged),
             ("After a match: a stuck lobby is reported with its lines", AStuckLobbyIsReportedWithItsLines),
             ("Split: a filter that reassembles sends it through the tunnel", AFilterThatReassemblesSendsTheConnectionThroughTheTunnel),

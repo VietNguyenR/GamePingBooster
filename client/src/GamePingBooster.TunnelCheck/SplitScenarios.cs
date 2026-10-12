@@ -117,6 +117,49 @@ internal static partial class Program
         Check("the edge saw it from the line", fpt.FromLine > 0, "the proxy did not send from the adapter's address");
     }
 
+    /// <summary>
+    /// FPT, 2026-10-12: prod-live-front reset whole on two edges, completed whole on a third, split passed on all three -
+    /// and went to the relay after every Connect. Two loopback edges on one port: 127.0.0.1 filters the name, 127.0.0.2
+    /// does not.
+    /// </summary>
+    private static async Task AFilterOnSomeEdgesStillSendsTheNameSplit()
+    {
+        using var certificate = SelfSigned();
+        await using var filtered = new LineFilter(SplitBlocked, reassembles: false, certificate);
+        await using var free = new LineFilter("never.matches.example", reassembles: false, certificate,
+            new IPEndPoint(IPAddress.Parse("127.0.0.2"), filtered.Port));
+        IPAddress[] edges = [EdgeAddress, IPAddress.Parse("127.0.0.2")];
+
+        SplitProxy Proxy(Func<string, bool> proxied) => new(new DohUpstream(_ => { }), new SplitRoutes(), s => Log.Enqueue(s),
+            listen: new IPEndPoint(IPAddress.Loopback, 0), edgePort: filtered.Port, source: _ => LineAddress)
+        {
+            SplitPasses = outcome => outcome is "ok" or "cert-mismatch",
+            IsProxied = proxied,
+        };
+
+        await using (var fpt = Proxy(_ => false))
+        {
+            var verdict = await fpt.JudgeAsync(SplitBlocked, edges, CancellationToken.None);
+            Check("a name reset whole on one edge and whole on another goes split, not by the relay",
+                verdict.Split && !verdict.Whole && verdict.Edges.Length == 2, verdict.Why);
+            Check("and it is remembered as cut, so it never goes whole", verdict.CutSeen != default, verdict.Why);
+        }
+
+        // The .cn mirror: a lobby-proxy name falls back to the relay, never to the line it hangs on - unchanged.
+        await using (var cn = Proxy(_ => true))
+        {
+            var verdict = await cn.JudgeAsync(SplitBlocked, edges, CancellationToken.None);
+            Check("a lobby-proxy name with the same edges stays on the relay", !verdict.Split && verdict.CutSeen == default, verdict.Why);
+        }
+
+        // No reset anywhere: unchanged, whole over the line.
+        await using (var vnpt = Proxy(_ => false))
+        {
+            var verdict = await vnpt.JudgeAsync("prod-live-images.playbattlegrounds.com", edges, CancellationToken.None);
+            Check("a name no edge resets still goes whole", verdict.Split && verdict.Whole && verdict.CutSeen == default, verdict.Why);
+        }
+    }
+
     private static async Task AFilterThatReassemblesSendsTheConnectionThroughTheTunnel()
     {
         using var certificate = SelfSigned();
@@ -723,15 +766,17 @@ internal static partial class Program
     /// </summary>
     private sealed class LineFilter : IAsyncDisposable
     {
-        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+        private readonly TcpListener _listener;
         private readonly Task _loop;
         private readonly byte[] _blocked;
         private readonly bool _reassembles;
         private readonly X509Certificate2 _certificate;
         private int _fromLine;
 
-        public LineFilter(string blocked, bool reassembles, X509Certificate2 certificate)
+        /// <param name="bind">Another loopback edge on the same port, for a name served by several (default 127.0.0.1, any port).</param>
+        public LineFilter(string blocked, bool reassembles, X509Certificate2 certificate, IPEndPoint? bind = null)
         {
+            _listener = new TcpListener(bind ?? new IPEndPoint(IPAddress.Loopback, 0));
             _blocked = Encoding.ASCII.GetBytes(blocked);
             _reassembles = reassembles;
             _certificate = certificate;

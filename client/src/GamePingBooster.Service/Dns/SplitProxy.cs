@@ -529,13 +529,22 @@ internal sealed class SplitProxy : IAsyncDisposable
             var resetSomewhere = reached.Any(r => r.Whole.Outcome == "reset");
             IPAddress[] wholePassing = [.. results.Where(r => SplitPasses(r.Whole.Outcome)).OrderBy(r => r.Whole.Ms).Select(r => r.Address)];
 
+            // FPT, 2026-10-12: prod-live-front reset whole on two edges while a third (43.175.115.x) completed whole, and
+            // the split passed on all three. That went to the relay as "not cut on every edge" after every Connect, for
+            // the 10 min until a probe saw all three reset - and the cold lobby (CohCache just cleared) came through the
+            // relay's cap. A reset by name, with the control answered on the same edge, is the filter. Not for a
+            // lobby-proxy name: its fallback stays the relay, never the line it is known to hang on (the .cn mirror).
+            var resetByName = !IsProxied(name) && reached.Any(r => r.Whole.Outcome == "reset");
+
             // Only a reset proves a filter - a stall is as often a slow edge (the .cn mirror).
-            if (cutSeen == default && cut && reached.Any(r => r.Whole.Outcome == "reset")) cutSeen = DateTimeOffset.UtcNow;
+            if (cutSeen == default && (cut || resetByName) && reached.Any(r => r.Whole.Outcome == "reset")) cutSeen = DateTimeOffset.UtcNow;
 
             verdict = cut
                 ? passing.Length == 0
                     ? new Verdict(false, [], DateTimeOffset.UtcNow, $"the line cuts it split as well ({seen})")
                     : new Verdict(true, passing, DateTimeOffset.UtcNow, $"the line cuts it whole and lets it through split ({seen})")
+                : resetByName && passing.Length > 0
+                    ? new Verdict(true, passing, DateTimeOffset.UtcNow, $"the line resets it whole on some edges and lets it through split ({seen})")
                 // A line once seen resetting the name whole stays split: FPT, 2026-10-11, let prod-live-xenuine through
                 // whole on all three edges at 20:42, the name went whole, and FPT reset the game's next connection to it
                 // at 20:48. The split passes wherever whole does, so staying split costs nothing.
