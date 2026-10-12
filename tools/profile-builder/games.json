@@ -284,6 +284,22 @@
       "azureRegions": [],
       "asns": [],
       "note": "Not captured yet (declared 2026-10-10). Epic hosts match servers mostly on AWS; the four Asian regions are a guess to be narrowed after the first captures, as with fc27. An address outside them (Google Cloud, another AWS region) lands in observed-fortnite-unverified.txt for a person to look at - it is not routed. No ASN on purpose: Epic's own ranges would also carry its launcher and store. No datacentre probe port known, so no landmarks."
+    },
+
+    "nshm": {
+      "name": "Nghịch Thủy Hàn",
+      "watchProcess": "nshm",
+      "probePort": null,
+      "observedPath": "observed-nshm.txt",
+      "landmarkPath": null,
+      "tcpSessionsPath": "tcp-sessions-nshm.txt",
+      "unverifiedPath": "observed-nshm-unverified.txt",
+      "manualCidrPath": "manual-cidrs-nshm.txt",
+      "profilePath": "../../profiles/nshm-vn.json",
+      "awsRegions": [],
+      "azureRegions": [],
+      "asns": [],
+      "note": "Not captured yet (declared 2026-10-12). Process is nshm.exe. Nothing is known about its servers, protocol (UDP or TCP) or cloud, so no region, ASN or landmark is declared: capture first, then fill awsRegions/azureRegions/asns from where the observed addresses sit. Until then ./gpb profile will refuse rather than write a profile that looks finished."
     }
   }
 }
