@@ -300,6 +300,38 @@
       "azureRegions": [],
       "asns": [],
       "note": "Not captured yet (declared 2026-10-12). Process is nshm.exe. Nothing is known about its servers, protocol (UDP or TCP) or cloud, so no region, ASN or landmark is declared: capture first, then fill awsRegions/azureRegions/asns from where the observed addresses sit. Until then ./gpb profile will refuse rather than write a profile that looks finished."
+    },
+
+    "r6": {
+      "name": "Rainbow Six Siege",
+      "watchProcess": "RainbowSix",
+      "probePort": null,
+      "observedPath": "observed-r6.txt",
+      "landmarkPath": null,
+      "tcpSessionsPath": "tcp-sessions-r6.txt",
+      "unverifiedPath": "observed-r6-unverified.txt",
+      "manualCidrPath": "manual-cidrs-r6.txt",
+      "profilePath": "../../profiles/r6-vn.json",
+      "awsRegions": [],
+      "azureRegions": [],
+      "asns": [],
+      "note": "Not captured yet (declared 2026-10-12). Process is RainbowSix.exe (the DX11 build; the Vulkan build ships as RainbowSix_Vulkan.exe and is not watched, so capture waits forever if the game was launched with Vulkan). Nothing is known about its servers, so no region, ASN or landmark is declared: capture first, then fill awsRegions/azureRegions/asns from where the observed addresses sit. Ubisoft hosts match servers on cloud (AWS and Azure/PlayFab are the likely candidates) - check, do not assume. Until then ./gpb profile will refuse rather than write a profile that looks finished."
+    },
+
+    "overwatch": {
+      "name": "Overwatch 2",
+      "watchProcess": "Overwatch",
+      "probePort": null,
+      "observedPath": "observed-overwatch.txt",
+      "landmarkPath": null,
+      "tcpSessionsPath": "tcp-sessions-overwatch.txt",
+      "unverifiedPath": "observed-overwatch-unverified.txt",
+      "manualCidrPath": "manual-cidrs-overwatch.txt",
+      "profilePath": "../../profiles/overwatch-vn.json",
+      "awsRegions": [],
+      "azureRegions": [],
+      "asns": [],
+      "note": "Not captured yet (declared 2026-10-12). Process is Overwatch.exe. Nothing is known about its servers from a capture, so no region, ASN or landmark is declared: capture first, then fill awsRegions/azureRegions/asns from where the observed addresses sit. Until then ./gpb profile will refuse rather than write a profile that looks finished."
     }
   }
 }
