@@ -116,6 +116,13 @@ public sealed class UnblockEntry
     /// present and empty means none.
     /// </summary>
     [JsonPropertyName("downloads")] public List<string>? Downloads { get; set; }
+
+    /// <summary>
+    /// Names under <see cref="Tunnel"/> that always go through the relay, never over the line (neither split nor whole)
+    /// nor through the lobby proxies. For calls the game does not retry when a connection breaks. Absent (null, a server
+    /// older than the field) means the client's built-in list; present and empty means none.
+    /// </summary>
+    [JsonPropertyName("relayOnly")] public List<string>? RelayOnly { get; set; }
 }
 
 public sealed class GameEntry

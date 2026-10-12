@@ -115,3 +115,5 @@ relay/cmd/lobbyproxy/handover_linux_test.go
 relay/cmd/lobbyproxy/hotrestart_linux.go
 relay/cmd/lobbyproxy/hotrestart_other.go
 profiles/fortnite-vn.json
+relay/deploy/lobbyproxy-install.sh
+gpb.local/

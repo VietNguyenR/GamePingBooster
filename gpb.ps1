@@ -1295,6 +1295,16 @@ switch ($Verb.ToLowerInvariant()) {
     }
 
     default {
+        # A verb for private tooling kept out of this repository (gpb.local\ is gitignored) runs
+        # through ./gpb, which owns the gpb.conf and ssh helpers it needs.
+        $local = Join-Path $PSScriptRoot "gpb.local\$Verb.sh"
+        if ($Verb -match '^[a-z0-9-]+$' -and (Test-Path $local)) {
+            $gitBash = Get-GitBash
+            if (-not $gitBash) { throw "gpb.local\$Verb.sh needs Git for Windows' bash." }
+            $rest = @($Arg1, $Arg2) | Where-Object { $_ }
+            & $gitBash (Join-Path $PSScriptRoot 'gpb') $Verb @rest
+            exit $LASTEXITCODE
+        }
         Get-Help $PSCommandPath -Detailed
     }
 }

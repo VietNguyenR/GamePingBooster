@@ -138,6 +138,59 @@ internal static partial class Program
             verdicts[SplitBlocked].Why);
     }
 
+    private const string RelayOnlyName = "prod-live-xenuine.playbattlegrounds.com";
+
+    /// <summary>
+    /// FPT, 2026-10-12 14:34: the line stopped carrying prod-live-xenuine right after its split handshake, the watch
+    /// reset it for the game to open again through the relay, and PUBG never did. The lobby stayed on the smoke screen.
+    /// Such a name is never answered with the proxy, and the policy says which ones.
+    /// </summary>
+    private static async Task ARelayOnlyNameNeverTakesTheLine()
+    {
+        var pubg = new UnblockApp("pubg", "PUBG", ["playbattlegrounds.com", "pubg.com"], [], "accounts.pubg.com",
+            Tunnel: [RelayOnlyName, "acrt-pcprod.acs.pubg.com", SplitBlocked]);
+        Check("with no list delivered, xenuine and acrt are relay-only", pubg.IsRelayOnly(RelayOnlyName) &&
+            pubg.IsRelayOnly("acrt-pcprod.acs.pubg.com"), "default missing");
+        Check("front is not - it carries the cold lobby", !pubg.IsRelayOnly(SplitBlocked), "front relay-only");
+        Check("a name off the tunnel list never is", !(pubg with { Tunnel = [SplitBlocked] }).IsRelayOnly(RelayOnlyName), "relay-only off the list");
+        Check("a delivered list replaces the built-in one", (pubg with { RelayOnly = [SplitBlocked] }).IsRelayOnly(SplitBlocked) &&
+            !(pubg with { RelayOnly = [SplitBlocked] }).IsRelayOnly(RelayOnlyName), "built-in list still used");
+        Check("a delivered empty list means none", !(pubg with { RelayOnly = [] }).IsRelayOnly(RelayOnlyName), "empty list ignored");
+        var fromProfile = UnblockPolicy.FromProfile(new GamePingBooster.Core.Profiles.ProfileBundle
+        {
+            Unblock = [new() { Id = "pubg", Name = "PUBG", Scope = ["playbattlegrounds.com"], Canary = "playbattlegrounds.com",
+                Tunnel = [SplitBlocked, RelayOnlyName], RelayOnly = ["Prod-Live-Front.playbattlegrounds.com."] }],
+        }, _ => { }, allowBuiltin: false);
+        Check("the profile's list is read and cleaned", fromProfile.Apps[0].IsRelayOnly(SplitBlocked) &&
+            !fromProfile.Apps[0].IsRelayOnly(RelayOnlyName), "not read from the profile");
+
+        using var certificate = SelfSigned();
+        await using var fpt = new LineFilter(RelayOnlyName, reassembles: false, certificate);
+        await using var lobbyProxy = new LineFilter("never.matches.example", reassembles: false, certificate);
+        var routes = new SplitRoutes();
+        var verdicts = new ConcurrentDictionary<string, SplitProxy.Verdict>(StringComparer.OrdinalIgnoreCase)
+        {
+            [RelayOnlyName] = new(true, [EdgeAddress], DateTimeOffset.UtcNow, "judged for the split a moment ago"),
+        };
+        await using var proxy = new SplitProxy(new DohUpstream(_ => { }), routes, s => Log.Enqueue(s), verdicts,
+            new IPEndPoint(IPAddress.Loopback, 0), fpt.Port, _ => LineAddress)
+        {
+            LobbyProxies = [new GamePingBooster.Core.Profiles.LobbyProxyEntry { Id = "t", Host = "127.0.0.1", Port = lobbyProxy.Port }],
+            IsProxied = name => name == RelayOnlyName,
+            RelayOnly = name => name == RelayOnlyName,
+        };
+        proxy.Start();
+
+        Check("a relay-only name is not answered with the proxy, even judged for the split and proxied", !proxy.Answers(RelayOnlyName), "answered");
+
+        // A lookup answered before the profile said so: the connection still reaches the proxy, and goes by the tunnel.
+        var status = await GetThroughAsync(proxy.Endpoint, RelayOnlyName);
+        Check($"a connection that still reaches the proxy goes through the tunnel, not the line or the lobby proxy ({status})",
+            status.StartsWith("HTTP/1.1 200", StringComparison.Ordinal) && proxy.FellBack == 1 && proxy.SplitConnections == 0
+            && proxy.ProxiedConnections == 0 && fpt.FromLine == 0,
+            $"line {proxy.SplitConnections}, proxied {proxy.ProxiedConnections}, fell back {proxy.FellBack}, from the line {fpt.FromLine}");
+    }
+
     private const string LobbyName = "prod-live-front.playbattlegrounds.com.cn";
 
     private static async Task AProxiedNameGoesThroughTheLobbyProxy()

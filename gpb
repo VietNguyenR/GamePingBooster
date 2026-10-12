@@ -1315,5 +1315,11 @@ case "$verb" in
 
     help | -h | --help) usage ;;
 
-    *) die "unknown command '$verb'. Run ./gpb help" ;;
+    *)
+        # Verbs for private tooling that is not in this repository: gpb.local/ is gitignored, and a
+        # file there named after the verb is run with these helpers (relay_ssh, gpb.conf) in scope.
+        case "$verb" in *[!a-z0-9-]*) die "unknown command '$verb'. Run ./gpb help" ;; esac
+        [ -f "$root/gpb.local/$verb.sh" ] || die "unknown command '$verb'. Run ./gpb help"
+        . "$root/gpb.local/$verb.sh"
+        ;;
 esac

@@ -131,6 +131,7 @@ internal sealed class LocalResolver : IAsyncDisposable
                     LobbyProxies = policy.LobbyProxies ?? [],
                     IsProxied = name => policy.ClaimedBy(name)?.ViaLobbyProxy(name) == true,
                     NeverRelay = name => policy.ClaimedBy(name)?.IsDownloadHost(name) == true,
+                    RelayOnly = name => policy.ClaimedBy(name)?.IsRelayOnly(name) == true,
                 };
             }
         }

@@ -151,6 +151,12 @@ internal sealed class SplitProxy : IAsyncDisposable
     /// </summary>
     internal Func<string, bool> NeverRelay { get; init; } = _ => false;
 
+    /// <summary>
+    /// Names never answered here: they always ride the relay (UnblockApp.IsRelayOnly). The watch below can only reset a
+    /// connection whose line stopped, and on 2026-10-12 PUBG did not open prod-live-xenuine again after that reset.
+    /// </summary>
+    internal Func<string, bool> RelayOnly { get; init; } = _ => false;
+
     /// <summary>How long the proxies go unused after none of them answered a connection.</summary>
     private static readonly TimeSpan ProxyDownFor = TimeSpan.FromMinutes(3);
 
@@ -358,7 +364,7 @@ internal sealed class SplitProxy : IAsyncDisposable
     /// just failed (29 KB/s through the proxy), never the relay, until the player restarted the game.
     /// </summary>
     private bool ProxyUsable(string name) =>
-        LobbyProxies.Count > 0 && IsProxied(name) && DateTime.UtcNow.Ticks >= Interlocked.Read(ref _proxyDownUntilTicks)
+        LobbyProxies.Count > 0 && IsProxied(name) && !RelayOnly(name) && DateTime.UtcNow.Ticks >= Interlocked.Read(ref _proxyDownUntilTicks)
         && !(_verdicts.TryGetValue(name, out var verdict) && verdict.Held > DateTimeOffset.UtcNow);
 
     /// <summary>The address and port this listens on - for TunnelCheck, which listens on a free port.</summary>
@@ -409,7 +415,7 @@ internal sealed class SplitProxy : IAsyncDisposable
     /// </summary>
     public bool Answers(string name)
     {
-        if (!Running) return false;
+        if (!Running || RelayOnly(name)) return false;
         var now = DateTimeOffset.UtcNow;
         if (ProxyUsable(name))
         {
@@ -657,9 +663,10 @@ internal sealed class SplitProxy : IAsyncDisposable
             Verdict? verdict = null;
             if (!viaProxy)
             {
-                if ((!_verdicts.TryGetValue(name, out verdict) || verdict.Edges.Length == 0) && IsProxied(name))
+                if ((!_verdicts.TryGetValue(name, out verdict) || verdict.Edges.Length == 0) && (IsProxied(name) || RelayOnly(name)))
                 {
-                    // Answered for the proxy before any verdict existed, and the proxy did not answer: judge it now.
+                    // Answered for the proxy before any verdict existed, and the proxy did not answer - or answered here
+                    // before the name became relay-only: judge it now, for its edges.
                     await ProbeAsync(name, ct).ConfigureAwait(false);
                     _verdicts.TryGetValue(name, out verdict);
                 }
@@ -670,7 +677,8 @@ internal sealed class SplitProxy : IAsyncDisposable
                 }
             }
 
-            if (!viaProxy && verdict!.Split)
+            // A relay-only name that still reaches this (a lookup answered before the profile said so) skips the line.
+            if (!viaProxy && verdict!.Split && !RelayOnly(name))
             {
                 (edge, reply) = await OverTheLineAsync(name, verdict.Edges, record, verdict.Whole, ct).ConfigureAwait(false);
             }

@@ -75,6 +75,7 @@ internal static partial class Program
             ("After a match: what the game waits for is logged", WhatTheGameWaitsForAfterAMatchIsLogged),
             ("After a match: a stuck lobby is reported with its lines", AStuckLobbyIsReportedWithItsLines),
             ("Split: a filter that reassembles sends it through the tunnel", AFilterThatReassemblesSendsTheConnectionThroughTheTunnel),
+            ("Split: a relay-only name never takes the line", ARelayOnlyNameNeverTakesTheLine),
             ("Lobby proxy: a proxied name goes through it", AProxiedNameGoesThroughTheLobbyProxy),
             ("Lobby proxy: a slow proxy is left alone", ASlowLobbyProxyIsLeftAlone),
             ("Lobby proxy: a proxy that does not answer leaves the name to the line", ADeadLobbyProxyLeavesTheNameToTheLine),

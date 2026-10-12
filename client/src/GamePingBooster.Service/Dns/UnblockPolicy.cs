@@ -14,7 +14,8 @@ internal sealed record UnblockApp(
     string Canary,
     IReadOnlyList<string>? Tunnel = null,
     IReadOnlyList<string>? Proxied = null,
-    IReadOnlyList<string>? Downloads = null)
+    IReadOnlyList<string>? Downloads = null,
+    IReadOnlyList<string>? RelayOnly = null)
 {
     /// <summary>
     /// Whether the name's connections go to the profile's lobby proxies first: on the tunnel list AND on the proxied
@@ -75,6 +76,26 @@ internal sealed record UnblockApp(
     /// it). A delivered empty list means none: switching the rule off stays a server-side edit.
     /// </summary>
     private IReadOnlyList<string> DownloadHostList => Downloads ?? DefaultDownloadHosts;
+
+    /// <summary>
+    /// PUBG's calls on the way back to the lobby after a match. 2026-10-12 14:34, two FPT players a few seconds apart:
+    /// the line stopped carrying prod-live-xenuine right after its split handshake, SplitProxy reset the connection so
+    /// the game would open it again through the relay, and the game never did. The lobby stayed on the smoke screen
+    /// until the player closed the game. Same on VNPT at 13:13 with acrt-pcprod over the line whole. These are small
+    /// APIs, so the relay's cap costs nothing. prod-live-front is left out on purpose: it carries the cold lobby (8.5 MB).
+    /// </summary>
+    internal static readonly string[] DefaultRelayOnly =
+    [
+        "prod-live-xenuine.playbattlegrounds.com", "acrt-pcprod.acs.pubg.com",
+    ];
+
+    /// <summary>
+    /// A tunnel-list name that always goes through the relay: never over the line, split or whole, nor through the
+    /// lobby proxies. Once the game has the server's first reply, a broken connection cannot be moved to the relay
+    /// without the game noticing (TLS is end to end), and these calls are not retried.
+    /// </summary>
+    public bool IsRelayOnly(string name) =>
+        RoutesThroughTunnel(name) && (RelayOnly ?? DefaultRelayOnly).Any(suffix => Matches(name, suffix));
 
     /// <summary>
     /// Whether the resolver may send <paramref name="name"/> through the tunnel once the line is seen cutting it by
@@ -198,7 +219,8 @@ internal sealed record UnblockPolicy(IReadOnlyList<UnblockApp> Apps, string Sour
                 canary,
                 Clean(entry.Tunnel),
                 Clean(entry.Proxied),
-                entry.Downloads is null ? null : Clean(entry.Downloads)));
+                entry.Downloads is null ? null : Clean(entry.Downloads),
+                entry.RelayOnly is null ? null : Clean(entry.RelayOnly)));
         }
 
         return apps.Count == 0
