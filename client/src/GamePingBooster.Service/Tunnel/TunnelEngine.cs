@@ -710,6 +710,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             PinDoors();
 
             _routes.ConfigureAdapter(_adapter.InterfaceIndex, session.ClientIp, prefixLength: 24, session.Mtu);
+            HostModel.Measure(_adapter.InterfaceIndex, endpoint.Address, _log);
             StartTunnel(_tunnel, token);
 
             // The lobby goes on the tunnel NOW, before the game exists, rather than with the game
@@ -2190,7 +2191,6 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                 }
                 if (!dead)
                 {
-                    ReleaseLineHolds();
                     MoveOtherTunnelsBackAfterSilence();
                     if (Interlocked.Exchange(ref _pendingDoorMove, null) is { } door) MakeDoorMove(tunnel, door);
 
@@ -3020,9 +3020,9 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
 
         // A TCP game's connections riding this relay survive a reconnect to the SAME relay - its reservation gives the
         // same inner IP back - but not the routes being pulled from under them. So they stay in while that relay is
-        // tried once more, and go as below only when it does not answer (LineHold, rule 2).
+        // tried once more, and go as below only when it does not answer (TcpHold).
         var tcpRiding = TcpRidingTunnel();
-        var holding = GamePingBooster.Core.Paths.LineHold.HoldsRoutesOnReconnect(_game, tcpRiding);
+        var holding = GamePingBooster.Core.Paths.TcpHold.HoldsRoutesOnReconnect(_game, tcpRiding);
 
         // Flush before the relay changes underneath it: a destinations line naming the wrong
         // relay is worse than no line, because the whole point is comparing one against another.
@@ -3370,8 +3370,6 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             return;
         }
         WarnAboutRoutedLandmarks(cidrs);
-        // A TCP game may already have its connections open: started before the watcher saw it, or before a reconnect.
-        if (_game.TcpGameplay) HoldLineConnections(cidrs, _game.Name);
         _routes.InstallGameRoutes(_adapter.InterfaceIndex, cidrs);
         _log($"Installed {cidrs.Count} routes into the virtual adapter.");
         // A session the game holds (SessionHold) starts again from here: at a game start, and after a reconnect, which
@@ -3423,11 +3421,9 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         }
         if (hostRoutes.Count == 0) return;
 
-        // A TCP game's lobby - Aniimo's gateway - can be open on the line already: the game was running when the player
-        // pressed Connect. Kept there rather than cut (LineHold); the same rule as its game routes.
+        // A TCP game's lobby - Aniimo's gateway - counts with its game routes when a reconnect asks what rides the tunnel.
         var tcpLobby = games.Where(g => g.TcpGameplay).SelectMany(g => g.LobbyAddresses).ToList();
         _tcpLobbyRoutes = tcpLobby.Count == 0 ? [] : LobbyRoutes.ToHostRoutes(tcpLobby, relays, landmarks, []);
-        if (_tcpLobbyRoutes.Count > 0) HoldLineConnections([.. _tcpLobbyRoutes], "A TCP game's lobby");
 
         try
         {

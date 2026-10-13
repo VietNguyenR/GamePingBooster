@@ -78,7 +78,7 @@ try {
     $routeAdded = $true
     Note "default route via $WslIp on $($wsl.Name) ($($wsl.ifIndex)) at metric 9999"
     # The line to the rig's line server L (198.51.100.30): a /30 through WSL, so the game route /32 into the tunnel
-    # wins for new connections and the line hold's /32 can sit beside it.
+    # wins for new connections, and a connection opened before it shows whether Windows moves it (strong host).
     New-NetRoute -DestinationPrefix '198.51.100.28/30' -InterfaceIndex $wsl.ifIndex -NextHop $WslIp -RouteMetric 1 -PolicyStore ActiveStore | Out-Null
     Note "line route 198.51.100.28/30 via $WslIp"
 
@@ -108,7 +108,7 @@ finally {
     Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue |
         Where-Object { $_.DestinationPrefix -like "$($WslIp.Substring(0, $WslIp.LastIndexOf('.')))*/32" -and $_.NextHop -eq $WslIp } |
         Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
-    # And the line hold's, to the rig's line server L.
+    # And any /32 to the rig's line server L (the line hold made them up to commit eef21aa).
     Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '198.51.100.30/32' -ErrorAction SilentlyContinue |
         Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
     if ($moved) {

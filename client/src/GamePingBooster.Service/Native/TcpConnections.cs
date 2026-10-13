@@ -100,14 +100,14 @@ internal static partial class TcpConnections
 
     /// <summary>
     /// Every ESTABLISHED connection owned by another process, as the address it was opened from and the one it goes to
-    /// - what LineHold judges route changes by. Not this service's own (the split proxy, the probes). Empty when the
+    /// - what TcpHold counts a reconnect by. Not this service's own (the split proxy, the probes). Empty when the
     /// table cannot be read.
     /// </summary>
-    internal static List<GamePingBooster.Core.Paths.LineHold.Flow> LiveFlowsOfOthers()
+    internal static List<GamePingBooster.Core.Paths.TcpHold.Flow> LiveFlowsOfOthers()
     {
         var self = (uint)Environment.ProcessId;
         return [.. OwnedRows().Where(r => r.State == StateEstablished && r.Pid != self)
-            .Select(r => new GamePingBooster.Core.Paths.LineHold.Flow(r.Local, r.Remote.Address))];
+            .Select(r => new GamePingBooster.Core.Paths.TcpHold.Flow(r.Local, r.Remote.Address))];
     }
 
     /// <summary>One connection of a process, for the log: what it is connected to and how far it got.</summary>

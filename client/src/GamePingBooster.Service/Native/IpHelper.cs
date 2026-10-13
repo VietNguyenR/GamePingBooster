@@ -95,6 +95,9 @@ internal static partial class IpHelper
         [FieldOffset(0)] public ushort Family;
         [FieldOffset(8)] public ulong InterfaceLuid;
         [FieldOffset(16)] public uint InterfaceIndex;
+        [FieldOffset(41)] public byte ForwardingEnabled;
+        [FieldOffset(42)] public byte WeakHostSend;
+        [FieldOffset(43)] public byte WeakHostReceive;
         [FieldOffset(44)] public byte UseAutomaticMetric;
         [FieldOffset(56)] public uint DadTransmits;
         [FieldOffset(144)] public uint SitePrefixLength;

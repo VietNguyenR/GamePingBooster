@@ -16,7 +16,8 @@ internal readonly record struct QualityMeta(
     string? EntryId,
     string? RegionName,
     string? LinkType,
-    string? Carried = null);
+    string? Carried = null,
+    string? HostModel = null);
 
 /// <summary>
 /// A move to another relay between matches and how the next match went, for <see cref="QualityFile.WriteRelayMove"/>.
@@ -648,6 +649,8 @@ internal sealed class QualityFile(Action<string> log)
         String(w, "link", meta.LinkType);
         // Absent, not null, with one tunnel: every record from a connection without region routing stays as it was.
         if (meta.Carried is { } carried) w.WriteString("carried", carried);
+        // Network.HostModel: "strong" on every Windows default; absent on records from before 2026-10-13.
+        if (meta.HostModel is { } host) w.WriteString("hostModel", host);
     }
 
     /// <summary>

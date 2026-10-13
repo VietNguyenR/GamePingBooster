@@ -23,9 +23,8 @@ namespace GamePingBooster.TunnelCheck;
 ///      tried again; A answers and the same connection carries on. Then A stays silent: the routes go, home fails over
 ///      to B, and the game's next connection plays through B.
 ///   4. Step 3, routes going in: a second RigGame plays over its own TCP connection to the rig's line server L - over
-///      the PC's own line, before Connect - and L is the game's range. Without tcpGameplay (the control) the route
-///      going in cuts that connection; with it the connection is kept on the line, its address let go once it closes,
-///      and the next connection to L takes the tunnel.
+///      the PC's own line, before Connect - and L is the game's range. The route going in must leave that connection
+///      alone (strong host send), and the service must have logged this machine as strong host.
 /// </summary>
 internal static partial class Program
 {
@@ -122,12 +121,9 @@ internal static partial class Program
         await run.Send("disconnect");
         Check("Disconnected", await run.WaitFor(@"Disconnect took", 30_000) is not null, Tail(run));
 
-        // ------------------------------------------------ 4. no route goes in under a connection open on the line
+        // ------------------------------------------------ 4. a route going in leaves a connection open on the line alone
         var line = IPAddress.Parse(Regex.Match(RigShell("status"), @"L=(\S+)").Groups[1].Value);
-        foreach (var tcpGameplay in new[] { false, true })
-        {
-            await LineHoldRun(run, rigGameExe, profile, line, tcpGameplay);
-        }
+        await StrongHostRun(run, rigGameExe, profile, line);
 
         await Task.Delay(1_000);
         var left = PinnedVia(wsl).Where(p => new[] { _a, _b }.Any(x => x.Address.ToString() == p)).ToList();
@@ -198,18 +194,19 @@ internal static partial class Program
 
     /// <summary>
     /// Step 3, routes going in. A second RigGame plays to the line server L over the PC's own line before Connect; L is
-    /// the game's whole range. <paramref name="tcpGameplay"/> false is the control: the route must cut the connection.
+    /// the game's whole range, and the game does not declare tcpGameplay - nothing in the service looks after it. The
+    /// route into the tunnel must leave the connection where it is: Windows sends by the strong host model, and that is
+    /// the only reason the service needs no hold for connections opened before their routes went in (TcpHold). Should
+    /// this ever fail, a TCP game started before Connect loses its gateway - bring the line hold back (commit eef21aa).
     /// </summary>
-    private static async Task LineHoldRun(ServiceRun run, string rigGameExe, string profile, IPAddress line, bool tcpGameplay)
+    private static async Task StrongHostRun(ServiceRun run, string rigGameExe, string profile, IPAddress line)
     {
         Console.WriteLine();
-        Console.WriteLine(tcpGameplay
-            ? "A TCP game's connection open on the line before its routes go in (step 3):"
-            : "The same connection for a game without tcpGameplay (the control):");
-        WriteLineRigProfile(profile, line, tcpGameplay);
+        Console.WriteLine("A connection open on the line before its routes go in (step 3, strong host):");
+        WriteLineRigProfile(profile, line);
         var dir = Path.GetDirectoryName(profile)!;
         var control = Path.Combine(dir, "riggame-line-control.txt");
-        var stats = Path.Combine(dir, $"riggame-line-stats-{tcpGameplay}.csv");
+        var stats = Path.Combine(dir, "riggame-line-stats.csv");
         File.WriteAllText(control, "tcp");
         using var game = Process.Start(new ProcessStartInfo(rigGameExe, $"\"{control}\" \"{stats}\" {line}")
             { UseShellExecute = false, CreateNoWindow = true })!;
@@ -238,37 +235,15 @@ internal static partial class Program
             await Task.Delay(8_000);
             var after = GameStats(stats, "tcp");
             run.Read();
-            var since = run.Seen[fromHere..];
-            if (!tcpGameplay)
-            {
-                // The 2026-10-13 run: it was NOT cut. Windows sends by the strong host model - a connection keeps the
-                // interface that holds its source address, whatever route goes in later - so this records that, as the
-                // ground the line hold stands on. Should it ever break here, the line hold is what keeps Aniimo alive.
-                var still = OpenedFrom();
-                Check($"  the route went in, but Windows kept the open connection on its own interface - strong host send " +
-                      $"({after.Breaks - before.Breaks} break(s), {after.Back - before.Back} echoed, from {still})",
-                    after.Breaks == before.Breaks && after.Back > before.Back + 200 && still == from, $"{after} against {before}");
-            }
-            else
-            {
-                var kept = Regex.Match(since, @"Rig game had \d+ TCP connection address\(es\) open on your own line[^\n]*");
-                Check($"  the connection was kept on the line: {kept.Value.Trim()}", kept.Success, Tail(run));
-                var still = OpenedFrom();
-                Check($"  and carried on there: no break ({after.Back - before.Back} echoed since, from {still})",
-                    after.Breaks == before.Breaks && after.Back > before.Back + 200 && still == from, $"{after} against {before}");
-
-                File.WriteAllText(control, "quiet");
-                // The log seals from the address to the end of the line, so nothing after it can be matched.
-                var released = await run.WaitFor(@"Nothing is connected to (\[enc:|\S+ on your own line any more)", 20_000);
-                Check("  closed, its address was let go", released is not null, Tail(run));
-                File.WriteAllText(control, "tcp");
-                await Task.Delay(4_000);
-                var next = GameStats(stats, "tcp");
-                var through = OpenedFrom();
-                Check($"  and the next connection to L takes the tunnel (from {through}, {next.Back - after.Back} echoed)",
-                    through is not null && ThroughRigTunnel(through) && next.Back > after.Back + 50,
-                    $"{next}");
-            }
+            var hostModel = Regex.Match(run.Seen[fromHere..], @"Host model:[^\n]*");
+            // The 2026-10-13 run: it was NOT cut - a connection keeps the interface that holds its source address,
+            // whatever route goes in later.
+            var still = OpenedFrom();
+            Check($"  the route went in, but Windows kept the open connection on its own interface - strong host send " +
+                  $"({after.Breaks - before.Breaks} break(s), {after.Back - before.Back} echoed, from {still})",
+                after.Breaks == before.Breaks && after.Back > before.Back + 200 && still == from, $"{after} against {before}");
+            Check($"  and the service saw strong host on this machine: {hostModel.Value.Trim()}",
+                hostModel.Success && hostModel.Value.Contains("strong host"), Tail(run));
         }
         finally
         {
@@ -284,7 +259,7 @@ internal static partial class Program
         local.StartsWith("10.77.", StringComparison.Ordinal) || local.StartsWith("10.78.", StringComparison.Ordinal);
 
     /// <summary>The TCP rig's profile with the line server L as the game's only range and landmark.</summary>
-    private static void WriteLineRigProfile(string profile, IPAddress line, bool tcpGameplay) =>
+    private static void WriteLineRigProfile(string profile, IPAddress line) =>
         File.WriteAllText(profile, $$"""
             {
               "schemaVersion": 1,
@@ -292,7 +267,7 @@ internal static partial class Program
               "games": [
                 {
                   "id": "riggame", "name": "Rig game", "processNames": ["RigGame.exe"],
-                  "tcpGameplay": {{(tcpGameplay ? "true" : "false")}}, "persistentSession": true,
+                  "tcpGameplay": false, "persistentSession": true,
                   "regions": [
                     { "id": "sg", "name": "Rig SG", "cidrs": ["{{line}}/32"], "landmarks": ["{{line}}"] }
                   ]

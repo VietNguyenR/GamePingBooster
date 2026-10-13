@@ -963,7 +963,8 @@ internal sealed class SpikeRecorder : IQualitySink
         context.EntryId,
         context.RegionName,
         _nic is null ? null : _nic.NetworkInterfaceType == NetworkInterfaceType.Wireless80211 ? "Wi-Fi" : "wired",
-        context.Carried);
+        context.Carried,
+        Network.HostModel.Current);
 
     private void Report(SpikeEvent spike, Context context)
     {
