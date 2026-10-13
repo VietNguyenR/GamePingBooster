@@ -70,6 +70,8 @@ internal static partial class Program
             ("Side by side: the budget", TheBudgetStillEndsIt),
             ("The in-game ping measures the match, not the lobby", TheGameServerIsTheUdpOne),
             ("A TCP game's match counts, its lobby does not", TcpGameplayCountsOnlyItsOwnRanges),
+            ("Discovery: a TCP game's match is found by its segments", TcpDiscoveryJudgesTheMatchConnectionByItsSegments),
+            ("Discovery: Windows counts a real connection's segments", TcpCountersCountARealConnection),
             ("Unblock: tunnel names are kept fresh", OnlyAskedListedNamesAreKeptFresh),
             ("Split: the hello is two records of the same hello", () => { TheSplitHelloIsTwoRecordsOfTheSameHello(); return Task.CompletedTask; }),
             ("Split: a filter reading the first record is passed", TheSplitHelloPassesAFilterThatReadsTheFirstRecord),

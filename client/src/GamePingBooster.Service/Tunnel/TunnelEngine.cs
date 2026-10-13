@@ -153,7 +153,9 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                 (game, round, matchOn) =>
                 {
                     if (_recorder is { } recorder) recorder.WriteProbeRound(round, matchOn, recorder.CurrentMeta() with { GameId = game.Id });
-                });
+                },
+                // A TCP game's connection from this address rides the tunnel already.
+                () => _tunnel?.Session.ClientIp);
         }
         _presence = new PresenceReporter(() => _config.LicenceUrl, () => _token, _device.Key, () => _config.ShareQuality, log);
         _meter = new RelayMeter(MeterCredentials, log, _jitter);

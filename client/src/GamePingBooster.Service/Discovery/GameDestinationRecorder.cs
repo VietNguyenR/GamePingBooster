@@ -124,6 +124,7 @@ internal sealed class GameDestinationRecorder : IDisposable
     private static DecodingRules? _rules;
 
     private readonly Func<long?> _tunnelGamePackets;
+    private readonly Func<IPAddress?> _tunnelAddress;
     private readonly Func<bool> _enabled;
     private readonly Func<string?> _whyDisabled;
     private readonly Action<DiscoveredServer> _report;
@@ -141,10 +142,13 @@ internal sealed class GameDestinationRecorder : IDisposable
     /// <param name="report">Where a new server goes. Called on the poll timer's thread.</param>
     /// <param name="probeRound">Where the game's probing before a match goes, with "tunnel" or "off-tunnel" for
     /// where that match went. Called on the poll timer's thread. Null keeps none.</param>
+    /// <param name="tunnelAddress">The tunnel's inner address, or null while there is none: a TCP game's connection
+    /// opened from it rides the tunnel and is not a candidate.</param>
     public GameDestinationRecorder(Func<long?> tunnelGamePackets, Func<string?> whyDisabled, Action<DiscoveredServer> report,
-        Action<string> log, Action<GameEntry, ProbeRound, string>? probeRound = null)
+        Action<string> log, Action<GameEntry, ProbeRound, string>? probeRound = null, Func<IPAddress?>? tunnelAddress = null)
     {
         _probeRound = probeRound;
+        _tunnelAddress = tunnelAddress ?? (() => null);
         _tunnelGamePackets = tunnelGamePackets;
         _whyDisabled = whyDisabled;
         _enabled = () => whyDisabled() is null;
@@ -161,7 +165,16 @@ internal sealed class GameDestinationRecorder : IDisposable
     /// </summary>
     internal static int PacketsFor(GameEntry game) => game.DiscoveryRate is { } rate
         ? (int)Math.Ceiling(rate * Window.TotalSeconds)
-        : NewServerPackets;
+        : game.TcpGameplay ? (int)Math.Ceiling(TcpServerRate * Window.TotalSeconds) : NewServerPackets;
+
+    /// <summary>
+    /// Data segments a second sent to one address that make it a server of a TCP game declaring no rate of its own:
+    /// <see cref="GameEntry.MinDiscoveryRate"/>, 90 in the window. Not the UDP default - TCP counts data segments, not
+    /// packets, and a TCP game's match is far quieter than a UDP shooter's: Aniimo's took 9,123 packets both ways in
+    /// 271 s (2026-10-13, about 17 a second each way), its gateways on TCP 10000 under half a packet a second. Web
+    /// ports are not counted at all (TcpFlowSampler), so the floor only has to sit above the gateways.
+    /// </summary>
+    internal const double TcpServerRate = GameEntry.MinDiscoveryRate;
 
     /// <summary>A game from the profile is running. Does nothing if that game is already watched.</summary>
     public void GameStarted(GameEntry game) => Enqueue(() =>
@@ -246,6 +259,14 @@ internal sealed class GameDestinationRecorder : IDisposable
         /// and the log line that names it cannot drift from the one that decides.</summary>
         private readonly int _newServerPackets = PacketsFor(game);
 
+        /// <summary>The game's TCP connections, counted per address - only for a game that plays over TCP.</summary>
+        private readonly TcpFlowSampler? _tcp = game.TcpGameplay
+            ? new TcpFlowSampler(game.LobbyAddresses.Select(a => IPAddress.TryParse(a, out var ip) ? ip : null)
+                .Where(a => a is not null).Select(a => a!).ToHashSet(), owner._tunnelAddress, owner._log)
+            : null;
+
+        private string Traffic => _tcp is null ? "UDP" : "match traffic";
+
         private readonly long _started = Stopwatch.GetTimestamp();
         private readonly HashSet<uint> _gamePids = [];
         private readonly Queue<(long At, long? Packets)> _tunnelSamples = new();
@@ -290,7 +311,8 @@ internal sealed class GameDestinationRecorder : IDisposable
                 : "the default rate";
             _log($"Discovery: watching {Game.Name} - {_ranges.Count} range(s) and {_landmarks.Count} landmark(s) " +
                  $"in the profile. A new server is {_newServerPackets:N0} packets to one address in " +
-                 $"{Window.TotalSeconds:F0} s ({declared}). Listening only while the tunnel carries none of its UDP.");
+                 $"{Window.TotalSeconds:F0} s ({declared}{(_tcp is null ? "" : "; UDP packets or TCP data segments, web ports left out")}). " +
+                 $"Listening only while the tunnel carries none of its {Traffic}.");
             _timer = new Timer(_ => Poll(), null, TimeSpan.Zero, PollInterval);
         }
 
@@ -311,7 +333,8 @@ internal sealed class GameDestinationRecorder : IDisposable
 
                 var minutes = Stopwatch.GetElapsedTime(_started).TotalMinutes;
                 _log($"Discovery: {Game.Name} closed after {minutes:F0} min. Listened {_listens} time(s), " +
-                     $"{_listenSeconds:F0} s in all, {_udpEvents:N0} UDP events, lost {_eventsLost:N0}; " +
+                     $"{_listenSeconds:F0} s in all, {_udpEvents:N0} UDP events, lost {_eventsLost:N0}" +
+                     (_tcp is null ? "" : $", {_tcp.Addresses} TCP address(es) counted") + "; " +
                      $"{_reports} new server(s) reported, {_knownLogged.Count} known server(s) seen off the tunnel.");
             }
         }
@@ -366,7 +389,7 @@ internal sealed class GameDestinationRecorder : IDisposable
                 if (_phase != Phase.Tunnelled)
                 {
                     StopListening(null);
-                    _log($"Discovery: the tunnel is carrying {Game.Name}'s UDP ({TunnelRate(now):N0} packets/s) - " +
+                    _log($"Discovery: the tunnel is carrying {Game.Name}'s {Traffic} ({TunnelRate(now):N0} packets/s) - " +
                          "the match is on a server the profile covers. Not listening.");
                     _phase = Phase.Tunnelled;
                     _waitingOn = null;   // whatever match a rest was waiting on is over: this one is on the tunnel
@@ -383,7 +406,7 @@ internal sealed class GameDestinationRecorder : IDisposable
 
             if (_phase != Phase.Listening)
             {
-                if (_etwUnavailable) return;
+                if (_etwUnavailable && _tcp is null) return;
                 StartListening(now);
                 return;
             }
@@ -439,6 +462,29 @@ internal sealed class GameDestinationRecorder : IDisposable
 
         private void StartListening(long now)
         {
+            if (!_etwUnavailable && !StartTrace()) return;
+
+            _tcp?.Clear();
+            _listenStarted = now;
+            _guardAt = now;
+            _guardEvents = 0;
+            _windows.Clear();
+            _windows.Enqueue((now, []));
+            _listens++;
+            _phase = Phase.Listening;
+
+            if (_waitingOn is null)
+            {
+                _log($"Discovery: the tunnel carries none of {Game.Name}'s {Traffic} - listening" +
+                     (_trace is null ? " (TCP only, ETW is off for this session)."
+                         : _trace.EventIdFilterApplied ? "." : " (Windows refused the event-id filter, so TCP events are delivered and dropped)."));
+            }
+        }
+
+        /// <summary>Starts the UDP half. False when it cannot run and nothing is left to listen with; a TCP game goes on
+        /// listening to its TCP without it.</summary>
+        private bool StartTrace()
+        {
             var table = new FlowTable((uint)Environment.ProcessId);
             KernelNetworkTrace trace;
             try
@@ -450,8 +496,10 @@ internal sealed class GameDestinationRecorder : IDisposable
                 // Any failure, not only the ones ETW documents: discovery is an extra, and a machine where
                 // it cannot start must go on exactly as it did before discovery existed.
                 _etwUnavailable = true;
-                _log($"Discovery is off for this {Game.Name} session: {ex.Message}");
-                return;
+                _log(_tcp is null
+                    ? $"Discovery is off for this {Game.Name} session: {ex.Message}"
+                    : $"Discovery listens to {Game.Name}'s TCP only this session - ETW would not start: {ex.Message}");
+                return _tcp is not null;
             }
 
             try
@@ -463,8 +511,10 @@ internal sealed class GameDestinationRecorder : IDisposable
                 // Whatever the self-test threw, the session it was testing must not be left running.
                 trace.Dispose();
                 _etwUnavailable = true;
-                _log($"Discovery is off for this {Game.Name} session - its self-test failed: {ex.Message}");
-                return;
+                _log(_tcp is null
+                    ? $"Discovery is off for this {Game.Name} session - its self-test failed: {ex.Message}"
+                    : $"Discovery listens to {Game.Name}'s TCP only this session - the ETW self-test failed: {ex.Message}");
+                return _tcp is not null;
             }
 
             table.Rules = _rules;
@@ -472,19 +522,7 @@ internal sealed class GameDestinationRecorder : IDisposable
             table.Probes = _probes;
             _trace = trace;
             _table = table;
-            _listenStarted = now;
-            _guardAt = now;
-            _guardEvents = 0;
-            _windows.Clear();
-            _windows.Enqueue((now, []));
-            _listens++;
-            _phase = Phase.Listening;
-
-            if (_waitingOn is null)
-            {
-                _log($"Discovery: the tunnel carries none of {Game.Name}'s UDP - listening" +
-                     (trace.EventIdFilterApplied ? "." : " (Windows refused the event-id filter, so TCP events are delivered and dropped)."));
-            }
+            return true;
         }
 
         /// <param name="rest">Rest this long before listening again; null leaves the phase to the caller.</param>
@@ -494,11 +532,12 @@ internal sealed class GameDestinationRecorder : IDisposable
             {
                 _udpEvents += trace.UdpEvents;
                 _eventsLost += trace.QueryLosses().EventsLost;
-                _listenSeconds += Stopwatch.GetElapsedTime(_listenStarted).TotalSeconds;
                 trace.Dispose();
             }
+            if (_phase == Phase.Listening) _listenSeconds += Stopwatch.GetElapsedTime(_listenStarted).TotalSeconds;
             _trace = null;
             _table = null;
+            _tcp?.Clear();
             _windows.Clear();
 
             if (rest is { } span)
@@ -515,12 +554,16 @@ internal sealed class GameDestinationRecorder : IDisposable
         /// <summary>Looks for one address that took this game's threshold of packets within the window.</summary>
         private void Evaluate(long now)
         {
-            if (_table is not { } table) return;
+            if (_table is null && _tcp is null) return;
 
-            table.SetGamePids(_gamePids);
-            table.RemoveAllExcept(_gamePids);
-
-            var rows = table.Snapshot(_gamePids).Where(r => !Destinations.IsLocal(r.Address)).ToList();
+            var rows = new List<FlowRow>();
+            if (_table is { } table)
+            {
+                table.SetGamePids(_gamePids);
+                table.RemoveAllExcept(_gamePids);
+                rows.AddRange(table.Snapshot(_gamePids).Where(r => !Destinations.IsLocal(r.Address)));
+            }
+            if (_tcp is not null) rows = Merge(rows, _tcp.Sample(_gamePids));
             var sent = rows.ToDictionary(r => r.Address, r => r.Sent);
             var horizon = now - Ticks(Window);
             while (_windows.Count > 1 && _windows.Peek().At < horizon) _windows.Dequeue();
@@ -589,6 +632,32 @@ internal sealed class GameDestinationRecorder : IDisposable
                 StopListening(RestAfterReport);
                 return;
             }
+        }
+
+        /// <summary>UDP and TCP rows for one address become one: a server is busy by what the game sends it, either way.
+        /// New rows, so neither source's running totals are changed.</summary>
+        private static List<FlowRow> Merge(List<FlowRow> udp, List<FlowRow> tcp)
+        {
+            if (tcp.Count == 0) return udp;
+            var merged = udp.ToDictionary(r => r.Address);
+            foreach (var row in tcp)
+            {
+                if (!merged.TryGetValue(row.Address, out var into))
+                {
+                    merged[row.Address] = row;
+                    continue;
+                }
+                var both = new FlowRow
+                {
+                    Address = row.Address, Sent = into.Sent + row.Sent,
+                    FirstTimestamp = Math.Min(into.FirstTimestamp, row.FirstTimestamp),
+                    LastTimestamp = Math.Max(into.LastTimestamp, row.LastTimestamp),
+                };
+                both.Ports.UnionWith(into.Ports);
+                both.Ports.UnionWith(row.Ports);
+                merged[row.Address] = both;
+            }
+            return [.. merged.Values];
         }
 
         /// <summary>
