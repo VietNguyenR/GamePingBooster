@@ -249,6 +249,7 @@ internal static class StringsEn
         ["svc.movedForGame"] = "Connected to {0} - {1} is not used for {2}",
         ["svc.rescanMoved"] = "Connected to {0} - moved from {1} between matches, {2} ms faster",
         ["svc.reconnecting"] = "Reconnecting via {0} (attempt {1}) - traffic is on the normal path",
+        ["svc.reconnectingHeld"] = "Reconnecting via {0} - {1} stays on the tunnel",
         ["svc.revoked"] = "Your account just signed in on another computer, so this one was disconnected.",
         ["svc.reconnected"] ="Reconnected to {0}",
         ["svc.accelerating"] = "Accelerating {0} through {1}",

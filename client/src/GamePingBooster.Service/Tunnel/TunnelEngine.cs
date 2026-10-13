@@ -2180,11 +2180,17 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                 }
 
                 var silence = tunnel.SinceLastHeard;
-                if (silence < SilenceBeforeDead)
+                var dead = silence >= SilenceBeforeDead;
+                if (!dead)
                 {
                     // Here and nowhere else, so a move between ways into the relay can never run beside a
                     // reconnect: this loop is the only thing that ever replaces or moves the tunnel.
                     if (MovedBackAfterSilence(tunnel, silence)) continue;
+                    dead = ReconnectSoonerForTcp(silence);
+                }
+                if (!dead)
+                {
+                    ReleaseLineHolds();
                     MoveOtherTunnelsBackAfterSilence();
                     if (Interlocked.Exchange(ref _pendingDoorMove, null) is { } door) MakeDoorMove(tunnel, door);
 
@@ -3012,6 +3018,12 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         // tunnels - the adapter's address is theirs too, and their connections are fine.
         List<TcpConnections.Row> riding = previousIp is null || _paths is not null ? [] : TcpConnections.From(previousIp);
 
+        // A TCP game's connections riding this relay survive a reconnect to the SAME relay - its reservation gives the
+        // same inner IP back - but not the routes being pulled from under them. So they stay in while that relay is
+        // tried once more, and go as below only when it does not answer (LineHold, rule 2).
+        var tcpRiding = TcpRidingTunnel();
+        var holding = GamePingBooster.Core.Paths.LineHold.HoldsRoutesOnReconnect(_game, tcpRiding);
+
         // Flush before the relay changes underneath it: a destinations line naming the wrong
         // relay is worse than no line, because the whole point is comparing one against another.
         if (_tunnel is not null) LogGameDestinations(_tunnel);
@@ -3044,21 +3056,34 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         // There is no such thing as a fast recovery here - the supervisor already waited 15
         // seconds of silence before calling us - so there is no quick success worth protecting
         // these routes for, and every second they stay in place is a second of no game traffic.
+        // Except for a TCP game's connections (holding, above): for them the routes are the connection.
         var hadGameRoutes = routes.ActiveGameRouteCount > 0;
-        if (hadGameRoutes)
+        void PullGameAndLobbyRoutes()
         {
-            _log("Tunnel is down - removing game routes so traffic falls back to the normal path.");
-            routes.RemoveGameRoutes(adapter.InterfaceIndex);
-        }
+            if (routes.ActiveGameRouteCount > 0)
+            {
+                _log("Tunnel is down - removing game routes so traffic falls back to the normal path.");
+                routes.RemoveGameRoutes(adapter.InterfaceIndex);
+            }
 
-        // The lobby too, for the same reason: pointed at an adapter with no relay behind it, the
-        // lobby would sit in a blackhole for as long as this loop takes, and that can be minutes.
-        // No flag to remember whether to put it back - it goes back on every successful reconnect,
-        // exactly as it went on at connect.
-        if (routes.ActiveLobbyRouteCount > 0)
+            // The lobby too, for the same reason: pointed at an adapter with no relay behind it, the
+            // lobby would sit in a blackhole for as long as this loop takes, and that can be minutes.
+            // No flag to remember whether to put it back - it goes back on every successful reconnect,
+            // exactly as it went on at connect.
+            if (routes.ActiveLobbyRouteCount > 0)
+            {
+                _log("Tunnel is down - removing lobby routes so the lobby falls back to the normal path.");
+                routes.RemoveLobbyRoutes(adapter.InterfaceIndex);
+            }
+        }
+        if (holding)
         {
-            _log("Tunnel is down - removing lobby routes so the lobby falls back to the normal path.");
-            routes.RemoveLobbyRoutes(adapter.InterfaceIndex);
+            _log($"Tunnel is down while {_game!.Name} has {tcpRiding} TCP connection(s) through it - its routes stay in " +
+                 $"while {previous.Name} is tried again, because pulling them ends those connections.");
+        }
+        else
+        {
+            PullGameAndLobbyRoutes();
         }
 
         // And the unblock resolver's, for the same reason; they go back with the lobby's on the reconnect.
@@ -3084,13 +3109,16 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
 
         for (var round = 1; !ct.IsCancellationRequested; round++)
         {
-            foreach (var relay in candidates)
+            foreach (var relay in holding ? [previous] : candidates)
             {
                 if (ct.IsCancellationRequested) return;
 
-                SetState(TunnelState.Reconnecting, new StatusText("svc.reconnecting",
-                    $"Reconnecting via {relay.Name} (attempt {round}) - traffic is on the normal path",
-                    relay.Name, round.ToString(CultureInfo.InvariantCulture)));
+                SetState(TunnelState.Reconnecting, holding
+                    ? new StatusText("svc.reconnectingHeld",
+                        $"Reconnecting via {relay.Name} - {_game!.Name} stays on the tunnel", relay.Name, _game!.Name)
+                    : new StatusText("svc.reconnecting",
+                        $"Reconnecting via {relay.Name} (attempt {round}) - traffic is on the normal path",
+                        relay.Name, round.ToString(CultureInfo.InvariantCulture)));
 
                 TunnelClient? client = null;
                 try
@@ -3171,6 +3199,11 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                         InstallRoutes();
                     }
 
+                    if (holding && session.ClientIp.Equals(previousIp))
+                    {
+                        _log($"Back on {relay.Name} with the routes never out - {_game?.Name}'s TCP connections carry on.");
+                    }
+
                     StartTunnel(client, ct);
                     routes.UnpinStuckDestinations(adapter.InterfaceIndex);
                     _error = null;
@@ -3193,6 +3226,16 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     _error = ex.Message;
                     _log($"  {relay.Name}: {ex.Message}");
                 }
+            }
+
+            // The held try failed: the relay is not coming back in time for those connections, and nothing is left to keep
+            // the game in a blackhole for. Routes out, as for every other game, and the full sweep at once.
+            if (holding)
+            {
+                holding = false;
+                _log($"{previous.Name} did not answer - the TCP connections through it cannot be kept.");
+                PullGameAndLobbyRoutes();
+                continue;
             }
 
             // Every relay failed this round. Back off before sweeping them again, but never give
@@ -3327,6 +3370,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             return;
         }
         WarnAboutRoutedLandmarks(cidrs);
+        // A TCP game may already have its connections open: started before the watcher saw it, or before a reconnect.
+        if (_game.TcpGameplay) HoldLineConnections(cidrs, _game.Name);
         _routes.InstallGameRoutes(_adapter.InterfaceIndex, cidrs);
         _log($"Installed {cidrs.Count} routes into the virtual adapter.");
         // A session the game holds (SessionHold) starts again from here: at a game start, and after a reconnect, which
@@ -3377,6 +3422,12 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             _log($"WARNING: lobby address '{refusal.Entry}' is not routed - {refusal.Reason}.");
         }
         if (hostRoutes.Count == 0) return;
+
+        // A TCP game's lobby - Aniimo's gateway - can be open on the line already: the game was running when the player
+        // pressed Connect. Kept there rather than cut (LineHold); the same rule as its game routes.
+        var tcpLobby = games.Where(g => g.TcpGameplay).SelectMany(g => g.LobbyAddresses).ToList();
+        _tcpLobbyRoutes = tcpLobby.Count == 0 ? [] : LobbyRoutes.ToHostRoutes(tcpLobby, relays, landmarks, []);
+        if (_tcpLobbyRoutes.Count > 0) HoldLineConnections([.. _tcpLobbyRoutes], "A TCP game's lobby");
 
         try
         {

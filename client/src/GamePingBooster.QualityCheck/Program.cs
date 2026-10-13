@@ -105,6 +105,7 @@ internal static partial class Program
         TheGapIsTimedFromTheLastPacket();
         RescanComparesMediansByAClearMargin();
         AGameThatHoldsItsSessionStaysOnceItHasSent();
+        RoutesNeverGoUnderAnOpenTcpConnection();
 
         Console.WriteLine();
         Console.WriteLine("A region's tunnel, between matches (WayCheck):");
@@ -1022,6 +1023,51 @@ internal static partial class Program
             GamePingBooster.Core.Profiles.ProfileJsonContext.Default.ProfileBundle);
         Check("the profile field reads as persistentSession, absent as false",
             read is { Games: [{ PersistentSession: true }, { PersistentSession: false }] }, "not read");
+    }
+
+    private static void RoutesNeverGoUnderAnOpenTcpConnection()
+    {
+        // Aniimo's gateway, opened at launch over the line (192.168.1.5), and its match server through the tunnel (10.77.0.2).
+        static System.Net.IPAddress Ip(string s) => System.Net.IPAddress.Parse(s);
+        var tunnel = Ip("10.77.0.2");
+        GamePingBooster.Core.Paths.LineHold.Flow[] live =
+        [
+            new(Ip("192.168.1.5"), Ip("8.219.197.133")),   // gateway, on the line
+            new(tunnel, Ip("8.219.10.20")),                // match, through the tunnel
+            new(Ip("192.168.1.5"), Ip("142.250.1.1")),     // a browser, outside the game's ranges
+            new(Ip("192.168.1.5"), Ip("8.219.197.133")),   // a second connection to the gateway
+        ];
+        string[] ranges = ["8.219.0.0/16"];
+        var line = GamePingBooster.Core.Paths.LineHold.OnTheLine(live, ranges, tunnel);
+        Check("a connection opened on the line into the game's ranges is kept there, once per address",
+            line.Count == 1 && line[0].Equals(Ip("8.219.197.133")), string.Join(", ", line));
+        Check("  one already through the tunnel is not, nor one outside the ranges",
+            !line.Contains(Ip("8.219.10.20")) && !line.Contains(Ip("142.250.1.1")), string.Join(", ", line));
+        Check("  with no tunnel address yet, every connection counts as on the line",
+            GamePingBooster.Core.Paths.LineHold.OnTheLine(live, ranges, null).Count == 2, "wrong count");
+        Check("  a malformed range is ignored, not thrown on",
+            GamePingBooster.Core.Paths.LineHold.OnTheLine(live, ["nonsense", "8.219.197.133/32"], tunnel).Count == 1, "wrong count");
+
+        Check("connections through the tunnel are counted for a reconnect",
+            GamePingBooster.Core.Paths.LineHold.ThroughTunnel(live, ranges, tunnel) == 1 &&
+            GamePingBooster.Core.Paths.LineHold.ThroughTunnel(live, ["9.0.0.0/8"], tunnel) == 0 &&
+            GamePingBooster.Core.Paths.LineHold.ThroughTunnel(live, ranges, null) == 0, "wrong count");
+
+        var held = new[] { Ip("8.219.197.133"), Ip("8.219.5.5") };
+        var free = GamePingBooster.Core.Paths.LineHold.Released(held, live, tunnel);
+        Check("a held address with nothing connected to it on the line is let go; one still connected stays",
+            free.Count == 1 && free[0].Equals(Ip("8.219.5.5")), string.Join(", ", free));
+        GamePingBooster.Core.Paths.LineHold.Flow[] moved = [new(tunnel, Ip("8.219.197.133"))];
+        Check("  a connection to it through the tunnel does not keep it held",
+            GamePingBooster.Core.Paths.LineHold.Released(held, moved, tunnel).Count == 2, "kept");
+
+        var aniimo = new GamePingBooster.Core.Profiles.GameEntry { Id = "aniimo", TcpGameplay = true };
+        Check("a reconnect keeps the routes for a TCP game with connections through the tunnel",
+            GamePingBooster.Core.Paths.LineHold.HoldsRoutesOnReconnect(aniimo, riding: 1), "pulled");
+        Check("  not with none, and never for a UDP game",
+            !GamePingBooster.Core.Paths.LineHold.HoldsRoutesOnReconnect(aniimo, riding: 0) &&
+            !GamePingBooster.Core.Paths.LineHold.HoldsRoutesOnReconnect(new GamePingBooster.Core.Profiles.GameEntry { Id = "pubg" }, riding: 3) &&
+            !GamePingBooster.Core.Paths.LineHold.HoldsRoutesOnReconnect(null, riding: 3), "held");
     }
 
     // ------------------------------------------------------------------ the lobby record

@@ -17,6 +17,10 @@
 # Ways: a (relay A direct), f (entry F -> A), b (relay B direct), e (entry E -> B).
 # Relay A is home; relay B carries the "kr" region. Game servers: 198.51.100.10 (sg, via home) and 198.51.100.20
 # (kr, via B), UDP echo on port 27015, TCP echo on port 20000 and ICMP echo - also the regions' landmarks.
+# L (198.51.100.30) is a game server the PC also reaches over its own line: TCP echo on port 20000, for a connection a
+# game opens before the booster's routes go in (LineHold). A test-net address, not one on eth0: relayd refuses private
+# destinations, so an eth0 address could never be reached through a tunnel. Run-ServiceRig.ps1 routes 198.51.100.28/30
+# through the WSL adapter for the run - the "line" - and a game route /32 into the tunnel beats it.
 #
 # netem delays and drops what LEAVES the rig on eth0, filtered by source address: a relay's replies to the PC down one
 # way. Replies down an entry leave with the entry's address (conntrack undoes the DNAT), so each way is shaped alone.
@@ -38,7 +42,7 @@ addresses() {
     IFS=. read -r o1 o2 o3 _ <<<"$ip"
     PREFIX="$prefix"
     A="$o1.$o2.$o3.201"; B="$o1.$o2.$o3.202"; E="$o1.$o2.$o3.203"; F="$o1.$o2.$o3.204"
-    C="$o1.$o2.$o3.205"; G="$o1.$o2.$o3.206"
+    C="$o1.$o2.$o3.205"; G="$o1.$o2.$o3.206"; L=198.51.100.30
 }
 
 up() {
@@ -55,6 +59,7 @@ up() {
     ip link set gpbgame up
     ip addr replace 198.51.100.10/32 dev gpbgame
     ip addr replace 198.51.100.20/32 dev gpbgame
+    ip addr replace "$L/32" dev gpbgame
 
     # Entries: DNAT, as on the VN boxes. The relay sees the PC's address on another port - a way in of its own.
     iptables -t nat -D PREROUTING -d "$E" -p udp --dport 51820 -j DNAT --to-destination "$B:51820" 2>/dev/null || true
@@ -75,13 +80,14 @@ up() {
     # address - and a real game server answers from its own.
     # TCP too, on port 20000: a game that plays over one long TCP connection (Aniimo) - RigGame's "tcp" mode.
     cat >"$state/echo.py" <<'PY'
-import select, socket
+import select, socket, sys
 udp, listeners, conns = [], [], []
-for ip in ("198.51.100.10", "198.51.100.20"):
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
-    s.bind((ip, 27015))
-    udp.append(s)
+for ip in ("198.51.100.10", "198.51.100.20") + tuple(sys.argv[1:]):
+    if ip.startswith("198.51.100."):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
+        s.bind((ip, 27015))
+        udp.append(s)
     t = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     t.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     t.bind((ip, 20000))
@@ -111,7 +117,7 @@ while True:
             conns.remove(s)
             s.close()
 PY
-    nohup python3 "$state/echo.py" >"$state/echo.log" 2>&1 &
+    nohup python3 "$state/echo.py" "$L" >"$state/echo.log" 2>&1 &
 
     heal
     sleep 0.5
@@ -201,6 +207,7 @@ status() {
     echo "A=$A:51820 (home relay)  F=$F:51820 (entry -> A)"
     echo "B=$B:51820 (kr relay)    E=$E:51820 (entry -> B)"
     echo "game servers: 198.51.100.10 (sg), 198.51.100.20 (kr), udp/27015 and tcp/20000"
+    echo "L=$L (line server, tcp/20000)"
     echo "relayd running: $(pgrep -fc "$state/relayd" || true), echo running: $(pgrep -fc "$state/echo.py" || true)"
     tc qdisc show dev "$dev" | sed 's/^/  tc: /'
 }

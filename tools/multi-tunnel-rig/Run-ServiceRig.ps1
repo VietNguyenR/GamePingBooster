@@ -77,6 +77,10 @@ try {
     New-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceIndex $wsl.ifIndex -NextHop $WslIp -RouteMetric 9999 -PolicyStore ActiveStore | Out-Null
     $routeAdded = $true
     Note "default route via $WslIp on $($wsl.Name) ($($wsl.ifIndex)) at metric 9999"
+    # The line to the rig's line server L (198.51.100.30): a /30 through WSL, so the game route /32 into the tunnel
+    # wins for new connections and the line hold's /32 can sit beside it.
+    New-NetRoute -DestinationPrefix '198.51.100.28/30' -InterfaceIndex $wsl.ifIndex -NextHop $WslIp -RouteMetric 1 -PolicyStore ActiveStore | Out-Null
+    Note "line route 198.51.100.28/30 via $WslIp"
 
     $psexec = (Get-Command psexec -ErrorAction SilentlyContinue).Source
     if (-not $psexec) { $psexec = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Recurse -Filter psexec.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName }
@@ -97,11 +101,15 @@ finally {
     try { Copy-Item (Join-Path $data 'logs') (Join-Path $RigData 'service-logs') -Recurse -Force -ErrorAction Stop } catch { Note "could not copy logs: $_" }
     if ($routeAdded) {
         Get-NetRoute -DestinationPrefix '0.0.0.0/0' -NextHop $WslIp -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+        Get-NetRoute -DestinationPrefix '198.51.100.28/30' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
         Note 'route removed'
     }
     # Pins the rig service left behind if it was killed mid-run: /32s to the rig's addresses through the WSL adapter.
     Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue |
         Where-Object { $_.DestinationPrefix -like "$($WslIp.Substring(0, $WslIp.LastIndexOf('.')))*/32" -and $_.NextHop -eq $WslIp } |
+        Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+    # And the line hold's, to the rig's line server L.
+    Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '198.51.100.30/32' -ErrorAction SilentlyContinue |
         Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
     if ($moved) {
         Remove-Item $data -Recurse -Force -ErrorAction SilentlyContinue

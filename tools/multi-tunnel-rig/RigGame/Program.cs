@@ -8,13 +8,15 @@ using System.Net.Sockets;
 // game does, reads the echoes back, and writes one line a second: what was sent, what came back, and the longest
 // silence - so the driver can say whether a move lost anything.
 //
-//     RigGame.exe <control-file> <stats-file>
+//     RigGame.exe <control-file> <stats-file> [tcp-server]
 //
 // The control file holds one word, re-read every 100 ms: quiet (nothing - the lobby), kr (a match in kr at 40/s, and
 // sg at 5/s beside it), sg (a match in sg at 40/s), tcp (a match over ONE TCP connection to sg port 20000 at 40/s, as
 // Aniimo plays), tcp-idle (that connection kept open, nothing sent - a player standing still), exit. The TCP connection
 // is opened the first time it is needed and kept through tcp and tcp-idle; any other word closes it. When it breaks -
 // reset, closed, a send refused - the break is counted and the next send opens a new one, as a game reconnects.
+// tcp-server is where that connection goes, 198.51.100.10 when not given: the rig's line server L for a game whose
+// connection is opened over the player's own line before the booster's routes go in.
 
 var control = args.Length > 0 ? args[0] : "riggame-control.txt";
 var statsPath = args.Length > 1 ? args[1] : "riggame-stats.csv";
@@ -24,7 +26,7 @@ var servers = new Dictionary<string, IPEndPoint>
     ["sg"] = new(IPAddress.Parse("198.51.100.10"), 27015),
     ["kr"] = new(IPAddress.Parse("198.51.100.20"), 27015),
 };
-var tcpServer = new IPEndPoint(IPAddress.Parse("198.51.100.10"), 20000);
+var tcpServer = new IPEndPoint(IPAddress.Parse(args.Length > 2 ? args[2] : "198.51.100.10"), 20000);
 string[] names = [.. servers.Keys, "tcp"];
 // Opened when a match starts and closed when it ends, as a game does: a UDP socket connected before the booster's
 // routes went in keeps the way out it was connected on, and nothing it sends ever reaches the tunnel.

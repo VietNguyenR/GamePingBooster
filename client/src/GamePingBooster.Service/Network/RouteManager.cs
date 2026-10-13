@@ -90,6 +90,92 @@ internal sealed class RouteManager
     // is reconnecting and the game's ranges are out - so a match on another tunnel keeps its exit (G1).
     private readonly List<string> _pinnedStuckPrefixes = [];
 
+    // A TCP game's connections opened on the player's own line before its routes went in (LineHold): each address a /32
+    // through the way out it was on, and the interface that is - deleting needs it, as for the pins above. Under its
+    // own lock: held from the watcher's thread, let go from the supervisor's.
+    private readonly Dictionary<string, uint> _linePins = new(StringComparer.Ordinal);
+
+    /// <summary>The addresses <see cref="HoldOnLine"/> keeps on the player's own line now.</summary>
+    public List<IPAddress> LineHeld
+    {
+        get
+        {
+            lock (_linePins) return [.. _linePins.Keys.Select(p => IPAddress.Parse(p[..p.IndexOf('/')]))];
+        }
+    }
+
+    /// <summary>
+    /// Pins each address to the way out it takes NOW, before a route into the virtual adapter can catch it: a TCP
+    /// connection open to it on the player's own line carries on there (LineHold). The way is Windows' own best route
+    /// to the address - its interface and next hop, on-link when it has none - not the default gateway the relay pins
+    /// use: a server on a LAN, a VPN or the WSL switch is reached without one. An address the virtual adapter already
+    /// catches, or one already pinned for anything, is left as it is. Returns the addresses pinned.
+    /// </summary>
+    public List<IPAddress> HoldOnLine(uint tunInterfaceIndex, IReadOnlyCollection<IPAddress> addresses)
+    {
+        var held = new List<IPAddress>();
+        if (addresses.Count == 0) return held;
+        var started = Stopwatch.GetTimestamp();
+        var table = IpHelper.ReadRoutes();
+        lock (_linePins)
+        {
+            foreach (var address in addresses)
+            {
+                var prefix = $"{address}/32";
+                if (_linePins.ContainsKey(prefix) || _pins.IsPinned(prefix) || _pinnedStuckPrefixes.Contains(prefix)) continue;
+                if (IpHelperInterop.BestInterfaceFor(address) is not { } via || via == tunInterfaceIndex) continue;
+                if (BestRouteOn(table, via, address) is not { } route) continue;
+
+                DeleteRoute(prefix, via);
+                _linePins[prefix] = via;
+                AddRoute(prefix, via, route.NextHopAddress == 0 ? null : new IPAddress(route.NextHopAddress));
+                held.Add(address);
+            }
+        }
+        if (held.Count > 0)
+        {
+            _log?.Invoke($"Routing: kept {held.Count} address(es) on the line in " +
+                         $"{Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} ms.");
+        }
+        return held;
+    }
+
+    /// <summary>
+    /// Lets these addresses go from <see cref="HoldOnLine"/>. The caller installs the routes it skipped for them
+    /// again - a game or lobby /32 for the very same address is never added while the hold is in, since two /32s on
+    /// two interfaces would leave the choice to the metrics.
+    /// </summary>
+    public void ReleaseLine(IEnumerable<IPAddress> addresses)
+    {
+        lock (_linePins)
+        {
+            foreach (var address in addresses)
+            {
+                var prefix = $"{address}/32";
+                if (_linePins.Remove(prefix, out var via)) DeleteRoute(prefix, via);
+            }
+        }
+    }
+
+    private bool IsLineHeld(string prefix)
+    {
+        lock (_linePins) return _linePins.ContainsKey(prefix);
+    }
+
+    /// <summary>The longest-prefix route on <paramref name="interfaceIndex"/> that holds <paramref name="address"/>.</summary>
+    private static IpHelper.ForwardRow? BestRouteOn(List<IpHelper.ForwardRow> table, uint interfaceIndex, IPAddress address)
+    {
+        IpHelper.ForwardRow? best = null;
+        foreach (var row in table)
+        {
+            if (row.InterfaceIndex != interfaceIndex || row.DestinationPrefixLength > 32) continue;
+            if (best is { } b && b.DestinationPrefixLength >= row.DestinationPrefixLength) continue;
+            if (!new IPNetwork(new IPAddress(row.DestinationAddress), row.DestinationPrefixLength).Contains(address)) continue;
+            best = row;
+        }
+        return best;
+    }
+
     /// <summary>Number of routes currently installed.</summary>
     public int ActiveRouteCount =>
         _installedPrefixes.Count + _lobbyPrefixes.Count + _pins.CountOwnedByAny(PinOwner.Relay, PinOwner.Doors);
@@ -316,6 +402,9 @@ internal sealed class RouteManager
             // taking the lobby off the tunnel with it. The lobby owns it; leave it alone.
             if (_lobbyPrefixes.Contains(cidr)) continue;
 
+            // Kept on the line for a connection open there (HoldOnLine); added when that lets go.
+            if (IsLineHeld(cidr)) continue;
+
             fresh.Add(cidr);
         }
         if (fresh.Count == 0) return;
@@ -370,6 +459,7 @@ internal sealed class RouteManager
         {
             if (!IsValidIPv4Cidr(prefix)) continue;
             if (_lobbyPrefixes.Contains(prefix)) continue;
+            if (IsLineHeld(prefix)) continue;
 
             // The same /32 is already in the table as a game route (routeWithoutGame, or a profile
             // listing it in both places). Take it over without touching the table: deleting and
@@ -419,6 +509,7 @@ internal sealed class RouteManager
                 if (!IsValidIPv4Cidr(prefix)) continue;
                 if (_unblockPrefixes.Contains(prefix) || fresh.Contains(prefix)) continue;
                 if (_lobbyPrefixes.Contains(prefix) || _installedPrefixes.Contains(prefix)) continue;
+                if (IsLineHeld(prefix)) continue;
                 if (_unblockPrefixes.Count + fresh.Count >= MaxUnblockRoutes)
                 {
                     // Said the first time and then every few minutes with the count: on 2026-10-04 it was said 327 times
@@ -519,6 +610,7 @@ internal sealed class RouteManager
         RemoveLobbyRoutes(tunInterfaceIndex);
         RemoveUnblockRoutes(tunInterfaceIndex);
         UnpinStuckDestinations(tunInterfaceIndex);
+        ReleaseLine(LineHeld);
         if (_pins.CountOwnedByAny(PinOwner.Paths) > 0) PinPathRoutes([]);
 
         Timed("removed the relay pins", () =>

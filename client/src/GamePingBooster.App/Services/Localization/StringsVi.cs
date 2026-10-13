@@ -249,6 +249,7 @@ internal static class StringsVi
         ["svc.movedForGame"] = "Đã kết nối tới {0} - {1} không dùng cho {2}",
         ["svc.rescanMoved"] = "Đã kết nối tới {0} - chuyển từ {1} giữa hai trận, nhanh hơn {2} ms",
         ["svc.reconnecting"] = "Đang kết nối lại qua {0} (lần {1}) - traffic đang đi đường mạng thường",
+        ["svc.reconnectingHeld"] = "Đang kết nối lại qua {0} - {1} vẫn giữ kết nối qua máy chủ",
         ["svc.reconnected"] = "Đã kết nối lại tới {0}",
         ["svc.revoked"] = "Tài khoản của bạn vừa đăng nhập trên máy khác nên máy này bị ngắt kết nối.",
         ["svc.accelerating"] = "Đang tăng tốc {0} qua {1}",

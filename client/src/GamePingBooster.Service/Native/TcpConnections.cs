@@ -98,9 +98,24 @@ internal static partial class TcpConnections
     internal static List<(IPEndPoint Remote, uint Pid)> Established() =>
         [.. OwnedRows().Where(r => r.State == StateEstablished).Select(r => (r.Remote, r.Pid))];
 
+    /// <summary>
+    /// Every ESTABLISHED connection owned by another process, as the address it was opened from and the one it goes to
+    /// - what LineHold judges route changes by. Not this service's own (the split proxy, the probes). Empty when the
+    /// table cannot be read.
+    /// </summary>
+    internal static List<GamePingBooster.Core.Paths.LineHold.Flow> LiveFlowsOfOthers()
+    {
+        var self = (uint)Environment.ProcessId;
+        return [.. OwnedRows().Where(r => r.State == StateEstablished && r.Pid != self)
+            .Select(r => new GamePingBooster.Core.Paths.LineHold.Flow(r.Local, r.Remote.Address))];
+    }
+
     /// <summary>One connection of a process, for the log: what it is connected to and how far it got.</summary>
     internal readonly record struct Owned(uint State, int LocalPort, IPEndPoint Remote, uint Pid)
     {
+        /// <summary>The address it was opened from - the adapter's inner IP for one riding the tunnel.</summary>
+        public IPAddress Local { get; init; } = IPAddress.Any;
+
         public string StateName => State switch
         {
             1 => "Closed", 2 => "Listen", 3 => "SynSent", 4 => "SynReceived", 5 => "Established", 6 => "FinWait1",
@@ -142,7 +157,10 @@ internal static partial class TcpConnections
                     var local = new Row { RemotePort = ports.LocalPort };
                     result.Add(new Owned((uint)Marshal.ReadInt32(buffer, at), local.RemotePortNumber,
                         new IPEndPoint(new IPAddress((uint)Marshal.ReadInt32(buffer, at + 12)), ports.RemotePortNumber),
-                        (uint)Marshal.ReadInt32(buffer, at + 20)));
+                        (uint)Marshal.ReadInt32(buffer, at + 20))
+                    {
+                        Local = new IPAddress((uint)Marshal.ReadInt32(buffer, at + 4)),
+                    });
                 }
                 return result;
             }
