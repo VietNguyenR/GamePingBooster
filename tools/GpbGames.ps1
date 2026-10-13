@@ -90,6 +90,8 @@ function ConvertTo-GpbGame {
         AzureRegions      = @(@($Game.azureRegions) | Where-Object { $_ })
         GlobalAccelerator = [bool]$Game.globalAccelerator
         Asns              = @(@($Game.asns) | Where-Object { $null -ne $_ } | ForEach-Object { [int]$_ })
+        # {"45102": "asia-sg"} - see Build-PubgProfile.ps1 -AsnRegions.
+        AsnRegions        = @(if ($Game.asnRegions) { $Game.asnRegions.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" } })
 
         # Packets a second that make an address a server of this game, for the client's discovery.
         # Null means the client's own default (500 in 30 s, 16.7 a second), which is right for every
@@ -97,6 +99,13 @@ function ConvertTo-GpbGame {
         # from the game's own capture before setting one - observed-<game>.txt has packets and
         # seconds per address - and never set it to quieten a game that is simply not running.
         DiscoveryRate     = if ($null -ne $Game.discoveryPacketsPerSecond) { [double]$Game.discoveryPacketsPerSecond } else { $null }
+
+        # The game plays its matches over TCP (Aniimo): capture writes its busy TCP servers to observed as
+        # well, and the profile says so, which the client needs to count TCP as the match. See
+        # GameEntry.TcpGameplay. persistentSession: one session for as long as the game is open - no
+        # rescan or region move on a quiet spell. Separate flags; one does not imply the other.
+        TcpGameplay       = [bool]$Game.tcpGameplay
+        PersistentSession = [bool]$Game.persistentSession
         Note              = $Game.note
     }
 }

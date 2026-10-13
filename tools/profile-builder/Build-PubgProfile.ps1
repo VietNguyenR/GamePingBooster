@@ -128,6 +128,13 @@ param(
     # prefixes they announce (RIPEstat) count as published ranges.
     [int[]]$Asns = @(),
 
+    # "asn=region", e.g. "45102=asia-sg": the profile region an ASN's matches go into, for an ASN that
+    # announces from one place as far as this game is concerned. Without one an ASN is a region of its
+    # own ("as45102"), because its announcements carry no location. Aniimo plays on Alibaba Cloud
+    # (AS45102), which is global - but every server it was ever captured on answered from Singapore at
+    # 43-44 ms, so its matches are Singapore's. The region must be one $regionNames knows.
+    [string[]]$AsnRegions = @(),
+
     [string]$UnverifiedPath,
 
     # Packets a second to one address that make it a server of this game, written into the profile
@@ -135,6 +142,11 @@ param(
     # games.json and passed by ./gpb profile; left out, the field is removed from the profile and
     # the client falls back to its default. See GameEntry.DiscoveryPacketsPerSecond.
     [double]$DiscoveryPacketsPerSecond = 0,
+
+    # From games.json, like the rate: written into the profile when declared and removed when not.
+    # See GameEntry.TcpGameplay and GameEntry.PersistentSession.
+    [switch]$TcpGameplay,
+    [switch]$PersistentSession,
 
     # Only used when -ProfilePath does not exist yet, to start the new profile.
     [string]$GameName,
@@ -187,7 +199,19 @@ $regionNames = @{
     'aws-ga'  = 'AWS Global Accelerator (anycast)'
 }
 # An ASN's announcements carry no location either, so the same applies.
+$asnRegionOf = @{}
+foreach ($pair in $AsnRegions) {
+    $parts = "$pair".Split('=')
+    if ($parts.Count -ne 2 -or -not $regionNames.ContainsKey($parts[1].Trim())) {
+        throw "-AsnRegions '$pair' is not asn=region with a region this builder knows ($(($regionNames.Keys | Sort-Object) -join ', '))."
+    }
+    $asnRegionOf[[int]$parts[0].Trim()] = $parts[1].Trim()
+}
 foreach ($asn in $Asns) {
+    if ($asnRegionOf.ContainsKey($asn)) {
+        $regionMap["AS$asn"] = $asnRegionOf[$asn]
+        continue
+    }
     $regionMap["AS$asn"] = "as$asn"
     $regionNames["as$asn"] = "AS$asn network"
 }
@@ -1096,6 +1120,11 @@ foreach ($r in $game.regions) {
 if ($landmarks.Count -eq 0) {
     Write-Warning ("The profile declares no landmarks, so nothing stops a prefix from swallowing " +
                    "the game's own datacentre probes.")
+} elseif (@($AzureRegions).Count -eq 0) {
+    # Only Azure says where an address is. A game on another network (Aniimo, Alibaba) has landmarks that
+    # are in no Azure region by construction, and every one of them would be reported as stale.
+    Write-Host ""
+    Write-Host "==> $($landmarks.Count) landmark(s) kept; not checked against a region - the game declares no Azure regions"
 } else {
     Test-LandmarkRegions -Landmarks $landmarks -Azure $azure
 }
@@ -1264,6 +1293,19 @@ if ($DiscoveryPacketsPerSecond -gt 0) {
 } elseif ($game.PSObject.Properties.Name -contains 'discoveryPacketsPerSecond') {
     $game.PSObject.Properties.Remove('discoveryPacketsPerSecond')
     Write-Host "    Discovery: no rate in games.json - removed the one in the profile, the client's default applies"
+}
+
+# The same rule for the two flags: games.json is the only place they are decided.
+foreach ($flag in @(
+        @{ Name = 'tcpGameplay'; On = [bool]$TcpGameplay; Text = 'matches are TCP - the client counts TCP to these ranges as the match' },
+        @{ Name = 'persistentSession'; On = [bool]$PersistentSession; Text = 'one session while the game is open - no rescan or region move on a quiet spell' })) {
+    if ($flag.On) {
+        $game | Add-Member -NotePropertyName $flag.Name -NotePropertyValue $true -Force
+        Write-Host "    $($flag.Name): $($flag.Text)"
+    } elseif ($game.PSObject.Properties.Name -contains $flag.Name) {
+        $game.PSObject.Properties.Remove($flag.Name)
+        Write-Host "    $($flag.Name): not in games.json - removed from the profile"
+    }
 }
 
 if ($unverified.Count -gt 0) {

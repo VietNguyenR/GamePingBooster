@@ -241,6 +241,8 @@
     "aniimo": {
       "name": "Aniimo",
       "watchProcess": "Aniimo",
+      "tcpGameplay": true,
+      "persistentSession": true,
       "probePort": null,
       "observedPath": "observed-aniimo.txt",
       "landmarkPath": null,
@@ -250,8 +252,9 @@
       "profilePath": "../../profiles/aniimo-vn.json",
       "awsRegions": [],
       "azureRegions": [],
-      "asns": [],
-      "note": "Captured 2026-09-29 from Hanoi with ./gpb capture aniimo all, four sessions: NO UDP AT ALL - observed-aniimo.txt was never written. The game is TCP. Gameplay is TCP 20000, one long connection per server, to Alibaba Cloud Singapore (AS45102):\n  47.237.210.48   34808 / 606 s = 57/s\n  43.106.7.69     31312 / 586 s = 53/s (also 12550 / 182 s = 69/s)\n  47.237.216.175   6399 / 172 s = 37/s\n  47.84.93.165     5082 / 149 s = 34/s\n  47.245.126.28    2197 /  90 s = 24/s\nFive servers in four different /16s (43.106/16, 47.237/16, 47.84/17, 47.245/19): Alibaba hands out addresses per instance, so a /20 around one server says nothing about the next. 8.219.197.133 TCP 10000 (~0.4/s, open the whole session) is the gateway; 47.253.108.56, 47.90.219.239, 8.214.x, 47.89.139.22, 100.2x.x.x, 43.152-153.x are HTTPS 443 - never route those. None of the servers answer ICMP. TCP connect RTT from the capture PC, min of 5: every one 43.3-44.5 ms, the gateway 44.1 - all Singapore. The cross-check stays empty because the pipeline is UDP-only end to end: capture writes only UDP to observed, the client's discovery (GameDestinationRecorder) listens to UDP only, and rescan-between-matches reads 10 s of zero game UDP as 'match over' - which a TCP game is all the time. Decide TCP support before building a profile."
+      "asns": [45102],
+      "asnRegions": { "45102": "asia-sg" },
+      "note": "Captured 2026-09-29 from Hanoi with ./gpb capture aniimo all, four sessions: NO UDP AT ALL - observed-aniimo.txt was never written. The game is TCP. Gameplay is TCP 20000, one long connection per server, to Alibaba Cloud Singapore (AS45102):\n  47.237.210.48   34808 / 606 s = 57/s\n  43.106.7.69     31312 / 586 s = 53/s (also 12550 / 182 s = 69/s)\n  47.237.216.175   6399 / 172 s = 37/s\n  47.84.93.165     5082 / 149 s = 34/s\n  47.245.126.28    2197 /  90 s = 24/s\nFive servers in four different /16s (43.106/16, 47.237/16, 47.84/17, 47.245/19): Alibaba hands out addresses per instance, so a /20 around one server says nothing about the next. 8.219.197.133 TCP 10000 (~0.4/s, open the whole session) is the gateway; 47.253.108.56, 47.90.219.239, 8.214.x, 47.89.139.22, 100.2x.x.x, 43.152-153.x are HTTPS 443 - never route those. None of the servers answer ICMP. TCP connect RTT from the capture PC, min of 5: every one 43.3-44.5 ms, the gateway 44.1 - all Singapore. The cross-check stays empty because the pipeline is UDP-only end to end: capture writes only UDP to observed, the client's discovery (GameDestinationRecorder) listens to UDP only, and rescan-between-matches reads 10 s of zero game UDP as 'match over' - which a TCP game is all the time. Decide TCP support before building a profile.\n2026-10-13: TCP supported (client roadmap steps 1-5). tcpGameplay: capture writes the TCP servers to observed-aniimo.txt (not 80/443, handshake completed, at least -MinPackets outbound). persistentSession: one session while the game is open. asns 45102 -> asia-sg: Alibaba is global, but every server captured answered from Singapore. Live test 2026-10-13: gameplay also on 47.84.201.35 and 43.106.8.250 (TCP 20000, 43-44 ms); the gateways 8.219.197.133 and 47.84.53.110 (TCP 10000) are the profile's lobbyAddresses, by hand. The servers DO answer ICMP now (43-44 ms), unlike 09-29."
     },
 
     "fc27": {

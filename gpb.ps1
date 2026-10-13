@@ -699,6 +699,7 @@ switch ($Verb.ToLowerInvariant()) {
             TcpOutputPath = $game.TcpSessionsPath
         }
         if ($protocol) { $captureArgs['Protocol'] = $protocol.ToLowerInvariant() }
+        if ($game.TcpGameplay) { $captureArgs['TcpGameplay'] = $true }
 
         # A game with no datacentre-probe port collects no landmarks. Leaving -ProbePort out is not
         # the same thing: the script then falls back to PUBG's 8081 and PUBG's landmark file, and
@@ -871,6 +872,9 @@ switch ($Verb.ToLowerInvariant()) {
         }
         if ($game.LandmarkPath) { $profileArgs['LandmarkObservedPath'] = $game.LandmarkPath }
         if ($null -ne $game.DiscoveryRate) { $profileArgs['DiscoveryPacketsPerSecond'] = $game.DiscoveryRate }
+        if ($game.TcpGameplay) { $profileArgs['TcpGameplay'] = $true }
+        if ($game.AsnRegions.Count -gt 0) { $profileArgs['AsnRegions'] = $game.AsnRegions }
+        if ($game.PersistentSession) { $profileArgs['PersistentSession'] = $true }
 
         Say "Building the $($game.Name) profile -> $($game.ProfilePath)"
 

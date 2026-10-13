@@ -39,8 +39,21 @@
     to tcp-sessions.txt with a verdict per address: connected, or BLOCKED when every SYN to it went
     unanswered. all captures both and handles each half as above.
 
-    TCP is NEVER written to observed.txt. Everything there is widened to a /20 and routed, and TCP
-    destinations are shared CDN and cloud front doors carrying everybody else's traffic too.
+    TCP is not written to observed.txt - everything there is widened to a /20 and routed, and TCP
+    destinations are shared CDN and cloud front doors carrying everybody else's traffic too - with
+    one exception, -TcpGameplay.
+
+.PARAMETER TcpGameplay
+    The game plays its matches over TCP (games.json "tcpGameplay", passed by ./gpb capture). Then the
+    TCP half feeds observed.txt as well, under the same -MinPackets as UDP and four more conditions,
+    each one a way a TCP destination can look busy without being a match server:
+      - attributed to the watched process (a saved capture has no attribution, as for UDP)
+      - the handshake completed - a blocked address carried nothing
+      - not on port 80 or 443: web, store, analytics and CDN fronts, shared with everybody
+      - not a datacentre probe (the UDP rule, unchanged)
+    Defaults -Protocol to all, since the matches are TCP and the probes, if any, UDP. Aniimo,
+    2026-10-13: the match server took 9,123 outbound packets in 271 s on TCP 20000, the gateways on
+    TCP 10000 under 120 in the same session, every HTTPS front under 300.
 
 .PARAMETER WatchProcess
     Process to watch, without .exe. Defaults to TslGame (PUBG). The script starts capturing when
@@ -102,7 +115,8 @@ param(
     [switch]$KeepCapture,
     [ValidateSet('udp', 'tcp', 'all')]
     [string]$Protocol = 'udp',
-    [string]$TcpOutputPath
+    [string]$TcpOutputPath,
+    [switch]$TcpGameplay
 )
 
 $ErrorActionPreference = 'Stop'
@@ -112,6 +126,7 @@ if (-not $TcpOutputPath) { $TcpOutputPath = Join-Path $PSScriptRoot 'tcp-session
 
 # Which halves this run handles. The UDP half is the profile's; the TCP half is diagnosis only and
 # has its own file. Nothing below lets one feed the other.
+if ($TcpGameplay -and -not $PSBoundParameters.ContainsKey('Protocol')) { $Protocol = 'all' }
 $captureUdp = $Protocol -in @('udp', 'all')
 $captureTcp = $Protocol -in @('tcp', 'all')
 
@@ -617,7 +632,7 @@ function Merge-ObservedFile {
             '# replaying every match.')
     }
     foreach ($line in $Header) { $lines.Add($line) }
-    $lines.Add('# address           packets   secs  seen  udp ports')
+    $lines.Add('# address           packets   secs  seen  ports (udp; tcp too for a tcpGameplay game)')
     foreach ($address in $order) {
         $record = $existing[$address]
         # The arguments go in via an array. Writing them after -f across a line break inside
@@ -864,7 +879,7 @@ function Write-TcpResult {
     } else {
         Write-Host "==> Every TCP connection the game attempted was answered." -ForegroundColor Green
     }
-    Write-Host "    Written to $(Split-Path $TcpOutputPath -Leaf). Diagnosis only - never copied into observed.txt."
+    Write-Host "    Written to $(Split-Path $TcpOutputPath -Leaf). Diagnosis only - this table is never copied into observed.txt."
     if ($OnlyProcess) {
         # Measured, not assumed: a curl request that connected, fetched a page and closed in under
         # a second was in the capture but not in this table, because no two-second sample of the
@@ -874,6 +889,54 @@ function Write-TcpResult {
         Write-Host "    A connection that opened and closed within about two seconds cannot be tied to $OnlyProcess"
         Write-Host "    and is not listed. Blocked ones always last longer than that, so none are missed."
     }
+}
+
+<#
+.SYNOPSIS
+    For a game that plays over TCP: the TCP destinations that carried a match, folded into observed.txt.
+
+.DESCRIPTION
+    See -TcpGameplay for the conditions. Outbound packets only, as everything in this capture: TCP's
+    ACKs make that roughly half of what went both ways, and a match still clears -MinPackets with room
+    to spare - it is the gateways and web fronts this keeps out, by port and by volume.
+#>
+function Write-TcpGameplayResult {
+    param([hashtable]$Stats, [string]$OnlyProcess)
+
+    if (-not $Stats -or $Stats.Count -eq 0) { return @() }
+    $webPorts = @('80', '443')
+
+    $rows = @($Stats.Values | Where-Object {
+        (-not $OnlyProcess -or $_.Owners.Keys -contains $OnlyProcess) -and
+        $_.Packets -ge $MinPackets -and
+        (Get-TcpOutcome $_).Ok -gt 0 -and
+        @($_.Ports.Keys | Where-Object { $webPorts -notcontains $_ }).Count -gt 0 -and
+        -not (Test-ProbeEndpoint $_)
+    } | Sort-Object Packets -Descending)
+
+    Write-Host ""
+    Write-Host "==> TCP gameplay - kept for the profile" -ForegroundColor Cyan
+    if ($rows.Count -eq 0) {
+        Write-Warning "No TCP destination reached $MinPackets packets on a game port (web ports 80/443 never count)."
+        return @()
+    }
+    foreach ($row in $rows) {
+        $ports = ($row.Ports.Keys | Where-Object { $webPorts -notcontains $_ } | Sort-Object { [int]$_ } | Select-Object -First 4) -join ','
+        $seconds = 0
+        if ($row.Last -gt $row.First) { $seconds = [int][math]::Round($row.Last - $row.First) }
+        Write-Host ("    {0,-18} {1,9} pkt {2,6} s  tcp {3}" -f $row.Address, $row.Packets, $seconds, $ports)
+    }
+
+    # Web ports out of the evidence column too, so the row says what made it a server.
+    foreach ($row in $rows) {
+        foreach ($port in $webPorts) { $row.Ports.Remove($port) }
+    }
+
+    $new = @(Merge-ObservedFile -Path $OutputPath -Rows $rows)
+    if ($new.Count -gt 0) { Write-Host "==> $($new.Count) new: $($new -join ', ')" -ForegroundColor Green }
+    else { Write-Host "==> Nothing new from TCP this session." -ForegroundColor Green }
+    Write-Host "    $(Split-Path $OutputPath -Leaf) now holds $(@(Read-ObservedFile -Path $OutputPath).Count) addresses"
+    return $new
 }
 
 # Hands each half of a session to its own writer. The UDP half is the profile's and is untouched
@@ -887,6 +950,7 @@ function Write-CaptureResult {
         $seconds = 0
         if ($Stats.PSObject.Properties['Seconds']) { $seconds = $Stats.Seconds }
         Write-TcpResult -Stats $Stats.Tcp -OnlyProcess $OnlyProcess -Label $Label -Seconds $seconds
+        if ($TcpGameplay) { $null = Write-TcpGameplayResult -Stats $Stats.Tcp -OnlyProcess $OnlyProcess }
     }
 }
 
@@ -931,7 +995,11 @@ try {
     Write-Host "==> Resident mode, watching for $WatchProcess.exe - capturing $($Protocol.ToUpper())" -ForegroundColor Cyan
     if ($captureTcp) {
         Write-Host "    TCP is included: close downloads (Steam, browsers) while this runs, they fill the capture."
-        Write-Host "    TCP results go to $(Split-Path $TcpOutputPath -Leaf) and never into observed.txt."
+        if ($TcpGameplay) {
+            Write-Host "    This game plays over TCP: its busy TCP servers (not 80/443) go into $(Split-Path $OutputPath -Leaf) too."
+        } else {
+            Write-Host "    TCP results go to $(Split-Path $TcpOutputPath -Leaf) and never into observed.txt."
+        }
     }
     Write-Host "    Play as many matches as you like. Ctrl+C to stop - stopping mid-match is fine,"
     Write-Host "    the capture is analysed before the script exits."
@@ -965,8 +1033,9 @@ try {
     }
 
     Write-Host ""
-    # TCP never feeds the profile, so a TCP-only run has nothing for Build-PubgProfile.ps1 to read.
-    if ($captureUdp) { Write-Host "==> Stopped after $sessionCount session(s). Next: .\Build-PubgProfile.ps1" -ForegroundColor Cyan }
+    # TCP feeds the profile only for a TCP game, so a TCP-only run of another game has nothing for
+    # Build-PubgProfile.ps1 to read.
+    if ($captureUdp -or $TcpGameplay) { Write-Host "==> Stopped after $sessionCount session(s). Next: .\Build-PubgProfile.ps1" -ForegroundColor Cyan }
     else { Write-Host "==> Stopped after $sessionCount session(s). TCP results are in $(Split-Path $TcpOutputPath -Leaf)." -ForegroundColor Cyan }
 }
 finally {
