@@ -186,6 +186,21 @@ public sealed class GameEntry
     [JsonPropertyName("landmarksRouted")] public bool LandmarksRouted { get; set; }
 
     /// <summary>
+    /// True when this game plays its match over TCP rather than UDP. Aniimo (captured 2026-09-29) opens
+    /// no UDP socket at all: every match is one long TCP connection to port 20000 on Alibaba Cloud
+    /// Singapore, 24-69 packets a second.
+    ///
+    /// What it changes: TCP to this game's region ranges counts as its match wherever the service asks
+    /// "is a match on the tunnel" (GameServerTally.GamePackets) - the move between matches, the region
+    /// planner, destination discovery. Without it a TCP game reads as permanently between matches. It is
+    /// a declaration and not a default because every other game's TCP in the adapter is its lobby, which
+    /// must never look like a match.
+    ///
+    /// Absent means false, which is right for every profile written before the field existed.
+    /// </summary>
+    [JsonPropertyName("tcpGameplay")] public bool TcpGameplay { get; set; }
+
+    /// <summary>
     /// Packets a second to one address that make it a game server, for THIS game. Absent means the
     /// built-in default (GameDestinationRecorder.NewServerPackets, 500 in a 30 s window - 16.7 a
     /// second), which is what every profile written before this field says and what every game but

@@ -62,7 +62,7 @@ internal sealed partial class TunnelEngine
     /// <summary>The game's routes just went in: the lobby count starts now. See <see cref="LobbyGate.Arm"/>.</summary>
     private void ArmLobbyGate()
     {
-        if (_tunnel is { } home) _lobby.Arm(home, NowMs(), AllGameUdpPackets(home));
+        if (_tunnel is { } home) _lobby.Arm(home, NowMs(), AllGamePackets(home));
     }
 
     /// <summary>
@@ -103,7 +103,7 @@ internal sealed partial class TunnelEngine
         if (tries < 0 || tries >= RegionPlanTries) return;
 
         // The lobby: no game UDP since the routes went in, or under the rate over two passes in a row.
-        if (!_lobby.Observe(tunnel, NowMs(), AllGameUdpPackets(tunnel))) return;
+        if (!_lobby.Observe(tunnel, NowMs(), AllGamePackets(tunnel))) return;
 
         // One region is what connect already measured; a plan needs something to choose between.
         if (game.Regions.Count < 2 || !game.Regions.Any(r => FirstLandmark(r) is not null))
@@ -132,7 +132,7 @@ internal sealed partial class TunnelEngine
     {
         var homeRelayId = RelayPaths.RelayIdOf(home);
         var started = Stopwatch.GetTimestamp();
-        var packetsAtStart = AllGameUdpPackets(tunnel);
+        var packetsAtStart = AllGamePackets(tunnel);
         var regions = game.Regions.Select(r => (Region: r, Landmark: FirstLandmark(r))).ToList();
         var measurable = regions.Where(r => r.Landmark is not null).Select(r => (r.Region, Landmark: r.Landmark!)).ToList();
 
@@ -165,7 +165,7 @@ internal sealed partial class TunnelEngine
                 return $"{home.Name} has been quiet {tunnel.SinceLastHeard.TotalSeconds:F0} s";
             }
             var elapsed = Stopwatch.GetElapsedTime(started).TotalSeconds;
-            if (AllGameUdpPackets(tunnel) - packetsAtStart > 10 + LobbyPacketsPerSecond * elapsed)
+            if (AllGamePackets(tunnel) - packetsAtStart > 10 + LobbyPacketsPerSecond * elapsed)
             {
                 retry = true;
                 return "the game started sending to a server - a match is loading";

@@ -11,7 +11,7 @@ namespace GamePingBooster.Service.Discovery;
 /// It does what a person does with `./gpb capture` open: notices that a match is not going through
 /// the tunnel - the packet counters do not move - and reads which address the game is flooding with
 /// UDP. The first half costs nothing, because the tunnel already counts the game's UDP
-/// (<see cref="Tunnel.GameServerTally.UdpPackets"/>). Only the second half needs ETW, so ETW runs
+/// (<see cref="Tunnel.GameServerTally.GamePackets"/>). Only the second half needs ETW, so ETW runs
 /// only while it can find something:
 ///
 ///   TUNNELLED  the tunnel carries the game's UDP. The match server is inside the profile's ranges
@@ -123,7 +123,7 @@ internal sealed class GameDestinationRecorder : IDisposable
     // Settled once per service process: the answer depends on Windows, not on the session.
     private static DecodingRules? _rules;
 
-    private readonly Func<long?> _tunnelUdpPackets;
+    private readonly Func<long?> _tunnelGamePackets;
     private readonly Func<bool> _enabled;
     private readonly Func<string?> _whyDisabled;
     private readonly Action<DiscoveredServer> _report;
@@ -134,18 +134,18 @@ internal sealed class GameDestinationRecorder : IDisposable
     private Watch? _current;
     private bool _disposed;
 
-    /// <param name="tunnelUdpPackets">The live tunnel's <see cref="Tunnel.GameServerTally.UdpPackets"/>,
+    /// <param name="tunnelGamePackets">The live tunnel's <see cref="Tunnel.GameServerTally.GamePackets"/>,
     /// or null while there is no tunnel. A new tunnel starts again from zero; that is handled.</param>
     /// <param name="whyDisabled">Null when a finding could be sent, otherwise why not. Read every poll;
     /// non-null stops listening.</param>
     /// <param name="report">Where a new server goes. Called on the poll timer's thread.</param>
     /// <param name="probeRound">Where the game's probing before a match goes, with "tunnel" or "off-tunnel" for
     /// where that match went. Called on the poll timer's thread. Null keeps none.</param>
-    public GameDestinationRecorder(Func<long?> tunnelUdpPackets, Func<string?> whyDisabled, Action<DiscoveredServer> report,
+    public GameDestinationRecorder(Func<long?> tunnelGamePackets, Func<string?> whyDisabled, Action<DiscoveredServer> report,
         Action<string> log, Action<GameEntry, ProbeRound, string>? probeRound = null)
     {
         _probeRound = probeRound;
-        _tunnelUdpPackets = tunnelUdpPackets;
+        _tunnelGamePackets = tunnelGamePackets;
         _whyDisabled = whyDisabled;
         _enabled = () => whyDisabled() is null;
         _report = report;
@@ -263,7 +263,7 @@ internal sealed class GameDestinationRecorder : IDisposable
         private bool _stopped;
         private Phase _phase = Phase.Starting;
         private long _restUntil;
-        private long _lastTunnelUdpAt;
+        private long _lastTunnelGameAt;
         private bool _etwUnavailable;
         private bool _disabledLogged;
         private int _reports;
@@ -377,7 +377,7 @@ internal sealed class GameDestinationRecorder : IDisposable
             }
 
             // Between two servers of one match on the tunnel, not after it.
-            if (_phase == Phase.Tunnelled && now - _lastTunnelUdpAt < Ticks(TunnelQuiet)) return;
+            if (_phase == Phase.Tunnelled && now - _lastTunnelGameAt < Ticks(TunnelQuiet)) return;
 
             if (_phase == Phase.Resting && now < _restUntil) return;
 
@@ -398,12 +398,12 @@ internal sealed class GameDestinationRecorder : IDisposable
         {
             if (_tunnelSamples.Count == 0 || _tunnelSamples.Last().At != now)
             {
-                var current = owner._tunnelUdpPackets();
+                var current = owner._tunnelGamePackets();
                 // A match's rate since the previous poll, not any packet at all - see TunnelQuiet.
                 if (_tunnelSamples.Count > 0 && _tunnelSamples.Last() is { Packets: { } previous } last && current is { } counted)
                 {
                     var elapsed = (now - last.At) / (double)Stopwatch.Frequency;
-                    if (elapsed > 0 && (counted - previous) / elapsed >= TunnelCarryingPerSecond) _lastTunnelUdpAt = now;
+                    if (elapsed > 0 && (counted - previous) / elapsed >= TunnelCarryingPerSecond) _lastTunnelGameAt = now;
                 }
                 _tunnelSamples.Enqueue((now, current));
             }

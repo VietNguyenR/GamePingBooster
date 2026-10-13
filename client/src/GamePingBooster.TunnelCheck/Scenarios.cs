@@ -51,8 +51,8 @@ internal static partial class Program
             tunnel.PacketsDropped == noiseSent && tunnel.PacketsDroppedFaults == 0,
             $"dropped {tunnel.PacketsDropped}, faults {tunnel.PacketsDroppedFaults}");
         Check("PacketsSent and the game-server tally count the game packets",
-            tunnel.PacketsSent == sent.Count && tunnel.Destinations.UdpPackets == sent.Count,
-            $"sent {tunnel.PacketsSent}, tally {tunnel.Destinations.UdpPackets}");
+            tunnel.PacketsSent == sent.Count && tunnel.Destinations.GamePackets == sent.Count,
+            $"sent {tunnel.PacketsSent}, tally {tunnel.Destinations.GamePackets}");
     }
 
     /// <summary>Unchanged by Phase A, and checked because the adapter under it is now an interface.</summary>

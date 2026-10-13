@@ -52,12 +52,12 @@ internal sealed partial class TunnelEngine
     private int _otherTunnelLogPass;
 
     /// <summary>Every tunnel's game UDP, home and secondaries: a match on another relay is still a match.</summary>
-    private long AllGameUdpPackets(TunnelClient home)
+    private long AllGamePackets(TunnelClient home)
     {
-        var total = home.Destinations.UdpPackets;
+        var total = home.Destinations.GamePackets;
         lock (_otherTunnels)
         {
-            foreach (var other in _otherTunnels.Values) total += other.Client.Destinations.UdpPackets;
+            foreach (var other in _otherTunnels.Values) total += other.Client.Destinations.GamePackets;
         }
         return total;
     }
@@ -365,8 +365,8 @@ internal sealed partial class TunnelEngine
     private TunnelClient UpdateCarrier(TunnelClient home)
     {
         List<(TunnelClient, long)> others;
-        lock (_otherTunnels) others = [.. _otherTunnels.Values.Select(o => (o.Client, o.Client.Destinations.UdpPackets))];
-        return _carrier.Update(Environment.TickCount64, home, home.Destinations.UdpPackets, others);
+        lock (_otherTunnels) others = [.. _otherTunnels.Values.Select(o => (o.Client, o.Client.Destinations.GamePackets))];
+        return _carrier.Update(Environment.TickCount64, home, home.Destinations.GamePackets, others);
     }
 
     private List<TunnelClient> OtherTunnelsNow()
@@ -548,7 +548,7 @@ internal sealed partial class TunnelEngine
         double busiestRate = 0;
         foreach (var t in tunnels)
         {
-            var now = t.Tunnel.Destinations.UdpPackets;
+            var now = t.Tunnel.Destinations.GamePackets;
             if (_udpAtLastPass.TryGetValue(t.Tunnel, out var before))
             {
                 var rate = (now - before) / 5.0;

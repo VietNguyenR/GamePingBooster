@@ -1,4 +1,5 @@
 using System.Net;
+using GamePingBooster.Core.Profiles;
 using GamePingBooster.Service.Tunnel;
 
 namespace GamePingBooster.TunnelCheck;
@@ -23,6 +24,48 @@ internal static partial class Program
         for (var i = 0; i < 20; i++) tally.Note(Packet(17, "34.87.10.21", 7778));
         Check("  and the busiest UDP address wins among several",
             IPAddress.Parse("34.87.10.21").Equals(tally.PrimaryDestination), $"{tally.PrimaryDestination}");
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// A game that plays over TCP (Aniimo: TCP 20000 to Alibaba Singapore, no UDP at all). Its TCP to its own region
+    /// ranges is the match - counted in GamePackets and chosen as the game server - and every other TCP stays a lobby.
+    /// A game that does not declare it keeps the old rule, so PUBG's lobby can never hold off a rescan.
+    /// </summary>
+    private static Task TcpGameplayCountsOnlyItsOwnRanges()
+    {
+        var aniimo = new GameEntry
+        {
+            Id = "aniimo",
+            TcpGameplay = true,
+            Regions = [new RegionEntry { Id = "asia-sg", Cidrs = ["47.237.208.0/20", "43.106.7.69/32"] }],
+        };
+        try
+        {
+            GameServerTally.TcpGameplay(aniimo);
+            var tally = new GameServerTally();
+            for (var i = 0; i < 50; i++) tally.Note(Packet(6, "47.253.108.56", 443));
+            Check("TCP outside the game's ranges is still a lobby: not counted, no game server",
+                tally.GamePackets == 0 && tally.PrimaryDestination is null, $"{tally.GamePackets}, {tally.PrimaryDestination}");
+
+            for (var i = 0; i < 20; i++) tally.Note(Packet(6, "47.237.210.48", 20000));
+            for (var i = 0; i < 5; i++) tally.Note(Packet(6, "43.106.7.69", 20000));
+            Check("TCP to the game's ranges is the match, /20 and /32 alike", tally.GamePackets == 25 && tally.LastGameAt != 0,
+                $"{tally.GamePackets}");
+            Check("  and the busiest of them is the game server, though the lobby sent more",
+                IPAddress.Parse("47.237.210.48").Equals(tally.PrimaryDestination), $"{tally.PrimaryDestination}");
+
+            GameServerTally.TcpGameplay(new GameEntry { Id = "pubg", Regions = aniimo.Regions });
+            var pubg = new GameServerTally();
+            for (var i = 0; i < 20; i++) pubg.Note(Packet(6, "47.237.210.48", 20000));
+            pubg.Note(Packet(17, "47.237.210.48", 7777));
+            Check("A game that does not declare tcpGameplay counts UDP only, even inside its ranges",
+                pubg.GamePackets == 1, $"{pubg.GamePackets}");
+        }
+        finally
+        {
+            GameServerTally.TcpGameplay(null);
+        }
         return Task.CompletedTask;
     }
 

@@ -76,10 +76,10 @@ internal sealed partial class TunnelEngine
 
     /// <summary>When the game last sent into this tunnel, on <see cref="NowMs"/>'s clock; null if it never has.</summary>
     private static long? LastSentMs(TunnelClient tunnel) =>
-        tunnel.Destinations.LastUdpAt is var at and not 0 ? at * 1000 / Stopwatch.Frequency : null;
+        tunnel.Destinations.LastGameAt is var at and not 0 ? at * 1000 / Stopwatch.Frequency : null;
 
     private static TimeSpan SilenceOf(TunnelClient tunnel) =>
-        tunnel.Destinations.LastUdpAt is var at and not 0 ? Stopwatch.GetElapsedTime(at) : TimeSpan.MaxValue;
+        tunnel.Destinations.LastGameAt is var at and not 0 ? Stopwatch.GetElapsedTime(at) : TimeSpan.MaxValue;
 
     /// <summary>
     /// One supervisor pass: reads the gap, waits the last few seconds of one out so the rescan starts ten seconds
@@ -91,12 +91,12 @@ internal sealed partial class TunnelEngine
 
         // Every tunnel's game UDP, not only home's: a match on another relay is a match, and its end is a gap.
         // With one tunnel this is home's count exactly, as it always was.
-        var due = _matchGap.Feed(NowMs(), AllGameUdpPackets(tunnel), LastSentAnyMs(tunnel));
+        var due = _matchGap.Feed(NowMs(), AllGamePackets(tunnel), LastSentAnyMs(tunnel));
         if (!due && _matchGap.DueInMs(NowMs()) is { } wait && wait < 5000)
         {
             await Task.Delay(TimeSpan.FromMilliseconds(wait), ct).ConfigureAwait(false);
             if (!ReferenceEquals(tunnel, _tunnel) || _state != TunnelState.Connected) return;
-            due = _matchGap.Feed(NowMs(), AllGameUdpPackets(tunnel), LastSentAnyMs(tunnel));
+            due = _matchGap.Feed(NowMs(), AllGamePackets(tunnel), LastSentAnyMs(tunnel));
         }
         if (!due) return;
         StartAfterMatchWatch(tunnel, ct);
@@ -160,8 +160,8 @@ internal sealed partial class TunnelEngine
         }
 
         var started = Stopwatch.GetTimestamp();
-        var packetsAtStart = tunnel.Destinations.UdpPackets;
-        var matchRate = forGame ? new UdpRate(started, packetsAtStart) : null;
+        var packetsAtStart = tunnel.Destinations.GamePackets;
+        var matchRate = forGame ? new GameRate(started, packetsAtStart) : null;
         var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
         var probes = new List<RelayProbe>();
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -347,9 +347,9 @@ internal sealed partial class TunnelEngine
     /// counting those dropped the move off Hong Kong for PUBG on 2026-10-11 nine seconds in, and the first match was
     /// played at 60 ms on the relay the operator took PUBG off, against 48 through Singapore.
     /// </summary>
-    private bool MatchStarted(TunnelClient tunnel, long packetsAtStart, UdpRate? rate)
+    private bool MatchStarted(TunnelClient tunnel, long packetsAtStart, GameRate? rate)
     {
-        var packets = tunnel.Destinations.UdpPackets;
+        var packets = tunnel.Destinations.GamePackets;
         if (packets == packetsAtStart) return false;
         if (rate is not null && rate.Feed(Stopwatch.GetTimestamp(), packets) < GameOpenMatchPerSecond) return false;
         _log("Between matches: the game started sending to a server - the next match is loading, so the tunnel stays where it is.");
@@ -361,7 +361,7 @@ internal sealed partial class TunnelEngine
     /// it has been fed - so a match starting late in a long measure is not averaged away by the quiet lobby before it.
     /// Called from more than one measuring task at once, under the caller's lock or its own.
     /// </summary>
-    private sealed class UdpRate(long startedAt, long packetsAtStart)
+    private sealed class GameRate(long startedAt, long packetsAtStart)
     {
         private static readonly long MinSpan = 2 * Stopwatch.Frequency;
         private readonly List<(long At, long Packets)> _samples = [(startedAt, packetsAtStart)];
@@ -587,14 +587,14 @@ internal sealed partial class TunnelEngine
         if (_moveFollow is not { } follow) return;
 
         var tally = follow.Tunnel.Destinations;
-        var first = tally.FirstUdpAt;
+        var first = tally.FirstGameAt;
         double? startedAfter = first != 0 ? Math.Max(0, (first - follow.MovedAt) / (double)Stopwatch.Frequency) : null;
         bool? held = null;
 
         if (endedBy is null && !ReferenceEquals(follow.Tunnel, _tunnel)) endedBy = "tunnel-replaced";
         if (endedBy is null && first != 0 && Stopwatch.GetElapsedTime(first) >= HeldAfter)
         {
-            held = Stopwatch.GetElapsedTime(tally.LastUdpAt) < TimeSpan.FromSeconds(5);
+            held = Stopwatch.GetElapsedTime(tally.LastGameAt) < TimeSpan.FromSeconds(5);
             endedBy = held.Value ? "held" : "stopped";
         }
         if (endedBy is null && first == 0 && Stopwatch.GetElapsedTime(follow.MovedAt) >= FollowNextMatchFor) endedBy = "no-match";

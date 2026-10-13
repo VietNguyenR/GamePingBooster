@@ -340,7 +340,7 @@ internal static partial class Program
         {
             while (!stop.IsCancellationRequested)
             {
-                carrier.Update(Environment.TickCount64, home, home.Destinations.UdpPackets, [(other, other.Destinations.UdpPackets)]);
+                carrier.Update(Environment.TickCount64, home, home.Destinations.GamePackets, [(other, other.Destinations.GamePackets)]);
                 await Task.Delay(1000);
             }
         });

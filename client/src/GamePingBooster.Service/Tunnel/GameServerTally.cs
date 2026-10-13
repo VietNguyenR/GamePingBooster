@@ -1,6 +1,8 @@
 using System.Buffers.Binary;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
+using GamePingBooster.Core.Profiles;
 
 namespace GamePingBooster.Service.Tunnel;
 
@@ -52,28 +54,66 @@ internal sealed class GameServerTally
     private readonly object _gate = new();
     private long _untrackedPackets;
     private long _unparsedPackets;
-    private long _udpPackets;
+    private long _gamePackets;
 
     /// <summary>
-    /// UDP packets the game has sent into this tunnel, since the tunnel was created. Never cleared,
-    /// unlike everything else here, so a reader can take differences: destination discovery reads it
-    /// to tell a match on the tunnel from one that is not. Only game routes carry UDP into the
-    /// adapter - the lobby is TCP - so this counts the match and nothing else.
+    /// Packets the game has sent to its servers through this tunnel, since the tunnel was created. Never
+    /// cleared, unlike everything else here, so a reader can take differences: destination discovery,
+    /// the move between matches and the region planner all read it to tell a match on the tunnel from
+    /// one that is not.
+    ///
+    /// UDP always counts: only game routes carry UDP into the adapter. TCP counts only to the ranges in
+    /// <see cref="TcpGameplay"/> - a game that plays over TCP (<see cref="GameEntry.TcpGameplay"/>,
+    /// Aniimo). Every other TCP in the adapter is a lobby, a login or an unblocked store, which must
+    /// never read as a match: PUBG's lobby would then hold off every rescan for as long as it is open.
     /// </summary>
-    public long UdpPackets => Interlocked.Read(ref _udpPackets);
-
-    private long _lastUdpAt;
-    private long _firstUdpAt;
-
-    /// <summary>When the game first sent UDP into this tunnel, as a Stopwatch timestamp, or 0 before it has.</summary>
-    public long FirstUdpAt => Interlocked.Read(ref _firstUdpAt);
+    public long GamePackets => Interlocked.Read(ref _gamePackets);
 
     /// <summary>
-    /// When the game last sent UDP into this tunnel, as a Stopwatch timestamp, or 0 before it ever has. The
+    /// The ranges whose TCP is a match, as (network, mask) pairs - those of the running game when it
+    /// declares <see cref="GameEntry.TcpGameplay"/>, otherwise empty. Shared by every tunnel, because
+    /// every tunnel carries the same game; set by the engine whenever it chooses or switches the game.
+    /// Swapped whole, never edited, so the uplink thread reads it without a lock.
+    /// </summary>
+    private static (uint Network, uint Mask)[] s_tcpGameplay = [];
+
+    /// <summary>Makes TCP to <paramref name="game"/>'s regions count as its match, or stops it when the game does not play over TCP.</summary>
+    public static void TcpGameplay(GameEntry? game)
+    {
+        var ranges = new List<(uint, uint)>();
+        if (game is { TcpGameplay: true })
+        {
+            foreach (var cidr in game.Regions.SelectMany(r => r.Cidrs))
+            {
+                if (!IPNetwork.TryParse(cidr, out var net) || net.BaseAddress.AddressFamily != AddressFamily.InterNetwork) continue;
+                var mask = net.PrefixLength == 0 ? 0u : uint.MaxValue << (32 - net.PrefixLength);
+                ranges.Add((BinaryPrimitives.ReadUInt32BigEndian(net.BaseAddress.GetAddressBytes()) & mask, mask));
+            }
+        }
+        Volatile.Write(ref s_tcpGameplay, [.. ranges]);
+    }
+
+    private static bool IsTcpGameplay(uint destination)
+    {
+        foreach (var (network, mask) in Volatile.Read(ref s_tcpGameplay))
+        {
+            if ((destination & mask) == network) return true;
+        }
+        return false;
+    }
+
+    private long _lastGameAt;
+    private long _firstGameAt;
+
+    /// <summary>When the game first sent a packet counted in <see cref="GamePackets"/>, as a Stopwatch timestamp, or 0 before it has.</summary>
+    public long FirstGameAt => Interlocked.Read(ref _firstGameAt);
+
+    /// <summary>
+    /// When the game last sent a packet counted in <see cref="GamePackets"/>, as a Stopwatch timestamp, or 0 before it ever has. The
     /// move between matches reads it for how long the game has been silent to the second, which a counter
     /// read every five seconds cannot say.
     /// </summary>
-    public long LastUdpAt => Interlocked.Read(ref _lastUdpAt);
+    public long LastGameAt => Interlocked.Read(ref _lastGameAt);
 
     /// <summary>
     /// Notes one outbound inner packet. Called from the uplink thread for every packet, so it
@@ -99,14 +139,14 @@ internal sealed class GameServerTally
         if (headerLen < 20 || packet.Length < headerLen) return;
 
         var protocol = packet[9];
-        if (protocol == 17)
-        {
-            Interlocked.Increment(ref _udpPackets);
-            var sentAt = System.Diagnostics.Stopwatch.GetTimestamp();
-            Interlocked.Exchange(ref _lastUdpAt, sentAt);
-            if (Interlocked.Read(ref _firstUdpAt) == 0) Interlocked.CompareExchange(ref _firstUdpAt, sentAt, 0);
-        }
         var destination = BinaryPrimitives.ReadUInt32BigEndian(packet.Slice(16, 4));
+        if (protocol == 17 || (protocol == 6 && IsTcpGameplay(destination)))
+        {
+            Interlocked.Increment(ref _gamePackets);
+            var sentAt = System.Diagnostics.Stopwatch.GetTimestamp();
+            Interlocked.Exchange(ref _lastGameAt, sentAt);
+            if (Interlocked.Read(ref _firstGameAt) == 0) Interlocked.CompareExchange(ref _firstGameAt, sentAt, 0);
+        }
 
         // Port lives in the transport header, which is only there for UDP and TCP, and only if
         // this is the first fragment. Everything else is recorded on address alone.
@@ -158,10 +198,11 @@ internal sealed class GameServerTally
     /// over a session - 22361 then 26524 on the same host, in the 2026-09-10 capture - and three
     /// flows to one server must not lose to one flow somewhere else.
     ///
-    /// UDP only. Every game served plays its match over UDP, while the lobby's TCP rides the same
+    /// UDP, and TCP only to <see cref="TcpGameplay"/>'s ranges. The lobby's TCP rides the same
     /// tunnel since lobby routes: on 2026-10-03 PUBG's lobby out-sent a quiet match, and the
     /// in-game ping read the lobby front (80-90 ms) and the launcher API in the US (about 290 ms)
-    /// as "the game server". Null while only TCP is seen - in a lobby there is no match to measure.
+    /// as "the game server". Null while only lobby TCP is seen - in a lobby there is no match to
+    /// measure. A game that plays over TCP (Aniimo) declares it, and only its region ranges count.
     ///
     /// Unlike <see cref="Format"/> this does not clear. It is read once a second, and a reader
     /// that emptied the tally would blind the 30-second log line that shares it.
@@ -177,7 +218,7 @@ internal sealed class GameServerTally
                 var byAddress = new Dictionary<uint, long>();
                 foreach (var (key, flow) in _flows)
                 {
-                    if (key.Protocol != 17) continue;
+                    if (key.Protocol != 17 && !(key.Protocol == 6 && IsTcpGameplay(key.Address))) continue;
                     byAddress.TryGetValue(key.Address, out var running);
                     byAddress[key.Address] = running + flow.Packets;
                 }

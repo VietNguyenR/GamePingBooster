@@ -83,7 +83,7 @@ internal sealed partial class TunnelEngine
     {
         var began = Stopwatch.GetTimestamp();
         var home = tunnel;
-        var rate = new UdpRate(began, AllGameUdpPackets(home));
+        var rate = new GameRate(began, AllGamePackets(home));
         var firstSeen = new Dictionary<(int Port, IPEndPoint Remote), long>();
         var lastPids = GameProcessIds(game);
         var lastLine = TimeSpan.Zero;
@@ -106,9 +106,9 @@ internal sealed partial class TunnelEngine
                 {
                     // Moved between matches: the new tunnel's count starts again.
                     home = now;
-                    rate = new UdpRate(Stopwatch.GetTimestamp(), AllGameUdpPackets(home));
+                    rate = new GameRate(Stopwatch.GetTimestamp(), AllGamePackets(home));
                 }
-                else if (rate.Feed(Stopwatch.GetTimestamp(), AllGameUdpPackets(home)) >= GameOpenMatchPerSecond)
+                else if (rate.Feed(Stopwatch.GetTimestamp(), AllGamePackets(home)) >= GameOpenMatchPerSecond)
                 {
                     _log($"After the match, {Since()}: the next match is loading - stopped watching the game's connections.");
                     return;

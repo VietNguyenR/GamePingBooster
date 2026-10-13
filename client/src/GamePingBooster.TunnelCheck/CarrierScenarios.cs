@@ -20,8 +20,8 @@ internal static partial class Program
         m.KrViaOther();
 
         var carrier = new MatchCarrier<TunnelClient>();
-        void Drive() => carrier.Update(Environment.TickCount64, m.Home, m.Home.Destinations.UdpPackets,
-            [(m.Other, m.Other.Destinations.UdpPackets)]);
+        void Drive() => carrier.Update(Environment.TickCount64, m.Home, m.Home.Destinations.GamePackets,
+            [(m.Other, m.Other.Destinations.GamePackets)]);
         SpikeRecorder.Context Context()
         {
             var onOther = ReferenceEquals(carrier.Current, m.Other);
