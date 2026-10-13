@@ -18,6 +18,11 @@ namespace GamePingBooster.TunnelCheck;
 ///     dotnet build client/src/GamePingBooster.Service -o client/src/GamePingBooster.Service/bin/rig
 ///     dotnet build tools/multi-tunnel-rig/RigGame -o tools/multi-tunnel-rig/RigGame/bin/rig
 ///     dotnet run --project client/src/GamePingBooster.TunnelCheck -- service
+///     dotnet run --project client/src/GamePingBooster.TunnelCheck -- service tcp
+///
+/// `service tcp` is a run of its own, with its own profile and config (ServiceTcpRig.cs): a game that plays over one
+/// long TCP connection, as Aniimo does - first without persistentSession, where the move between matches must happen
+/// and cut the connection, then with it, where the tunnel must stay and the connection live through the quiet.
 ///
 /// Asks for Administrator once (Run-ServiceRig.ps1, for LocalSystem and one route) and puts the PC back afterwards:
 /// %ProgramData%\GamePingBooster moved aside and restored, the route and every pin removed. Close the app first - a UI
@@ -117,6 +122,8 @@ internal static partial class Program
 
     private static int ServiceMain(string[] args)
     {
+        var tcpRun = args.Length > 0 && args[0] == "tcp";
+        if (tcpRun) args = args[1..];
         var repo = FindRepo();
         _rigScript = Path.Combine(repo, "tools", "multi-tunnel-rig", "rig.sh");
         var serviceExe = args.Length > 0 ? Path.GetFullPath(args[0]) : Path.Combine(repo, "client", "src", "GamePingBooster.Service", "bin", "rig", "gpb-service.exe");
@@ -149,6 +156,12 @@ internal static partial class Program
         if (Directory.Exists(rigData)) Directory.Delete(rigData, recursive: true);
         Directory.CreateDirectory(rigData);
         var profile = Path.Combine(rigData, "rig-profile.json");
+        if (tcpRun)
+        {
+            WriteTcpRigFiles(rigData, profile, persistentSession: false);
+        }
+        else
+        {
         File.WriteAllText(profile, $$"""
             {
               "schemaVersion": 1,
@@ -176,6 +189,7 @@ internal static partial class Program
              "defaultGameId":"riggame","lastGameId":"riggame","shareQuality":false,
              "regionRouting":"on","regionRoutingForce":{"kr":"b"} }
             """);
+        }
 
         Console.WriteLine($"Rig: A {_a} (home), F {_f}; B {_b} (kr), E {_e}. Service {serviceExe}.");
         Console.WriteLine("Asking for Administrator once: LocalSystem for the service, and one route.");
@@ -196,7 +210,10 @@ internal static partial class Program
         {
             using var run = new ServiceRun();
             RigShell("heal");
-            RunServiceScenario(run, rigGameExe, control, stats, IPAddress.Parse(wslIp), g => game = g).GetAwaiter().GetResult();
+            var scenario = tcpRun
+                ? RunTcpServiceScenario(run, rigGameExe, control, stats, profile, IPAddress.Parse(wslIp), g => game = g)
+                : RunServiceScenario(run, rigGameExe, control, stats, IPAddress.Parse(wslIp), g => game = g);
+            scenario.GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {
@@ -232,47 +249,32 @@ internal static partial class Program
         return m.Success ? m.Groups[1].Value : throw new InvalidOperationException("rig.sh ip gave no eth0 address: " + output);
     }
 
-    /// <summary>The RigGame stats file's last line for one server: sent, back, lost (older than 2 s), longest silence.</summary>
-    private static (int Sent, int Back, int Lost, int GapMs) GameStats(string stats, string server)
+    /// <summary>
+    /// The RigGame stats file's last line for one server: sent, back, lost (older than 2 s), longest silence, and for
+    /// "tcp" how many times its connection has broken.
+    /// </summary>
+    private static (int Sent, int Back, int Lost, int GapMs, int Breaks) GameStats(string stats, string server)
     {
         try
         {
             // RigGame holds the file open for writing: read it sharing that, or the read fails.
             using var stream = new FileStream(stats, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             using var reader = new StreamReader(stream);
-            var line = reader.ReadToEnd().Split('\n').Select(l => l.Trim()).LastOrDefault(l => l.Split(',') is { Length: 7 } p && p[2] == server);
-            if (line is null) return (0, 0, 0, 0);
+            var line = reader.ReadToEnd().Split('\n').Select(l => l.Trim()).LastOrDefault(l => l.Split(',') is { Length: 8 } p && p[2] == server);
+            if (line is null) return (0, 0, 0, 0, 0);
             var p = line.Split(',');
-            return (int.Parse(p[3]), int.Parse(p[4]), int.Parse(p[5]), int.Parse(p[6]));
+            return (int.Parse(p[3]), int.Parse(p[4]), int.Parse(p[5]), int.Parse(p[6]), int.Parse(p[7]));
         }
         catch (IOException)
         {
-            return (0, 0, 0, 0);
+            return (0, 0, 0, 0, 0);
         }
     }
 
     private static async Task RunServiceScenario(ServiceRun run, string rigGameExe, string control, string stats, IPAddress wsl,
         Action<Process> started)
     {
-        // The service's pipe: the elevated runner has to be accepted first, then the service must be the rig's.
-        var data = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "GamePingBooster");
-        var pipeUp = false;
-        for (var i = 0; i < 240 && !pipeUp; i++)
-        {
-            await Task.Delay(500);
-            try
-            {
-                if (!File.ReadAllText(Path.Combine(data, "config.json")).Contains("rig-profile")) continue;
-                await run.Send("status");
-                pipeUp = true;
-            }
-            catch (IOException) { }
-            catch (TimeoutException) { }
-            catch (UnauthorizedAccessException) { }
-        }
-        Check("The rig's service is up (LocalSystem, the rig's config)", pipeUp);
-        if (!pipeUp) return;
-        run.SkipToEnd();
+        if (!await WaitForRigService(run)) return;
 
         // B must open on its direct road, so the entry starts out 20 ms slower.
         RigShell("degrade e 20");
@@ -393,6 +395,32 @@ internal static partial class Program
         run.Read();
         var errors = Regex.Matches(run.Seen, @"(?im)^.*(exception|hit an error|collapsed|could not move|could not pin).*$");
         Check("No errors in the service log", errors.Count == 0, string.Join(" | ", errors.Select(m => m.Value.Trim()).Take(5)));
+    }
+
+    /// <summary>
+    /// Waits for the elevated runner to be accepted and the service on the pipe to be the rig's - its config names the
+    /// rig's profile. Checked; false when it never came up.
+    /// </summary>
+    private static async Task<bool> WaitForRigService(ServiceRun run)
+    {
+        var data = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "GamePingBooster");
+        var pipeUp = false;
+        for (var i = 0; i < 240 && !pipeUp; i++)
+        {
+            await Task.Delay(500);
+            try
+            {
+                if (!File.ReadAllText(Path.Combine(data, "config.json")).Contains("rig-profile")) continue;
+                await run.Send("status");
+                pipeUp = true;
+            }
+            catch (IOException) { }
+            catch (TimeoutException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+        Check("The rig's service is up (LocalSystem, the rig's config)", pipeUp);
+        if (pipeUp) run.SkipToEnd();
+        return pipeUp;
     }
 
     private static string Tail(ServiceRun run)

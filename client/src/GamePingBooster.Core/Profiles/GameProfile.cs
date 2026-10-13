@@ -201,6 +201,22 @@ public sealed class GameEntry
     [JsonPropertyName("tcpGameplay")] public bool TcpGameplay { get; set; }
 
     /// <summary>
+    /// True when this game holds ONE session to its servers for as long as it is open, with no gap between matches to
+    /// move in. Aniimo is the first: an open world on one TCP connection from login to quit, which a move to another
+    /// relay ends - the server sees a new source address and the player is thrown back to the login screen.
+    ///
+    /// What it changes (Quality.SessionHold): once the game has sent anything since its routes went in, the tunnel is
+    /// never moved to another relay and its regions are never planned again - no rescan between matches, no move off a
+    /// relay the operator took the game off, no region plan - until the game closes or the tunnel reconnects. A quiet
+    /// spell is not a gap for such a game: the player is standing in town, still logged in. Entry switching and lane
+    /// hunting stay: both keep the relay and its exit address, so the connection does not notice.
+    ///
+    /// Not implied by <see cref="TcpGameplay"/>: a TCP game with separate matches can still move between them, and a
+    /// UDP game can hold one session. Absent means false, which is right for every profile written before the field.
+    /// </summary>
+    [JsonPropertyName("persistentSession")] public bool PersistentSession { get; set; }
+
+    /// <summary>
     /// Packets a second to one address that make it a game server, for THIS game. Absent means the
     /// built-in default (GameDestinationRecorder.NewServerPackets, 500 in a 30 s window - 16.7 a
     /// second), which is what every profile written before this field says and what every game but

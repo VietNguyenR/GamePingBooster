@@ -101,6 +101,13 @@ internal sealed partial class TunnelEngine
         if (!due) return;
         StartAfterMatchWatch(tunnel, ct);
 
+        // A game that holds one session has no gap between matches: this quiet is a player standing still, logged in.
+        if (!SessionHold.AllowsRescan(_game))
+        {
+            SayHeld("a quiet spell is not a gap between matches, so the relays are not re-measured");
+            return;
+        }
+
         // Region routing on: the regions are planned again, every relay for every region, instead of moving home for
         // the one region connect guessed. See ReplanBetweenMatchesAsync.
         if (_game is { } game && RegionRouting.Resolve(_config.RegionRouting, game.RegionRouting).Mode ==
@@ -114,6 +121,45 @@ internal sealed partial class TunnelEngine
 
     /// <summary>Set when the game now running is one the relay in use does not carry. Read by the supervisor.</summary>
     private volatile bool _moveOffForGame;
+
+    /// <summary>When the game's routes last went in, on <see cref="NowMs"/>'s clock; 0 while none are in.</summary>
+    private long _routesInAtMs;
+
+    /// <summary>The game has sent to its servers since its routes went in. Sticky until they go in again or come out.</summary>
+    private volatile bool _sessionBegun;
+
+    /// <summary>The hold has been explained in the log on this connection.</summary>
+    private bool _holdSaid;
+
+    /// <summary>The game's routes just went in (or came out, <paramref name="installed"/> false): its session starts again.</summary>
+    private void MarkRoutesIn(bool installed)
+    {
+        Volatile.Write(ref _routesInAtMs, installed ? NowMs() : 0);
+        _sessionBegun = false;
+    }
+
+    /// <summary>
+    /// Whether the game has sent to its servers, on any tunnel, since its routes went in - see SessionHold. Sticky, so a
+    /// tunnel closing, which takes its last packet's time with it, does not make a session look unopened.
+    /// </summary>
+    private bool SessionBegun(TunnelClient tunnel)
+    {
+        if (!_sessionBegun && Volatile.Read(ref _routesInAtMs) is var at and not 0 &&
+            LastSentAnyMs(tunnel) is { } sent && sent >= at)
+        {
+            _sessionBegun = true;
+        }
+        return _sessionBegun;
+    }
+
+    /// <summary>Says once per connection why the tunnel is staying where it is for a game that holds its session.</summary>
+    private void SayHeld(string why)
+    {
+        if (_holdSaid) return;
+        _holdSaid = true;
+        _log($"{_game?.Name} holds one session for as long as it is open - {why}. The tunnel stays on {_relay?.Name} " +
+             "until the game closes; switching between ways into this relay still runs, and the next connect measures again.");
+    }
 
     /// <summary>
     /// Called by the supervisor, and only by it: when a match has just ended, or - <paramref name="forGame"/> -
@@ -138,6 +184,13 @@ internal sealed partial class TunnelEngine
         // used for the game only comes with a game change, which closes the other tunnels first.
         if (!forGame && _paths is not null) return;
         if (!forGame && _config.RescanBetweenMatches == false) return;
+        if (!SessionHold.AllowsMove(_game, SessionBegun(tunnel)))
+        {
+            // Not cleared by a later pass: the session runs until the game closes, and a move then is the next connect's.
+            if (forGame) _log($"{current.Name} [{current.Id}] is not used for {_game?.Name}, but the game's session is already open - staying.");
+            SayHeld("its session is already open, and a move to another relay would end it");
+            return;
+        }
 
         // A relay picked by hand is never left for another. Both moments count: the choice this tunnel was
         // connected with - switching the app to automatic mid-session applies from the next connect, as the
@@ -161,7 +214,8 @@ internal sealed partial class TunnelEngine
 
         var started = Stopwatch.GetTimestamp();
         var packetsAtStart = tunnel.Destinations.GamePackets;
-        var matchRate = forGame ? new GameRate(started, packetsAtStart) : null;
+        // No rate for a game that holds its session: its first packet is the session opening, which the move must not cut.
+        var matchRate = forGame && !SessionHold.Holds(_game) ? new GameRate(started, packetsAtStart) : null;
         var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
         var probes = new List<RelayProbe>();
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -282,7 +336,8 @@ internal sealed partial class TunnelEngine
             probes.Clear();
 
             // The last word before the swap: a match's first packets would have gone out by now.
-            if (MatchStarted(tunnel, packetsAtStart, matchRate) || (!forGame && TooLate(tunnel, current)))
+            if (MatchStarted(tunnel, packetsAtStart, matchRate) || (!forGame && TooLate(tunnel, current)) ||
+                !SessionHold.AllowsMove(_game, SessionBegun(tunnel)))
             {
                 client.Dispose();
                 return;

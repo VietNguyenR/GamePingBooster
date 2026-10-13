@@ -98,7 +98,15 @@ internal sealed partial class TunnelEngine
         var (mode, source) = RegionRouting.Resolve(_config.RegionRouting, game.RegionRouting);
         if (mode == RegionRoutingMode.Off) return;
 
-        var key = $"{game.Id}|{RelayPaths.RelayIdOf(home)}";
+        // The lobby gate lets a quiet stretch count as the lobby; for a game that holds its session nothing does once it
+        // has sent - a plan applied then would move its one connection's region onto another relay.
+        if (!SessionHold.AllowsMove(game, SessionBegun(tunnel)))
+        {
+            SayHeld("its session is already open, so its regions are not planned");
+            return;
+        }
+
+        var key =$"{game.Id}|{RelayPaths.RelayIdOf(home)}";
         var tries = _regionPlanTries.GetValueOrDefault(key);
         if (tries < 0 || tries >= RegionPlanTries) return;
 

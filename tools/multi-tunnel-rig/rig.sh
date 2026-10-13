@@ -16,7 +16,7 @@
 #
 # Ways: a (relay A direct), f (entry F -> A), b (relay B direct), e (entry E -> B).
 # Relay A is home; relay B carries the "kr" region. Game servers: 198.51.100.10 (sg, via home) and 198.51.100.20
-# (kr, via B), UDP echo on port 27015 and ICMP echo - also the regions' landmarks.
+# (kr, via B), UDP echo on port 27015, TCP echo on port 20000 and ICMP echo - also the regions' landmarks.
 #
 # netem delays and drops what LEAVES the rig on eth0, filtered by source address: a relay's replies to the PC down one
 # way. Replies down an entry leave with the entry's address (conntrack undoes the DNAT), so each way is shaped alone.
@@ -73,19 +73,43 @@ up() {
 
     # One socket per server address: a socket on 0.0.0.0 answers from the address the route picks - the relay's TUN
     # address - and a real game server answers from its own.
+    # TCP too, on port 20000: a game that plays over one long TCP connection (Aniimo) - RigGame's "tcp" mode.
     cat >"$state/echo.py" <<'PY'
 import select, socket
-socks = []
+udp, listeners, conns = [], [], []
 for ip in ("198.51.100.10", "198.51.100.20"):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
     s.bind((ip, 27015))
-    socks.append(s)
+    udp.append(s)
+    t = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    t.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    t.bind((ip, 20000))
+    t.listen(16)
+    listeners.append(t)
 while True:
-    ready, _, _ = select.select(socks, [], [])
+    ready, _, _ = select.select(udp + listeners + conns, [], [])
     for s in ready:
-        data, addr = s.recvfrom(2048)
-        s.sendto(data, addr)
+        if s in udp:
+            data, addr = s.recvfrom(2048)
+            s.sendto(data, addr)
+        elif s in listeners:
+            c, _ = s.accept()
+            c.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            conns.append(c)
+        else:
+            try:
+                data = s.recv(4096)
+            except OSError:
+                data = b""
+            if data:
+                try:
+                    s.sendall(data)
+                    continue
+                except OSError:
+                    pass
+            conns.remove(s)
+            s.close()
 PY
     nohup python3 "$state/echo.py" >"$state/echo.log" 2>&1 &
 
@@ -176,7 +200,7 @@ status() {
     addresses
     echo "A=$A:51820 (home relay)  F=$F:51820 (entry -> A)"
     echo "B=$B:51820 (kr relay)    E=$E:51820 (entry -> B)"
-    echo "game servers: 198.51.100.10 (sg), 198.51.100.20 (kr), udp/27015"
+    echo "game servers: 198.51.100.10 (sg), 198.51.100.20 (kr), udp/27015 and tcp/20000"
     echo "relayd running: $(pgrep -fc "$state/relayd" || true), echo running: $(pgrep -fc "$state/echo.py" || true)"
     tc qdisc show dev "$dev" | sed 's/^/  tc: /'
 }

@@ -2124,6 +2124,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         _matchGap = new GamePingBooster.Core.Quality.MatchGap();
         _moveFollow = null;
         _moveOffForGame = false;
+        _holdSaid = false;
         ResetRegionPlanning();
         ResetLaneHunting();
 
@@ -3299,6 +3300,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                 _discovery?.GameStopped();
                 _presence.Set(null);
                 if (_adapter is not null) _routes?.RemoveGameRoutes(_adapter.InterfaceIndex);
+                MarkRoutesIn(false);
                 // Do not claim Connected while a reconnect is still in progress.
                 if (_tunnel is not null)
                 {
@@ -3327,6 +3329,9 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         WarnAboutRoutedLandmarks(cidrs);
         _routes.InstallGameRoutes(_adapter.InterfaceIndex, cidrs);
         _log($"Installed {cidrs.Count} routes into the virtual adapter.");
+        // A session the game holds (SessionHold) starts again from here: at a game start, and after a reconnect, which
+        // ended the one before.
+        MarkRoutesIn(true);
 
         // From here the game's UDP reaches the tunnels; none by the supervisor's next pass means the lobby, and
         // the region plan need not wait out two more passes to know it.

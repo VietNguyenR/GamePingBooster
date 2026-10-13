@@ -104,6 +104,7 @@ internal static partial class Program
         AMatchKeepsItsGapClosed();
         TheGapIsTimedFromTheLastPacket();
         RescanComparesMediansByAClearMargin();
+        AGameThatHoldsItsSessionStaysOnceItHasSent();
 
         Console.WriteLine();
         Console.WriteLine("A region's tunnel, between matches (WayCheck):");
@@ -1001,6 +1002,26 @@ internal static partial class Program
         Check("4 ms faster than 50 is not", !RescanScore.WorthMoving(50, 46), "moved");
         Check("9 ms faster than 80 is worth moving, 7 is not",
             RescanScore.WorthMoving(80, 71) && !RescanScore.WorthMoving(80, 73), "wrong margin");
+    }
+
+    private static void AGameThatHoldsItsSessionStaysOnceItHasSent()
+    {
+        // Aniimo: one TCP connection from login to quit; a move to another relay throws the player back to login.
+        var aniimo = new GamePingBooster.Core.Profiles.GameEntry { Id = "aniimo", TcpGameplay = true, PersistentSession = true };
+        var pubg = new GamePingBooster.Core.Profiles.GameEntry { Id = "pubg" };
+        Check("a game that holds its session is never re-measured between matches", !SessionHold.AllowsRescan(aniimo), "rescan allowed");
+        Check("  ...nor moved once it has sent to its servers", !SessionHold.AllowsMove(aniimo, sessionBegun: true), "moved");
+        Check("  ...but may still leave a relay before its first packet", SessionHold.AllowsMove(aniimo, sessionBegun: false), "held");
+        Check("tcpGameplay alone does not hold the session",
+            SessionHold.AllowsRescan(new GamePingBooster.Core.Profiles.GameEntry { Id = "x", TcpGameplay = true }), "held");
+        Check("every other game is judged by the gap as before",
+            SessionHold.AllowsRescan(pubg) && SessionHold.AllowsMove(pubg, sessionBegun: true) && SessionHold.AllowsRescan(null),
+            "held");
+        var read = System.Text.Json.JsonSerializer.Deserialize(
+            """{"games":[{"id":"aniimo","persistentSession":true},{"id":"pubg"}]}""",
+            GamePingBooster.Core.Profiles.ProfileJsonContext.Default.ProfileBundle);
+        Check("the profile field reads as persistentSession, absent as false",
+            read is { Games: [{ PersistentSession: true }, { PersistentSession: false }] }, "not read");
     }
 
     // ------------------------------------------------------------------ the lobby record

@@ -98,6 +98,37 @@ public sealed class MatchGap
 }
 
 /// <summary>
+/// Whether the tunnel may still be moved to another relay, or its regions planned again, for a game that holds one
+/// session for as long as it is open (<see cref="GameEntry.PersistentSession"/>). Every other game answers yes here
+/// and is judged by the gap between matches as before.
+///
+/// Such a game never has a gap to move in: its traffic is one connection from login to quit, and a quiet minute is
+/// a player standing still, not a match over. So the rule is about the session, not the rate: the moment the game has
+/// sent ANY packet to its servers since its routes went in, the tunnel stays where it is until the game closes or the
+/// tunnel reconnects. Before that first packet - the launcher, the login screen still talking to the lobby - nothing is
+/// open that a move would break, and a move off a relay the operator took the game off is still made.
+///
+/// Pure logic: fed the game and whether its session has begun.
+/// </summary>
+public static class SessionHold
+{
+    /// <summary>True when <paramref name="game"/> holds one session for as long as it is open.</summary>
+    public static bool Holds(GameEntry? game) => game is { PersistentSession: true };
+
+    /// <summary>
+    /// Whether the between-matches rescan and region replan may run. Never for a game that holds its session: the gap
+    /// they wait for does not exist, and a quiet spell mistaken for one would end the session.
+    /// </summary>
+    public static bool AllowsRescan(GameEntry? game) => !Holds(game);
+
+    /// <summary>
+    /// Whether the tunnel may move to another relay, or plan the game's regions, now. <paramref name="sessionBegun"/>:
+    /// the game has sent to its servers since its routes went in.
+    /// </summary>
+    public static bool AllowsMove(GameEntry? game, bool sessionBegun) => !(Holds(game) && sessionBegun);
+}
+
+/// <summary>
 /// How the paths measured between matches are compared: the median of <see cref="Samples"/> echoes to the
 /// region's landmark, the same count for the path in use and for every candidate, taken minutes apart at most.
 ///
