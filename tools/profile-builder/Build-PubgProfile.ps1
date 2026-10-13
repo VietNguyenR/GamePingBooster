@@ -1329,6 +1329,9 @@ if ($totalNew -eq 0) {
 
 if (-not $newProfile) { Copy-Item $ProfilePath "$ProfilePath.bak" -Force }
 $json = Format-Json ($profileData | ConvertTo-Json -Depth 10)
+# The file is written as ASCII, so a non-ASCII game name ("Nghịch Thủy Hàn") would come out as '?'.
+# Outside strings JSON is ASCII anyway, so escaping every other character as \uXXXX is exact.
+$json = [regex]::Replace($json, '[^\x00-\x7F]', { param($m) '\u{0:x4}' -f [int][char]$m.Value })
 Set-Content -Path $ProfilePath -Value $json -Encoding ascii
 if ($newProfile) { Write-Host "    Written - a new profile" }
 else { Write-Host "    Written (previous version kept as $(Split-Path $ProfilePath -Leaf).bak)" }

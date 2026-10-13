@@ -292,6 +292,8 @@
     "nshm": {
       "name": "Nghịch Thủy Hàn",
       "watchProcess": "nshm",
+      "tcpGameplay": true,
+      "persistentSession": true,
       "probePort": null,
       "observedPath": "observed-nshm.txt",
       "landmarkPath": null,
@@ -301,8 +303,9 @@
       "profilePath": "../../profiles/nshm-vn.json",
       "awsRegions": [],
       "azureRegions": [],
-      "asns": [],
-      "note": "Not captured yet (declared 2026-10-12). Process is nshm.exe. Nothing is known about its servers, protocol (UDP or TCP) or cloud, so no region, ASN or landmark is declared: capture first, then fill awsRegions/azureRegions/asns from where the observed addresses sit. Until then ./gpb profile will refuse rather than write a profile that looks finished."
+      "asns": [45102],
+      "asnRegions": { "45102": "asia-sg" },
+      "note": "Captured 2026-10-12 (./gpb capture nshm tcp, four sessions, before -TcpGameplay existed - observed-nshm.txt seeded by hand 2026-10-13). Process nshm.exe. Like Aniimo: NO UDP gameplay, the game is TCP. Gameplay = one long TCP connection to Alibaba Cloud Singapore (AS45102, 47.84.144.0/21):\n  47.84.150.22:23001  3575/221 s, 5087/389 s, 6322/534 s = 12-16/s, held the whole session\n  47.84.150.22:23007 + 47.84.150.110:23056  session 4 (after a reconnect / zone change), 6-11/s\n  47.84.149.81:8091  6 pkts in 45 s - small control port, inside the same /20 anyway.\nAll answer ICMP at 43-45 ms from Hanoi (2026-10-13), same as Aniimo's SG servers. NOT routed: 49.213.91.85/.87 TCP 443 = VNG (AS38244, the VN publisher, 29 ms, in Vietnam - open the whole session, push/telemetry); 8.221.x, 8.216.x, 8.219.41.15, 47.84.148-149.x on 443 = Alibaba HTTPS; 23.x/96.7.x/173.222.x/13.227.x/34.120.x/104.18.x = Akamai/CloudFront/Google/Cloudflare CDN downloads. asns 45102 -> asia-sg as for Aniimo; the /20 47.84.144.0/20 does not overlap Aniimo's 47.84.80/20 or 47.84.192/20. Only one server address family seen: capture more sessions (other servers/zones) before trusting the single /20 - discovery covers the rest."
     },
 
     "r6": {
