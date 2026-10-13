@@ -92,6 +92,21 @@
       "note": "Captured 2026-09-26, one match: all gameplay went to 103.10.124.121 on UDP 27037, 26484 / 922 s = 29/s - Valve's Singapore SDR relay (sgp, 103.10.124.116-121, ports 27015-27060). So Dota 2 is CS2's case: gameplay rides Steam Datagram Relay (appid 570), the client talks to a Valve relay PoP rather than the match server, and nothing matches an AWS or Azure range. The cross-check is empty on purpose and ./gpb profile will refuse.\n\nTHE RELAYS ARE CS2'S RELAYS. GetSDRConfig on 2026-09-26 (same revision for 570 and 730): every PoP with relays lists exactly the same addresses for both apps; the 17 extra PoPs appid 570 lists have no relays. 103.10.124.121/32 is already in cs2-vn.json's sgp region. Dota 2 is a game of its own anyway (sdrAppId 570 on the licence server, filled by sync-sdr.ts), so the admin shows it apart from cs2. The one exception to 'games never share ranges' makes that possible, and it is narrow: two ranges may overlap only when BOTH are copies of a Valve relay list - Prefix.source steam-sdr:* on the server (bothFromSdrRelayList), landmarksRouted on both games in Test-Profile.ps1. A discovered range of an SDR game, a lobby address, or any non-SDR game is still refused.\n\nAt 29/s it is about half CS2's rate but well above the client's discovery default (16.7/s), so no discoveryPacketsPerSecond is needed. Only sgp seen from one line; hkg (103.28.54.x) is the same list as cs2's too. The api.steampowered.com lookup fails on this ISP's DNS - fetch GetSDRConfig with DoH (curl --doh-url https://1.1.1.1/dns-query)."
     },
 
+    "deadlock": {
+      "name": "Deadlock",
+      "watchProcess": "deadlock",
+      "probePort": null,
+      "observedPath": "observed-deadlock.txt",
+      "landmarkPath": null,
+      "tcpSessionsPath": "tcp-sessions-deadlock.txt",
+      "unverifiedPath": "observed-deadlock-unverified.txt",
+      "manualCidrPath": "manual-cidrs-deadlock.txt",
+      "profilePath": "../../profiles/deadlock-vn.json",
+      "awsRegions": [],
+      "azureRegions": [],
+      "note": "Captured 2026-10-13, two sessions (one 4467 s, one 30 s): gameplay is Steam Datagram Relay, so Deadlock is Dota 2's case. UDP went to Valve's Singapore relays 103.10.124.116:27053 (60788 pkts / 1274 s = 48/s) and 103.10.124.121:27039 (37108 / 598 s = 62/s); both are in the sgp PoP. GetSDRConfig appid 1422450 on 2026-10-13 (revision 1791863345, the same revision as 730) lists exactly CS2's relays in sgp (6), hkg (10), tyo (6) and dxb (2), so the cross-check is empty on purpose and ./gpb profile refuses; the licence server keeps the ranges equal to Valve's list (web-service/scripts/sync-sdr.ts, sdrAppId 1422450) and profiles/deadlock-vn.json is the self-hosted copy - NOT for /admin import, which refuses it (an imported game has no sdrAppId, so its relay landmarks count as routed); create the game with web-service/scripts/add-sdr-game.ts. The overlap with cs2 and dota2 is the one exception the rules allow (both copies of a Valve relay list). Rates of 48-62/s are above the client's discovery default, so no discoveryPacketsPerSecond. TCP seen but NEVER routed (tcp-sessions-deadlock.txt): 103.28.54.102 ports 443, 27018, 27021, 27023 - Valve's Hong Kong range but not a relay in GetSDRConfig, 0 blocked; diagnosis only. Process: deadlock.exe - the capture's process column is Get-Process on the socket's owning PID, so it is the real image name. The api.steampowered.com lookup fails on some ISPs' DNS - fetch GetSDRConfig with DoH (curl --doh-url https://1.1.1.1/dns-query)."
+    },
+
     "valorant": {
       "name": "VALORANT",
       "watchProcess": "VALORANT-Win64-Shipping",
