@@ -40,6 +40,12 @@ internal interface IUdpEventSink
     void OnUdpEvent(in RawUdpEvent e);
 }
 
+/// <summary>An ETW call that failed, with the Win32 error it returned, so a caller can tell access denied apart.</summary>
+internal sealed class EtwException(uint error, string message) : InvalidOperationException(message)
+{
+    public uint Error { get; } = error;
+}
+
 /// <summary>
 /// A real-time ETW session on Microsoft-Windows-Kernel-Network, delivering every UDP send and
 /// receive on the machine with the process that owns the socket.
@@ -96,9 +102,26 @@ internal sealed unsafe class KernelNetworkTrace : IDisposable
     private long _udpEvents;
     private long _otherEvents;
     private long _undecodedEvents;
+    private long _pausedEvents;
     private long _callbackTicks;
+    private volatile bool _paused;
 
     public bool EventIdFilterApplied { get; private set; }
+
+    /// <summary>
+    /// True drops every event on arrival - before the id check, the layout lookup and the decoding - so a session
+    /// kept open while nothing listens costs the callback's entry and one counter per event. The session stays
+    /// running: it is held open because a game's anti-cheat may refuse to let a new one start (see
+    /// GameDestinationRecorder).
+    /// </summary>
+    public bool Paused
+    {
+        get => _paused;
+        set => _paused = value;
+    }
+
+    /// <summary>Events dropped unread while <see cref="Paused"/>.</summary>
+    public long PausedEvents => Volatile.Read(ref _pausedEvents);
 
     /// <summary>UDP events decoded and handed to the sink.</summary>
     public long UdpEvents => Volatile.Read(ref _udpEvents);
@@ -193,7 +216,7 @@ internal sealed unsafe class KernelNetworkTrace : IDisposable
                     continue;
                 }
 
-                throw new InvalidOperationException($"Could not start the ETW session: {Describe(result)}.");
+                throw new EtwException(result, $"Could not start the ETW session: {Describe(result)}.");
             }
         }
         finally
@@ -322,6 +345,12 @@ internal sealed unsafe class KernelNetworkTrace : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void Handle(EventRecord* record)
     {
+        if (_paused)
+        {
+            _pausedEvents++;
+            return;
+        }
+
         var started = Stopwatch.GetTimestamp();
 
         if (record->ProviderId != KernelNetworkProvider)
@@ -396,6 +425,44 @@ internal sealed unsafe class KernelNetworkTrace : IDisposable
     private bool _clockChecked;
     private int _disposed;
 
+    /// <summary>
+    /// Stops the session and releases everything, unless Windows refuses the stop with access denied: then the
+    /// session is left exactly as it was - still running, still read - and false says to try again later. A game's
+    /// anti-cheat refuses the stop while it runs and allows it the moment the game exits (EA Javelin, 2026-10-14);
+    /// tearing the reader down anyway would leave a session nobody reads running until reboot.
+    ///
+    /// Not safe to call alongside <see cref="Dispose"/>; the caller serialises them.
+    /// </summary>
+    public bool TryStop()
+    {
+        if (Volatile.Read(ref _disposed) != 0) return true;
+        if (_sessionHandle != 0)
+        {
+            var result = StopSession();
+            if (result == ErrorAccessDenied) return false;
+            ReportStop(result);
+            _sessionHandle = 0;
+        }
+        Dispose();
+        return true;
+    }
+
+    private uint StopSession()
+    {
+        var properties = AllocateProperties(out _);
+        try { return ControlTrace(_sessionHandle, null, properties, EventTraceControlStop); }
+        finally { NativeMemory.Free(properties); }
+    }
+
+    private void ReportStop(uint result)
+    {
+        if (result != ErrorSuccess && result != ErrorWmiInstanceNotFound)
+        {
+            _log($"Stopping the ETW session failed: {Describe(result)}. It may keep running until reboot; " +
+                 $"`logman stop {SessionName} -ets` stops it by hand.");
+        }
+    }
+
     /// <summary>Safe to call twice and from two threads: the console's exit handler and the main
     /// thread's <c>finally</c> can both get here.</summary>
     public void Dispose()
@@ -404,20 +471,7 @@ internal sealed unsafe class KernelNetworkTrace : IDisposable
 
         if (_sessionHandle != 0)
         {
-            var properties = AllocateProperties(out _);
-            try
-            {
-                var result = ControlTrace(_sessionHandle, null, properties, EventTraceControlStop);
-                if (result != ErrorSuccess && result != ErrorWmiInstanceNotFound)
-                {
-                    _log($"Stopping the ETW session failed: {Describe(result)}. It may keep running until reboot; " +
-                         $"`logman stop {SessionName} -ets` stops it by hand.");
-                }
-            }
-            finally
-            {
-                NativeMemory.Free(properties);
-            }
+            ReportStop(StopSession());
             _sessionHandle = 0;
         }
 

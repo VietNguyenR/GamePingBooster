@@ -11,17 +11,18 @@ namespace GamePingBooster.Service.Discovery;
 /// It does what a person does with `./gpb capture` open: notices that a match is not going through
 /// the tunnel - the packet counters do not move - and reads which address the game is flooding with
 /// UDP. The first half costs nothing, because the tunnel already counts the game's UDP
-/// (<see cref="Tunnel.GameServerTally.GamePackets"/>). Only the second half needs ETW, so ETW runs
-/// only while it can find something:
+/// (<see cref="Tunnel.GameServerTally.GamePackets"/>). Only the second half needs ETW, so ETW is read
+/// only while it can find something. The session itself is held open from Connect to Disconnect and paused
+/// in between (<see cref="HeldTrace"/>): a game's anti-cheat may refuse a new one while the game runs.
 ///
 ///   TUNNELLED  the tunnel carries the game's UDP. The match server is inside the profile's ranges
-///              by construction, there is nothing to find, and ETW is off. With a complete profile
+///              by construction, there is nothing to find, and ETW is paused. With a complete profile
 ///              this is almost every match. It ends after <see cref="TunnelQuiet"/> without match traffic
 ///              on the tunnel, not at the first quiet moment.
 ///   LISTENING  the game runs and the tunnel carries none of its UDP: a lobby, a loading screen,
-///              or a match on a server the profile lacks. ETW is on. In a lobby the game sends
+///              or a match on a server the profile lacks. ETW is read. In a lobby the game sends
 ///              little, so this is cheap exactly when it runs longest.
-///   RESTING    a new server was just reported. ETW is off for <see cref="RestAfterReport"/>: the
+///   RESTING    a new server was just reported. ETW is paused for <see cref="RestAfterReport"/>: the
 ///              match it belongs to cannot be moved onto the tunnel anyway (a changed source address
 ///              drops the game's connection). After the rest it listens again; the same server still
 ///              busy is the same match, and rests again without a second report. The rest is short
@@ -120,9 +121,6 @@ internal sealed class GameDestinationRecorder : IDisposable
 
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(2);
 
-    // Settled once per service process: the answer depends on Windows, not on the session.
-    private static DecodingRules? _rules;
-
     private readonly Func<long?> _tunnelGamePackets;
     private readonly Func<IPAddress?> _tunnelAddress;
     private readonly Func<bool> _enabled;
@@ -130,6 +128,7 @@ internal sealed class GameDestinationRecorder : IDisposable
     private readonly Action<DiscoveredServer> _report;
     private readonly Action<GameEntry, ProbeRound, string>? _probeRound;
     private readonly Action<string> _log;
+    private readonly HeldTrace _held;
     private readonly object _gate = new();
     private Task _chain = Task.CompletedTask;
     private Watch? _current;
@@ -154,7 +153,22 @@ internal sealed class GameDestinationRecorder : IDisposable
         _enabled = () => whyDisabled() is null;
         _report = report;
         _log = log;
+        _held = new HeldTrace(SessionName, log);
     }
+
+    /// <summary>
+    /// Connect: opens the ETW session now, before any game starts, and holds it until <see cref="Close"/> - see
+    /// <see cref="HeldTrace"/> for why. Queued, so Connect never waits on the self-test. Not while sending is off:
+    /// then a listen opens it later, as before.
+    /// </summary>
+    public void Open() => Enqueue(() =>
+    {
+        if (!_enabled()) return;
+        if (!_held.Open("connected")) _log($"Discovery: no ETW session for this connection - {_held.Failure}.");
+    });
+
+    /// <summary>Disconnect: stops the held session, or keeps retrying while a game's anti-cheat refuses.</summary>
+    public void Close() => Enqueue(_held.Close);
 
     /// <summary>
     /// Packets within <see cref="Window"/> that make an address a server of <paramref name="game"/>:
@@ -195,6 +209,7 @@ internal sealed class GameDestinationRecorder : IDisposable
         {
             if (_disposed) return;
             Enqueue(StopCurrent);
+            Enqueue(_held.Dispose);
             _disposed = true;
             chain = _chain;
         }
@@ -289,9 +304,10 @@ internal sealed class GameDestinationRecorder : IDisposable
         private bool _disabledLogged;
         private int _reports;
 
-        // The ETW session and its table while listening.
-        private KernelNetworkTrace? _trace;
+        // The table the held ETW session delivers into while listening, and its counters when it was attached.
         private FlowTable? _table;
+        private long _attachedUdp;
+        private long _attachedLost;
         private long _listenStarted;
         private long _guardAt;
         private long _guardEvents;
@@ -467,7 +483,7 @@ internal sealed class GameDestinationRecorder : IDisposable
             _tcp?.Clear();
             _listenStarted = now;
             _guardAt = now;
-            _guardEvents = 0;
+            _guardEvents = owner._held.ReadEvents;
             _windows.Clear();
             _windows.Enqueue((now, []));
             _listens++;
@@ -476,51 +492,38 @@ internal sealed class GameDestinationRecorder : IDisposable
             if (_waitingOn is null)
             {
                 _log($"Discovery: the tunnel carries none of {Game.Name}'s {Traffic} - listening" +
-                     (_trace is null ? " (TCP only, ETW is off for this session)."
-                         : _trace.EventIdFilterApplied ? "." : " (Windows refused the event-id filter, so TCP events are delivered and dropped)."));
+                     (_table is null ? " (TCP only, ETW is off for this session)."
+                         : owner._held.EventIdFilterApplied ? "." : " (Windows refused the event-id filter, so TCP events are delivered and dropped)."));
             }
         }
 
-        /// <summary>Starts the UDP half. False when it cannot run and nothing is left to listen with; a TCP game goes on
-        /// listening to its TCP without it.</summary>
+        /// <summary>Starts the UDP half on the held session, opening it if Connect could not. False when it cannot run
+        /// and nothing is left to listen with; a TCP game goes on listening to its TCP without it.</summary>
         private bool StartTrace()
         {
-            var table = new FlowTable((uint)Environment.ProcessId);
-            KernelNetworkTrace trace;
-            try
-            {
-                trace = KernelNetworkTrace.Start(SessionName, table, _log, ThreadPriority.BelowNormal);
-            }
-            catch (Exception ex)
+            var held = owner._held;
+            if (!held.Open("needed by " + Game.Name))
             {
                 // Any failure, not only the ones ETW documents: discovery is an extra, and a machine where
                 // it cannot start must go on exactly as it did before discovery existed.
                 _etwUnavailable = true;
                 _log(_tcp is null
-                    ? $"Discovery is off for this {Game.Name} session: {ex.Message}"
-                    : $"Discovery listens to {Game.Name}'s TCP only this session - ETW would not start: {ex.Message}");
+                    ? $"Discovery is off for this {Game.Name} session: {held.Failure}."
+                    : $"Discovery listens to {Game.Name}'s TCP only this session - no ETW: {held.Failure}.");
                 return _tcp is not null;
             }
 
-            try
-            {
-                _rules ??= SelfTest.Run(table, _log);
-            }
-            catch (Exception ex)
-            {
-                // Whatever the self-test threw, the session it was testing must not be left running.
-                trace.Dispose();
-                _etwUnavailable = true;
-                _log(_tcp is null
-                    ? $"Discovery is off for this {Game.Name} session - its self-test failed: {ex.Message}"
-                    : $"Discovery listens to {Game.Name}'s TCP only this session - the ETW self-test failed: {ex.Message}");
-                return _tcp is not null;
-            }
-
-            table.Rules = _rules;
+            var table = new FlowTable((uint)Environment.ProcessId);
             table.SetGamePids(_gamePids);
             table.Probes = _probes;
-            _trace = trace;
+            _attachedUdp = held.UdpEvents;
+            _attachedLost = held.EventsLost;
+            if (!held.Attach(table))
+            {
+                _etwUnavailable = true;
+                _log($"Discovery: the ETW session is closing - {Game.Name} listens without it this session.");
+                return _tcp is not null;
+            }
             _table = table;
             return true;
         }
@@ -528,14 +531,15 @@ internal sealed class GameDestinationRecorder : IDisposable
         /// <param name="rest">Rest this long before listening again; null leaves the phase to the caller.</param>
         private void StopListening(TimeSpan? rest)
         {
-            if (_trace is { } trace)
+            if (_table is not null)
             {
-                _udpEvents += trace.UdpEvents;
-                _eventsLost += trace.QueryLosses().EventsLost;
-                trace.Dispose();
+                // Paused, not stopped: the session is held for the whole connection - see HeldTrace.
+                var held = owner._held;
+                held.Detach();
+                _udpEvents += held.UdpEvents - _attachedUdp;
+                _eventsLost += Math.Max(0, held.EventsLost - _attachedLost);
             }
             if (_phase == Phase.Listening) _listenSeconds += Stopwatch.GetElapsedTime(_listenStarted).TotalSeconds;
-            _trace = null;
             _table = null;
             _tcp?.Clear();
             _windows.Clear();
@@ -667,7 +671,7 @@ internal sealed class GameDestinationRecorder : IDisposable
         private void EmitProbes(string matchOn, long matchAt)
         {
             if (_probes is null || owner._probeRound is not { } emit) return;
-            var round = _probes.Take(matchAt, _rules?.ReceiveRemoteIsDestination is not null);
+            var round = _probes.Take(matchAt, owner._held.Rules?.ReceiveRemoteIsDestination is not null);
             if (round is null) return;
 
             var parts = round.Endpoints.Select(e =>
@@ -681,17 +685,20 @@ internal sealed class GameDestinationRecorder : IDisposable
 
         private void Guard(long now)
         {
-            if (_trace is not { } trace) return;
+            if (_table is null) return;
             var seconds = (now - _guardAt) / (double)Stopwatch.Frequency;
             if (seconds < 10) return;
 
-            var events = trace.UdpEvents;
+            // Every event read, not only UDP: where Windows refused the event-id filter, a TCP download floods the
+            // session with events that are read and thrown away, and counting UDP alone never saw it.
+            var events = owner._held.ReadEvents;
             var rate = (events - _guardEvents) / seconds;
             _guardEvents = events;
             _guardAt = now;
             if (rate <= MaxEventsPerSecond) return;
 
-            _log($"Discovery: {rate:N0} UDP events/s on this machine, over the {MaxEventsPerSecond:N0} limit - " +
+            // Paused, not closed: a closed session may not open again while a game's anti-cheat runs.
+            _log($"Discovery: {rate:N0} ETW events/s on this machine, over the {MaxEventsPerSecond:N0} limit - " +
                  $"stopped listening for {Describe(RestAfterGuard)}.");
             StopListening(RestAfterGuard);
         }

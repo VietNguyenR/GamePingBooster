@@ -190,7 +190,9 @@ internal static unsafe partial class EtwNative
     internal static string Describe(uint error) => error switch
     {
         ErrorSuccess => "success",
-        ErrorAccessDenied => "access denied (5) - run from an Administrator terminal",
+        // Two causes, and the second is not fixed by elevating: a game's anti-cheat refuses every new session while it
+        // runs (EA Javelin, Battlefield 6, 2026-10-14 - logman as Administrator was refused too).
+        ErrorAccessDenied => "access denied (5) - not running as Administrator, or a running game's anti-cheat blocks ETW",
         ErrorAlreadyExists => "a session with that name already exists (183)",
         ErrorWmiInstanceNotFound => "no such session (4201)",
         ErrorNotSupported => "not supported (50)",

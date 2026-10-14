@@ -657,6 +657,10 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                 throw new InvalidOperationException(refusal.English);
             }
 
+            // Discovery's ETW session, opened now and held until Disconnect: a game's anti-cheat may refuse a new one
+            // once the game runs (EA, Battlefield 6). Queued - Connect does not wait for it.
+            _discovery?.Open();
+
             // Reload every time the user connects. This used to be "load it once and keep it",
             // which meant rebuilding the profile changed nothing until the service was restarted,
             // and nothing said so: the log still reported a route count, just the old one. The
@@ -3551,6 +3555,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         }
         // Nothing watches the game after this, so nothing would tell discovery it exited.
         _discovery?.GameStopped();
+        _discovery?.Close();
         phases?.Mark("watcher");
 
         try
