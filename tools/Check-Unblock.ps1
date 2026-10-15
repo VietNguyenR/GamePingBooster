@@ -352,6 +352,20 @@ Say "WinHTTP proxy: $((netsh winhttp show proxy | Out-String).Trim() -replace '\
 $hosts = Get-Content "$env:windir\System32\drivers\etc\hosts" -ErrorAction SilentlyContinue | Where-Object { $_ -match '^\s*[^#\s]' }
 Say "hosts file entries: $(if ($hosts) { $hosts -join ' | ' } else { 'none' })"
 if ($hosts -match 'pubg|playbattlegrounds|steam') { $hints.Add('The hosts file names PUBG or Steam - it overrides everything else. Remove those lines.') }
+# 2026-10-15, FPT: Windows set to Require DoH (DoHPolicy 3) only asks servers it has a DoH template for. 127.0.0.53 has
+# none, so with the app's rules in every claimed name failed (status 9852) - and with the app off the PC looked fine,
+# because its 8.8.8.8 has one (dns.google). The policy key wins over the DNS client's own parameter, as in Windows.
+$dohPolicyKey = (Get-ItemProperty -Path 'HKLM:SOFTWARE\Policies\Microsoft\Windows NT\DNSClient' -Name DoHPolicy -ErrorAction SilentlyContinue).DoHPolicy
+$dohParamKey = (Get-ItemProperty -Path 'HKLM:SYSTEM\CurrentControlSet\Services\Dnscache\Parameters' -Name DoHPolicy -ErrorAction SilentlyContinue).DoHPolicy
+$dohSetting = if ($null -ne $dohPolicyKey) { $dohPolicyKey } else { $dohParamKey }
+$dohFrom = if ($null -ne $dohPolicyKey) { 'policy' } elseif ($null -ne $dohParamKey) { 'parameters' } else { '' }
+$dohMeaning = switch ($dohSetting) { 1 { 'prohibit' } 2 { 'allow' } 3 { 'require' } $null { '' } default { 'unknown' } }
+Say "DoH policy (DoHPolicy): $(if ($null -ne $dohSetting) { "$dohSetting ($dohMeaning, $dohFrom)" } else { 'not set' })"
+$dohServers = @(Get-DnsClientDohServerAddress -ErrorAction SilentlyContinue | Where-Object { ($ispDns + @($v6)) -contains $_.ServerAddress } | ForEach-Object { "$($_.ServerAddress) -> $($_.DohTemplate)$(if (-not $_.AllowFallbackToUdp) { ' (no fallback)' })" })
+Say "DoH templates for the DNS servers in use: $(if ($dohServers) { $dohServers -join '; ' } else { 'none' })"
+if ($dohSetting -eq 3) {
+    $hints.Add('Windows is set to Require DoH (DoHPolicy 3): it never asks the app''s resolver on 127.0.0.53, so unblocking cannot work. Fix: as administrator run  reg delete "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" /v DoHPolicy /f  and restart the PC (a company-managed PC needs its IT).')
+}
 
 # ---------------------------------------------------------------- NRPT
 Section 'Name resolution policy (NRPT) and the local resolver'

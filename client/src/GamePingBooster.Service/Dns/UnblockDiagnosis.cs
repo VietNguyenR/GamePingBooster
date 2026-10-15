@@ -42,7 +42,7 @@ internal static class UnblockDiagnosis
 
     /// <summary>Most decisive first: the order the verdict is picked in.</summary>
     private static readonly string[] Priority =
-        ["leftover-rules", "resolver-failing", "modem-ipv6", "sni-filter", "ip-block", "windows-sinkhole", "dns-lie"];
+        ["doh-required", "leftover-rules", "resolver-failing", "modem-ipv6", "sni-filter", "ip-block", "windows-sinkhole", "dns-lie"];
 
     /// <summary>Programs that have been seen to sit in DNS or in front of the network on players' machines.</summary>
     private static readonly Regex Suspects = new(
@@ -101,6 +101,7 @@ internal static class UnblockDiagnosis
         bool Enabled,
         string? LastError,
         bool TunnelUp,
+        DohPolicy Doh,
         IReadOnlyList<NameCheck> Names,
         IReadOnlyList<string> Processes,
         string Log);
@@ -126,8 +127,12 @@ internal static class UnblockDiagnosis
         var processes = SuspectProcesses();
         var nrpt = NrptPolicy.Count();
         var tunnelUp = context.Routes?.Ready ?? false;
+        var dohPolicy = DohPolicy.Read();
 
         var flags = new List<string>();
+        // First on purpose: under Require DoH Windows never asks 127.0.0.53, and every other reading below follows
+        // from that - "windows-sinkhole" on every name was all the 2026-10-15 FPT reports could say.
+        if (dohPolicy.Requires) flags.Add("doh-required");
         // Asked, not inferred from Enabled: two reports on 2026-10-02 said "leftover rules" for a resolver that was
         // running and answering - checked mid-enable, before Enabled turned true. Rules are only left over when
         // nothing answers them.
@@ -152,7 +157,7 @@ internal static class UnblockDiagnosis
         return new Findings(
             verdict, flags, Summarise(verdict, context, checks),
             [.. v4.Select(a => a.ToString())], [.. v6.Select(a => a.ToString())],
-            nrpt, context.Enabled, context.LastError, tunnelUp, checks, processes, ReadLog(context.LogPath));
+            nrpt, context.Enabled, context.LastError, tunnelUp, dohPolicy, checks, processes, ReadLog(context.LogPath));
     }
 
     /// <summary>
@@ -410,6 +415,7 @@ internal static class UnblockDiagnosis
 
         return verdict switch
         {
+            "doh-required" => "Windows is set to Require DoH - it never asks the unblock resolver, so unblocking stays off.",
             "leftover-rules" => "Unblock rules are installed but the resolver is off - every claimed name fails.",
             "resolver-failing" => $"Unblocking would not turn on: {context.LastError}",
             "modem-ipv6" => $"The IPv6 resolver lies about {Names(c => c.Isp.Any(i => i.Lie))} - Windows asks it too.",
@@ -439,6 +445,10 @@ internal static class UnblockDiagnosis
         WriteStrings(json, "dnsV4", f.DnsV4);
         WriteStrings(json, "dnsV6", f.DnsV6);
         json.WriteBoolean("tunnelUp", f.TunnelUp);
+        // The value Windows goes by (null when neither key holds one) and which key it came from - see DohPolicy.
+        if (f.Doh.Value is { } dohValue) json.WriteNumber("dohPolicy", dohValue);
+        else json.WriteNull("dohPolicy");
+        json.WriteString("dohPolicySource", f.Doh.Source);
         WriteStrings(json, "processes", f.Processes);
         json.WriteEndObject();
 

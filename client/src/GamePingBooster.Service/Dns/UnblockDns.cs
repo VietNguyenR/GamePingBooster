@@ -10,11 +10,13 @@ namespace GamePingBooster.Service.Dns;
 ///
 /// The order matters and is the whole of the design:
 ///
+///   0. stop if Windows is set to Require DoH - it would never ask the local resolver (see DohPolicy)
 ///   1. read the resolvers Windows uses now, BEFORE anything is changed
 ///   2. ask each service's canary whether this line actually poisons it, so there is something to prove
 ///   3. start the local resolver and make sure it answers
 ///   4. only then point Windows at it
-///   5. ask the canaries again through Windows - if no poisoned one changed, undo everything
+///   5. ask the canaries again through Windows - if no poisoned one changed, or on an honest line Windows never
+///      asked the resolver, undo everything
 ///
 /// Step 5 is there because the mechanism in step 4 cannot be tested from a developer's terminal:
 /// writing NRPT rules needs SYSTEM, and a rule that Windows quietly ignores looks identical to a
@@ -73,6 +75,9 @@ internal sealed class UnblockDns : IAsyncDisposable
     /// </summary>
     private bool _allowed;
 
+    /// <summary>The Require DoH refusal was logged and reported; the minute-by-minute retries stay quiet until it changes.</summary>
+    private bool _dohLogged;
+
     public UnblockDns(Func<UnblockPolicy> policy, Action<string> log, IUnblockRoutes? routes = null)
     {
         _policy = policy;
@@ -84,6 +89,19 @@ internal sealed class UnblockDns : IAsyncDisposable
 
     /// <summary>Why the last enable failed, or null. Shown in the status line, so it is user-facing prose.</summary>
     public string? LastError { get; private set; }
+
+    /// <summary>
+    /// A failure the player has to fix on their own PC, as a UI language key (<see cref="ProblemDohRequired"/>,
+    /// <see cref="ProblemNotAsked"/>), or null. <see cref="LastError"/> is English for the log and the tooltip; this
+    /// is what the window turns into a sentence in the player's language.
+    /// </summary>
+    public string? ProblemCode { get; private set; }
+
+    /// <summary>Windows is set to Require DoH, so it would never ask 127.0.0.53 - see <see cref="DohPolicy"/>.</summary>
+    public const string ProblemDohRequired = "unblock.problem.dohRequired";
+
+    /// <summary>The rules were written and Windows still did not ask the resolver - something else owns DNS here.</summary>
+    public const string ProblemNotAsked = "unblock.problem.notAsked";
 
     /// <summary>The services currently unblocked, for the UI. Empty when the feature is off.</summary>
     public IReadOnlyList<string> Services =>
@@ -161,6 +179,7 @@ internal sealed class UnblockDns : IAsyncDisposable
         await DisableAsync().ConfigureAwait(false);
         run?.Dispose();
         LastError = why;
+        ProblemCode = null;
     }
 
     private async Task RunAsync(CancellationToken ct)
@@ -238,6 +257,7 @@ internal sealed class UnblockDns : IAsyncDisposable
             if (Enabled) return null;
 
             LastError = null;
+            ProblemCode = null;
 
             var policy = _policy();
             if (policy.IsEmpty)
@@ -246,6 +266,22 @@ internal sealed class UnblockDns : IAsyncDisposable
                 // that has switched the feature off, is a decision rather than a fault.
                 return Fail("Nothing to unblock - the profile names no services.", trouble: false);
             }
+
+            // 0. Whether Windows would ask us at all. Under Require DoH it only asks servers with a DoH template, and
+            //    127.0.0.53 has none: writing the rules would take every claimed name down while connected - the
+            //    2026-10-15 FPT case. The rules stay unwritten and the player is told how to change the setting;
+            //    the loop reads it again every minute, so turning it off takes effect without a reconnect.
+            var doh = DohPolicy.Read();
+            if (Decide(doh) == EnableDecision.SkipDohRequired)
+            {
+                var first = !_dohLogged;
+                _dohLogged = true;
+                return Fail(
+                    $"Windows is set to Require DoH (DoHPolicy {doh.Describe()}), so it would never ask the unblock " +
+                    "resolver and every unblocked name would fail. Unblocking stays off; nothing was written.",
+                    trouble: first, log: first, problem: ProblemDohRequired);
+            }
+            _dohLogged = false;
 
             // 1. The upstreams, before the policy can point them at us.
             var upstream = AdapterDns.Read();
@@ -331,20 +367,31 @@ internal sealed class UnblockDns : IAsyncDisposable
                 return Fail($"Could not write the name resolution policy: {ex.Message}");
             }
 
-            // 5. The proof, against every canary that was lied about a moment ago.
-            if (poisoned.Count > 0)
+            // 5. The proof, on every line. Against the canaries that were lied about a moment ago when there are any;
+            //    on an honest line the answer is the same either way, so the proof is that Windows asked the
+            //    resolver at all. Until 2026-10-15 an honest line skipped this, and a PC whose Windows ignored the
+            //    rules (Require DoH) kept them - every claimed name failing while connected.
             {
-                var (verified, answer, waitedMs, app) = await VerifyAsync(poisoned, ct).ConfigureAwait(false);
-                if (!verified)
+                var (outcome, answer, waitedMs, app) = await VerifyAsync(policy.Apps, poisoned, ct).ConfigureAwait(false);
+                if (outcome != VerifyOutcome.Verified)
                 {
                     await RollBackAsync().ConfigureAwait(false);
-                    return Fail(
-                        $"The policy was written but after {waitedMs} ms Windows still resolves " +
-                        $"{app.Canary} to {answer}. Everything has been undone.");
+                    var later = DohPolicy.Read();
+                    return outcome == VerifyOutcome.NotAsked
+                        ? Fail(
+                            $"The policy was written but in {waitedMs} ms Windows never asked the unblock resolver " +
+                            $"(DoHPolicy {later.Describe()}). Everything has been undone.",
+                            problem: later.Requires ? ProblemDohRequired : ProblemNotAsked)
+                        : Fail(
+                            $"The policy was written but after {waitedMs} ms Windows still resolves " +
+                            $"{app.Canary} to {answer}. Everything has been undone.");
                 }
 
-                _log($"Unblock verified after {waitedMs} ms: {app.Canary} now resolves to {answer}. " +
-                     $"Services: {policy.Describe()} (from {policy.Source}).");
+                _log(poisoned.Count > 0
+                    ? $"Unblock verified after {waitedMs} ms: {app.Canary} now resolves to {answer}. " +
+                      $"Services: {policy.Describe()} (from {policy.Source})."
+                    : $"Unblock verified after {waitedMs} ms: Windows asked the resolver for {app.Canary}. " +
+                      $"Services: {policy.Describe()} (from {policy.Source}).");
             }
 
             Enabled = true;
@@ -496,10 +543,11 @@ internal sealed class UnblockDns : IAsyncDisposable
         Enabled = false;
     }
 
-    private string Fail(string message, bool trouble = true)
+    private string Fail(string message, bool trouble = true, bool log = true, string? problem = null)
     {
         LastError = message;
-        _log("Unblock: " + message);
+        ProblemCode = problem;
+        if (log) _log("Unblock: " + message);
         if (trouble) Trouble?.Invoke("enable-failed", message, null);
         return message;
     }
@@ -517,28 +565,36 @@ internal sealed class UnblockDns : IAsyncDisposable
     /// One canary passing is enough. They share a resolver and a mechanism, so if the policy took
     /// for one it took for all - and holding the whole feature hostage to a service whose canary has
     /// since stopped being poisoned would turn a stale row in a database into an outage.
+    ///
+    /// On an honest line (no canary poisoned) there is no answer to tell apart, so the proof is the resolver's own
+    /// counter: a question reached it after the rules went in. Any query counts - Steam asking at the same
+    /// moment proves the same thing.
     /// </summary>
-    private async Task<(bool Verified, string Answer, long WaitedMs, UnblockApp App)> VerifyAsync(
-        IReadOnlyList<UnblockApp> poisoned, CancellationToken ct)
+    private async Task<(VerifyOutcome Outcome, string Answer, long WaitedMs, UnblockApp App)> VerifyAsync(
+        IReadOnlyList<UnblockApp> all, IReadOnlyList<UnblockApp> poisoned, CancellationToken ct)
     {
         var clock = System.Diagnostics.Stopwatch.StartNew();
         var attempt = 0;
         var answer = "nothing";
+        var asking = poisoned.Count > 0 ? poisoned : all;
 
-        var askedBefore = _resolver?.ScopedQueries ?? 0;
+        // Arrivals, not answers: a canary whose upstream is slow was still asked, and must not read as "never".
+        var askedBefore = _resolver?.ReceivedQueries ?? 0;
+        long Asked() => (_resolver?.ReceivedQueries ?? 0) - askedBefore;
 
         // Three seconds, asked every 250 ms. Long enough for a policy reload that is not instant,
-        // short enough that nobody notices, and it only runs on a line proven to be lying.
+        // short enough that nobody notices.
         while (clock.ElapsedMilliseconds < 3000)
         {
             attempt++;
 
-            foreach (var app in poisoned)
+            foreach (var app in asking)
             {
                 var addresses = await ResolveThroughWindowsAsync(app.Canary).ConfigureAwait(false);
                 answer = Describe(addresses);
 
-                if (!LooksPoisoned(addresses)) return (true, answer, clock.ElapsedMilliseconds, app);
+                var outcome = Judge(poisoned.Count, cleanNow: !LooksPoisoned(addresses), Asked());
+                if (outcome == VerifyOutcome.Verified) return (outcome, answer, clock.ElapsedMilliseconds, app);
             }
 
             try { await Task.Delay(250, ct).ConfigureAwait(false); }
@@ -549,13 +605,33 @@ internal sealed class UnblockDns : IAsyncDisposable
         // reasoned about later. If the resolver was never asked, Windows ignored the policy and no
         // amount of waiting will change it. If it WAS asked and the answer is still the ISP's, the
         // policy works and the fault is ours - a forwarding decision, or DoH being unreachable.
-        var asked = (_resolver?.ScopedQueries ?? 0) - askedBefore;
+        var asked = Asked();
+        var final = Judge(poisoned.Count, cleanNow: false, asked);
         _log($"Unblock: asked Windows {attempt} time(s) over {clock.ElapsedMilliseconds} ms, still {answer}. " +
              (asked == 0
                  ? "Windows never asked the resolver, so it did not apply the policy."
                  : $"Windows DID ask the resolver ({asked} time(s)), so the policy applied and the answer is ours."));
 
-        return (false, answer, clock.ElapsedMilliseconds, poisoned[0]);
+        return (final, answer, clock.ElapsedMilliseconds, asking[0]);
+    }
+
+    internal enum EnableDecision { Write, SkipDohRequired }
+
+    internal enum VerifyOutcome { Verified, NotAsked, AskedStillPoisoned }
+
+    /// <summary>Whether to write the rules at all, from the DoH setting - see <see cref="DohPolicy"/>.</summary>
+    internal static EnableDecision Decide(DohPolicy doh) =>
+        doh.Requires ? EnableDecision.SkipDohRequired : EnableDecision.Write;
+
+    /// <summary>
+    /// One look during the verify. A poisoned line is proven by a canary coming back clean through Windows; an honest
+    /// line by Windows having asked the resolver at all. Not asked is told from asked-and-still-lying because they
+    /// fail for different reasons: the first is this PC's DNS setup (the player's to fix), the second is ours.
+    /// </summary>
+    internal static VerifyOutcome Judge(int poisonedCount, bool cleanNow, long askedSince)
+    {
+        if (poisonedCount > 0 ? cleanNow : askedSince > 0) return VerifyOutcome.Verified;
+        return askedSince == 0 ? VerifyOutcome.NotAsked : VerifyOutcome.AskedStillPoisoned;
     }
 
     /// <summary>

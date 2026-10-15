@@ -90,6 +90,8 @@ internal static partial class Program
             ("Unblock: a tunnel route leaves out addresses the line is using", ARouteAskedLaterLeavesTheLinesAddressesAlone),
             ("Unblock: a live connection over the line is never routed", () => { ALiveConnectionOverTheLineIsNeverRouted(); return Task.CompletedTask; }),
             ("Unblock: a route the relay cannot reach is taken back", () => { ARouteTheRelayCannotReachIsTakenBack(); return Task.CompletedTask; }),
+            ("Unblock: Windows set to Require DoH gets no rules", () => { RequireDohIsNeverWritten(); return Task.CompletedTask; }),
+            ("Unblock: the rules are verified on every line", () => { TheRulesAreAlwaysVerified(); return Task.CompletedTask; }),
             ("Split: a connection over the line that stops is ended", () => { AStoppedPathIsToldFromAThinkingServer(); return Task.CompletedTask; }),
             ("Split: a reset while the game waits sends the name to the relay", AResetWhileTheGameWaitsSendsTheNameToTheRelay),
             ("A move closes what rode the old relay", ConnectionsFromTheOldAddressAreFoundAndClosed),

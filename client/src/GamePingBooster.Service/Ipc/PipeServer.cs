@@ -460,6 +460,7 @@ internal sealed class PipeServer
         status.Unblock = _unblock.Enabled;
         status.UnblockDetail = _unblock.Detail;
         status.UnblockServices = [.. _unblock.Services];
+        status.UnblockProblemCode = _unblock.ProblemCode;
         _updater.Stamp(status);
 
         await _writeLock.WaitAsync().ConfigureAwait(false);

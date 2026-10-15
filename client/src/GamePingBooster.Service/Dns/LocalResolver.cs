@@ -95,6 +95,7 @@ internal sealed class LocalResolver : IAsyncDisposable
     private Task? _tcpLoop;
 
     private long _scoped;
+    private long _received;
     private long _forwarded;
     private long _failed;
 
@@ -172,6 +173,13 @@ internal sealed class LocalResolver : IAsyncDisposable
         _cut.TryGetValue(name, out var until) && until > DateTimeOffset.UtcNow;
 
     public long ScopedQueries => Interlocked.Read(ref _scoped);
+
+    /// <summary>
+    /// Every question that reached the resolver, answered or not - counted on arrival. What UnblockDns' verify reads to
+    /// tell "Windows never asked" from "asked, and the upstream was slow": <see cref="ScopedQueries"/> only moves once
+    /// an answer is built.
+    /// </summary>
+    public long ReceivedQueries => Interlocked.Read(ref _received);
 
     /// <summary>Addresses dropped for failing a TLS handshake - see <see cref="WorkingEdges"/>.</summary>
     public long RejectedEdges => _edges.Rejected;
@@ -343,6 +351,7 @@ internal sealed class LocalResolver : IAsyncDisposable
     /// </summary>
     internal async Task<byte[]> AnswerAsync(byte[] query, CancellationToken ct)
     {
+        Interlocked.Increment(ref _received);
         var id = DnsWire.ReadId(query);
 
         if (DnsWire.TryReadQuestion(query, out var name, out var type) && _policy.ClaimedBy(name) is { } app)

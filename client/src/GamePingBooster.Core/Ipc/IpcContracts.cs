@@ -468,6 +468,13 @@ public sealed class StatusMessage
     [JsonPropertyName("unblockServices")] public List<string> UnblockServices { get; set; } = [];
 
     /// <summary>
+    /// Why unblocking is off when the fix is on the player's side, as a language key - "unblock.problem.dohRequired"
+    /// (Windows set to Require DoH) or "unblock.problem.notAsked" (Windows ignored the rules) - or null. The window
+    /// shows it as a warning in the player's language; <see cref="UnblockDetail"/> stays the English line. Additive.
+    /// </summary>
+    [JsonPropertyName("unblockProblemCode")] public string? UnblockProblemCode { get; set; }
+
+    /// <summary>
     /// This machine's device public key, 65 bytes as lowercase hex, or null on a service too old
     /// to have one.
     ///

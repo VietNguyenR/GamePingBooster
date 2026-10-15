@@ -212,6 +212,14 @@
         </Grid>
       </Border>
 
+      <!-- Unblocking could not turn on for a reason only the player can fix (Windows set to Require DoH, or
+           something else owning DNS): what is wrong and how to fix it. Amber, not red - the tunnel still works. -->
+      <Border Background="#422006" CornerRadius="8" Padding="12"
+              IsVisible="{Binding HasUnblockProblem}">
+        <SelectableTextBlock Text="{Binding UnblockProblem}" Foreground="#FDE68A"
+                             FontSize="12" TextWrapping="Wrap" />
+      </Border>
+
       <!-- Error banner, only shown when something went wrong -->
       <Border Background="#7F1D1D" CornerRadius="8" Padding="12"
               IsVisible="{Binding HasError}">

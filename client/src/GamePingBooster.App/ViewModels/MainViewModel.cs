@@ -867,6 +867,29 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    private string? _unblockProblemCode;
+
+    /// <summary>
+    /// Why unblocking is off when only the player can fix it, as the service's language key (StatusMessage.
+    /// UnblockProblemCode), or null. Kept as the key so a language switch re-reads it.
+    /// </summary>
+    public string? UnblockProblemCode
+    {
+        get => _unblockProblemCode;
+        private set
+        {
+            if (!Set(ref _unblockProblemCode, value)) return;
+            Raise(nameof(UnblockProblem));
+            Raise(nameof(HasUnblockProblem));
+            Raise(nameof(UnblockText));
+        }
+    }
+
+    /// <summary>The warning under the stats card: what is wrong on this PC and how to fix it, in the player's language.</summary>
+    public string? UnblockProblem => UnblockProblemCode is { } code ? Loc.T(code) : null;
+
+    public bool HasUnblockProblem => UnblockProblemCode is not null;
+
     private long _packetsSent;
     public long PacketsSent
     {
@@ -1024,7 +1047,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         get
         {
             if (!Unblock && UnblockDetail is null) return Loc.T("value.none");
-            if (!Unblock) return Loc.T("unblock.off");
+            if (!Unblock) return Loc.T(UnblockProblemCode is null ? "unblock.off" : "unblock.problem.short");
 
             // Named, not just "on". Which services are unblocked is decided on the server now, so
             // the only honest way for this line to say what it did is to repeat what came back.
@@ -1268,6 +1291,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(RouteText));
         Raise(nameof(UnblockText));
         Raise(nameof(UnblockTip));
+        Raise(nameof(UnblockProblem));
         Raise(nameof(GameText));
         Raise(nameof(PacketsText));
 
@@ -1436,6 +1460,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Unblock = status.Unblock;
         UnblockDetail = status.UnblockDetail;
         UnblockServices = status.UnblockServices;
+        UnblockProblemCode = status.UnblockProblemCode;
         PacketsSent = status.PacketsSent;
         PacketsReceived = status.PacketsReceived;
     }
@@ -1468,6 +1493,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Unblock = false;
         UnblockDetail = null;
         UnblockServices = [];
+        UnblockProblemCode = null;
 
         PacketsSent = 0;
         PacketsReceived = 0;

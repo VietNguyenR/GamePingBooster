@@ -37,6 +37,9 @@ internal static class StringsEn
         ["unblock.off"] = "Not enabled",
         ["unblock.tip.on"] = "Names this connection answers falsely are resolved over encrypted DNS instead, so these sites load normally. Downloads are not affected - they stay on your provider's own path, which is faster.",
         ["unblock.tip.off"] = "Name unblocking runs while you are connected - press Connect to turn it on. If you are connected and it is still off, the service keeps trying.",
+        ["unblock.problem.short"] = "Could not turn on - see below",
+        ["unblock.problem.dohRequired"] = "Unblocking is off: Windows on this PC is set to \"Require DNS over HTTPS (DoH)\", so the app cannot answer names for Steam and the PUBG lobby. To fix it, open Command Prompt with \"Run as administrator\", run reg delete \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient\" /v DoHPolicy /f, restart the PC and press Connect. If your company or school manages this PC, ask its IT to turn the policy off. Ping boosting through the relay still works.",
+        ["unblock.problem.notAsked"] = "Unblocking is off: Windows does not ask the app's name resolver - usually a VPN, antivirus or another DNS program holds DNS. Turn those off, then Disconnect and Connect again. Ping boosting through the relay still works.",
         ["main.games.tip"] = "See supported games",
 
         ["main.setup.needed"] =

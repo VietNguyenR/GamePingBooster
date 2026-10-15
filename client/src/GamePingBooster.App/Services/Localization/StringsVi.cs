@@ -38,6 +38,9 @@ internal static class StringsVi
         ["unblock.off"] = "Chưa bật",
         ["unblock.tip.on"] = "Những tên miền bị đường mạng này trả về địa chỉ giả sẽ được phân giải qua DNS mã hoá, nên các trang đó vào bình thường. Tải về không bị ảnh hưởng - vẫn đi đường của nhà mạng, vì đường đó nhanh hơn.",
         ["unblock.tip.off"] = "Mở chặn chỉ chạy khi đang kết nối - bấm Kết nối để bật. Nếu đã kết nối mà vẫn chưa bật, service sẽ tự thử lại.",
+        ["unblock.problem.short"] = "Không bật được - xem hướng dẫn bên dưới",
+        ["unblock.problem.dohRequired"] = "Chưa mở chặn được: Windows trên máy bạn đang đặt \"Bắt buộc DNS mã hoá (DoH)\", nên app không thể trả lời tên miền cho Steam và sảnh PUBG. Cách sửa: mở Command Prompt bằng \"Run as administrator\", chạy lệnh reg delete \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient\" /v DoHPolicy /f rồi khởi động lại máy và bấm Kết nối. Nếu máy do công ty hoặc trường quản lý, hãy nhờ bộ phận IT tắt chính sách này. Giảm ping qua máy chủ vẫn chạy bình thường.",
+        ["unblock.problem.notAsked"] = "Chưa mở chặn được: Windows không hỏi bộ phân giải tên của app - thường do VPN, phần mềm diệt virus hoặc phần mềm DNS khác đang giữ DNS. Hãy tắt các phần mềm đó rồi bấm Ngắt kết nối và Kết nối lại. Giảm ping qua máy chủ vẫn chạy bình thường.",
         ["main.games.tip"] = "Xem các game được hỗ trợ",
 
         ["main.setup.needed"] = "Chưa cấu hình máy chủ. Mở Cài đặt rồi nhập địa chỉ máy chủ và khoá của bạn.",
