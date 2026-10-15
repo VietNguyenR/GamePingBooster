@@ -1018,6 +1018,12 @@ internal static partial class Program
         Check("every other game is judged by the gap as before",
             SessionHold.AllowsRescan(pubg) && SessionHold.AllowsMove(pubg, sessionBegun: true) && SessionHold.AllowsRescan(null),
             "held");
+        Check("a game that holds its session waits for the move off a relay not for it before its routes go in",
+            SessionHold.RoutesWaitForMove(aniimo, relayServesGame: false), "routes in at once");
+        Check("  ...and not on a relay that carries it", !SessionHold.RoutesWaitForMove(aniimo, relayServesGame: true), "waited");
+        Check("every other game puts its routes in at once, on any relay",
+            !SessionHold.RoutesWaitForMove(pubg, relayServesGame: false) && !SessionHold.RoutesWaitForMove(null, relayServesGame: false),
+            "waited");
         var read = System.Text.Json.JsonSerializer.Deserialize(
             """{"games":[{"id":"aniimo","persistentSession":true},{"id":"pubg"}]}""",
             GamePingBooster.Core.Profiles.ProfileJsonContext.Default.ProfileBundle);

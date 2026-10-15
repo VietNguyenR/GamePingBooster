@@ -126,6 +126,16 @@ public static class SessionHold
     /// the game has sent to its servers since its routes went in.
     /// </summary>
     public static bool AllowsMove(GameEntry? game, bool sessionBegun) => !(Holds(game) && sessionBegun);
+
+    /// <summary>
+    /// Whether <paramref name="game"/>'s routes wait for the move off the relay in use, which does not carry it
+    /// (<paramref name="relayServesGame"/> false), instead of going in at once. Only for a game that holds its session:
+    /// routes in first let its login reach the tunnel during the seconds the move measures, the first packet opened the
+    /// session, and the move was dropped with the game held on the relay the operator took it off for its whole session
+    /// (Nghịch Thủy Hàn on Hong Kong, 2026-10-15). Waiting costs at most a connection opened meanwhile staying on the
+    /// line, which is what the player had without the booster. Every other game puts its routes in at once, as before.
+    /// </summary>
+    public static bool RoutesWaitForMove(GameEntry? game, bool relayServesGame) => Holds(game) && !relayServesGame;
 }
 
 /// <summary>

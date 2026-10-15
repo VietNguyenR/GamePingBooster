@@ -2204,7 +2204,14 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     if (_moveOffForGame)
                     {
                         _moveOffForGame = false;
-                        await RescanBetweenMatchesAsync(tunnel, ct, forGame: true).ConfigureAwait(false);
+                        try
+                        {
+                            await RescanBetweenMatchesAsync(tunnel, ct, forGame: true).ConfigureAwait(false);
+                        }
+                        finally
+                        {
+                            InstallRoutesAfterMove();
+                        }
                         continue;
                     }
                     await WatchForMatchGapAsync(tunnel, ct).ConfigureAwait(false);
@@ -3330,6 +3337,17 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     return;
                 }
 
+                if (_moveOffForGame && SessionHold.RoutesWaitForMove(detected, relayServesGame: false))
+                {
+                    // Its session must open on the relay it is moving to, never on this one - see RoutesWaitForMove.
+                    // The supervisor puts the routes in once the move is made or given up (InstallRoutesAfterMove).
+                    MarkRoutesIn(false);
+                    _routesAwaitMove = true;
+                    _log($"Detected {processName}.exe running - {detected.Name} holds one session for as long as it is " +
+                         $"open, so its routes go in after the move off {_relay?.Name}, on the relay that carries it.");
+                    return;
+                }
+
                 _log($"Detected {processName}.exe running - installing routes for {detected.Name}.");
                 InstallRoutes();
                 SetState(TunnelState.Connected, new StatusText("svc.accelerating",
@@ -3346,6 +3364,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                     _log("PUBG closed soon after it started - its cache is cleared at the next start.");
                 }
                 _pubgStartedAt = null;
+                _routesAwaitMove = false;
                 _discovery?.GameStopped();
                 _presence.Set(null);
                 if (_adapter is not null) _routes?.RemoveGameRoutes(_adapter.InterfaceIndex);
@@ -3376,6 +3395,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             return;
         }
         WarnAboutRoutedLandmarks(cidrs);
+        // Whoever puts them in - a reconnect included - ends the wait for a move (InstallRoutesAfterMove).
+        _routesAwaitMove = false;
         _routes.InstallGameRoutes(_adapter.InterfaceIndex, cidrs);
         _log($"Installed {cidrs.Count} routes into the virtual adapter.");
         // A session the game holds (SessionHold) starts again from here: at a game start, and after a reconnect, which

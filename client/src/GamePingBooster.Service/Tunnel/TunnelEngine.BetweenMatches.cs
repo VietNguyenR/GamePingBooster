@@ -122,6 +122,36 @@ internal sealed partial class TunnelEngine
     /// <summary>Set when the game now running is one the relay in use does not carry. Read by the supervisor.</summary>
     private volatile bool _moveOffForGame;
 
+    /// <summary>
+    /// The game now running holds its session and its routes are kept out until the move off a relay not for it is made
+    /// or given up - see SessionHold.RoutesWaitForMove. Cleared by whatever puts them in, or by the game closing.
+    /// </summary>
+    private volatile bool _routesAwaitMove;
+
+    /// <summary>
+    /// Puts in the routes held back for the move off a relay not for the game, on whichever tunnel the move left - the
+    /// relay moved to, or the one it stayed on, which is what the routes got at once before the wait existed.
+    /// </summary>
+    private void InstallRoutesAfterMove()
+    {
+        if (!_routesAwaitMove) return;
+        _routesAwaitMove = false;
+        if (_tunnel is null || !(_watcher?.IsGameRunning ?? false) || (_routes?.ActiveGameRouteCount ?? 0) > 0) return;
+        try
+        {
+            _log($"Installing routes for {_game?.Name} on {_relay?.Name} [{_relay?.Id}], now that the move is over.");
+            InstallRoutes();
+            SetState(TunnelState.Connected, new StatusText("svc.accelerating",
+                $"Accelerating {_game?.Name} through {_relay?.Name}", _game?.Name ?? "", _relay?.Name ?? ""));
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+            SetState(TunnelState.Faulted, new StatusText("svc.routeFailed", "Failed to update the routing table"));
+            _log($"Error while adding routes after the move: {ex}");
+        }
+    }
+
     /// <summary>When the game's routes last went in, on <see cref="NowMs"/>'s clock; 0 while none are in.</summary>
     private long _routesInAtMs;
 
