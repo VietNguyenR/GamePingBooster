@@ -159,64 +159,106 @@ internal static partial class Program
 
     /// <summary>
     /// The game's own probes before a match, through ProbeTap and into the record, byte for byte against
-    /// <see cref="ProbeRoundGolden"/> - the file the licence server's own check parses. PUBG's two Singapore
-    /// endpoints and one Korean, probed once a second for five seconds; one Singapore probe never answered; an
-    /// endpoint the profile does not know probed on the port the landmarks taught; a match server's packets on
-    /// another port ignored. GPB_WRITE_GOLDEN=1 rewrites it.
+    /// <see cref="ProbeRoundGolden"/> - the file the licence server's own check parses. The endpoints are the ones
+    /// PUBG probed in the owner's capture of 2026-10-15, after its 10-14 patch: none of them a landmark, rotating per
+    /// session, three or four packets each, named by ProbePlan.Pubg's Azure regions (the round trips are made up).
+    /// One Singapore probe never answered; an endpoint on port 8081 outside every declared region kept as unmapped,
+    /// with two sends 10 ms apart and one reply; a match server's packets on another port ignored. Then, apart from
+    /// the golden: a landmark still names itself, the profile's ranges name what the plan does not, and a game
+    /// without a plan still learns the port from a landmark. GPB_WRITE_GOLDEN=1 rewrites it.
     /// </summary>
     private static Task AProbeRoundRecordKeepsItsShape()
     {
-        var tap = new GamePingBooster.Service.Discovery.ProbeTap(
+        // The profile's own landmark lists (pubg-vn.json): the capture's endpoints are indexed after them.
+        IReadOnlyList<(string, IReadOnlyList<string>, IReadOnlyList<string>)> profile =
         [
-            ("asia-kr", ["20.196.246.162"]),
-            ("asia-sg", ["20.43.187.66", "20.43.187.70"]),
-        ]);
+            ("asia-sg", ["20.43.187.66", "20.43.187.70"], ["57.155.0.0/22"]),
+            ("asia-jp", [], []),
+            ("asia-kr", ["20.196.246.162", "20.214.91.184", "20.196.246.195"], []),
+        ];
+        var tap = new GamePingBooster.Service.Discovery.ProbeTap(profile, GamePingBooster.Service.Discovery.ProbePlan.Pubg);
         long Ticks(double ms) => (long)(ms / 1000 * System.Diagnostics.Stopwatch.Frequency);
         const long t0 = 1_000_000_000;
-        var sg1 = System.Net.IPAddress.Parse("20.43.187.66");
-        var sg2 = System.Net.IPAddress.Parse("20.43.187.70");
-        var kr = System.Net.IPAddress.Parse("20.196.246.162");
-        var unknown = System.Net.IPAddress.Parse("20.44.1.1");
-        var server = System.Net.IPAddress.Parse("20.196.10.10");
+        static System.Net.IPAddress Ip(string s) => System.Net.IPAddress.Parse(s);
 
-        // Before any landmark: port 8081 is not learned yet, so this one is not a probe.
-        tap.ObserveForTest(true, unknown, 8081, t0 - Ticks(500));
-        for (var i = 0; i < 5; i++)
+        // (endpoint, packets sent, round trip ms) in the order the game first probed them.
+        (string Address, int Sends, double Ms)[] probes =
+        [
+            ("57.155.2.179", 4, 38),
+            ("20.188.112.149", 4, 41),
+            ("20.41.114.247", 4, 97),
+            ("9.141.72.225", 3, 251),
+            ("20.52.0.2", 3, 255),
+            ("20.46.244.68", 3, 221),
+            ("20.118.232.98", 3, 226),
+            ("74.163.89.150", 3, 331),
+            ("191.233.3.60", 3, 336),
+        ];
+        var server = Ip("20.6.0.10");
+        var outside = Ip("203.0.113.9");
+        for (var i = 0; i < 4; i++)
         {
-            var at = t0 + Ticks(i * 1000);
-            tap.ObserveForTest(true, sg1, 8081, at);
-            if (i != 2) tap.ObserveForTest(false, sg1, 8081, at + Ticks(55 + i));
-            tap.ObserveForTest(true, sg2, 8081, at + Ticks(5));
-            tap.ObserveForTest(false, sg2, 8081, at + Ticks(5 + 58));
-            tap.ObserveForTest(true, kr, 8081, at + Ticks(10));
-            tap.ObserveForTest(false, kr, 8081, at + Ticks(10 + 100 + i));
-            tap.ObserveForTest(true, server, 27015, at + Ticks(20));
+            for (var p = 0; p < probes.Length; p++)
+            {
+                if (i >= probes[p].Sends) continue;
+                var at = t0 + Ticks(i * 1000 + p * 20);
+                var address = Ip(probes[p].Address);
+                tap.ObserveForTest(true, address, 8081, at);
+                // 20.188.112.149's third probe is never answered.
+                if (!(p == 1 && i == 2)) tap.ObserveForTest(false, address, 8081, at + Ticks(probes[p].Ms + i));
+            }
+            tap.ObserveForTest(true, server, 7777, t0 + Ticks(i * 1000 + 500));
+            tap.ObserveForTest(false, server, 7777, t0 + Ticks(i * 1000 + 540));
         }
-        tap.ObserveForTest(true, unknown, 8081, t0 + Ticks(6000));
-        tap.ObserveForTest(false, unknown, 8081, t0 + Ticks(6070));
         // Two sends 10 ms apart and one reply: paired with the later send, so 60 and not 70.
-        tap.ObserveForTest(true, unknown, 8081, t0 + Ticks(7000));
-        tap.ObserveForTest(true, unknown, 8081, t0 + Ticks(7010));
-        tap.ObserveForTest(false, unknown, 8081, t0 + Ticks(7070));
+        tap.ObserveForTest(true, outside, 8081, t0 + Ticks(5000));
+        tap.ObserveForTest(true, outside, 8081, t0 + Ticks(5010));
+        tap.ObserveForTest(false, outside, 8081, t0 + Ticks(5070));
 
         var matchAt = t0 + Ticks(30_000);
         var round = tap.Take(matchAt, receivesVerified: true,
-            (t0 + Ticks(40_000), new DateTimeOffset(2026, 10, 11, 8, 0, 40, TimeSpan.Zero)));
-        Check("a round is made from the landmarks' probes", round is not null);
+            (t0 + Ticks(40_000), new DateTimeOffset(2026, 10, 15, 8, 0, 40, TimeSpan.Zero)));
+        Check("a round is made from probes on the declared port, though none reached a landmark", round is not null);
         if (round is null) return Task.CompletedTask;
-        Check("the match is dated from the clock given", round.MatchUtc == new DateTimeOffset(2026, 10, 11, 8, 0, 30, TimeSpan.Zero), round.MatchUtc.ToString("o"));
-        Check("landmarks first, in the order first probed, then the unmapped endpoint; the match server is not a probe",
-            string.Join(",", round.Endpoints.Select(e => $"{e.Region ?? "?"}#{e.Index}")) == "asia-sg#0,asia-sg#1,asia-kr#0,?#0",
-            string.Join(",", round.Endpoints.Select(e => $"{e.Region ?? "?"}#{e.Index}")));
-        var first = round.Endpoints[0];
+        Check("the match is dated from the clock given", round.MatchUtc == new DateTimeOffset(2026, 10, 15, 8, 0, 30, TimeSpan.Zero), round.MatchUtc.ToString("o"));
+        var names = string.Join(",", round.Endpoints.Select(e => $"{e.Region ?? "?"}#{e.Index}"));
+        Check("every capture endpoint named by its Azure region, indexed after the region's landmarks, in the order " +
+              "first probed, then the unmapped one; the match server is not a probe",
+            names == "asia-sg#2,asia-sg#3,asia-kr#3,eu-de#0,eu-de#1,us-central#0,us-central#1,sa-br#0,sa-br#1,?#0", names);
+        var lossy = round.Endpoints[1];
         Check("a probe never answered is lost, and the rest are paired with their own send",
-            first is { Sent: 5, Received: 4, Answered: 4, MinMs: >= 54.9 and <= 55.1, MaxMs: >= 58.9 and <= 59.1 }, $"{first}");
-        var unmapped = round.Endpoints[3];
-        Check("an unmapped endpoint counts only after the port is learned, and a reply pairs with the latest send",
-            unmapped is { Sent: 3, Answered: 2, MinMs: >= 59.9 and <= 60.1 }, $"{unmapped}");
+            lossy is { Sent: 4, Received: 3, Answered: 3, MinMs: >= 40.9 and <= 41.1, MaxMs: >= 43.9 and <= 44.1 }, $"{lossy}");
+        var unmapped = round.Endpoints[^1];
+        Check("an endpoint on the probe port outside every region is kept, and a reply pairs with the latest send",
+            unmapped is { Region: null, Sent: 2, Answered: 1, MinMs: >= 59.9 and <= 60.1 }, $"{unmapped}");
         Check("the tap is empty after a round is taken", tap.Take(matchAt, true) is null);
 
-        var meta = new QualityMeta("0.4.7", "pubg", "sg-3", "vn-5-sg3", "Korea (Seoul)", "wired");
+        // Apart from the golden: an old landmark keeps its own index; an address no Azure region of the plan holds
+        // is named by the profile's ranges; and on the probe port with no known region at all, no round is made.
+        var other = new GamePingBooster.Service.Discovery.ProbeTap(
+            [("asia-sg", ["20.43.187.66", "20.43.187.70"], []), ("asia-jp", [], ["198.51.100.0/24"])],
+            GamePingBooster.Service.Discovery.ProbePlan.Pubg);
+        other.ObserveForTest(true, Ip("20.43.187.70"), 8081, t0);
+        other.ObserveForTest(true, Ip("198.51.100.7"), 8081, t0 + Ticks(10));
+        var named = other.Take(matchAt, true)?.Endpoints.Select(e => $"{e.Region}#{e.Index}");
+        Check("a landmark names its own index, and the profile's ranges name what the plan does not",
+            named is not null && string.Join(",", named) == "asia-sg#1,asia-jp#0", named is null ? "no round" : string.Join(",", named));
+        other.ObserveForTest(true, outside, 8081, t0);
+        Check("probes to no known region alone are not a round", other.Take(matchAt, true) is null);
+
+        // A game with no plan: the port is still learned from a landmark, as before the patch.
+        var learnt = new GamePingBooster.Service.Discovery.ProbeTap([("asia-sg", ["20.43.187.66"], [])]);
+        learnt.ObserveForTest(true, outside, 9000, t0);
+        learnt.ObserveForTest(true, Ip("20.43.187.66"), 9000, t0 + Ticks(10));
+        learnt.ObserveForTest(true, outside, 9000, t0 + Ticks(20));
+        var learned = learnt.Take(matchAt, true);
+        Check("without a plan the port is learned from a landmark, and only later packets on it count",
+            learned is { Endpoints: [{ Region: "asia-sg", Index: 0 }, { Region: null, Sent: 1 }] },
+            learned is null ? "no round" : string.Join(",", learned.Endpoints.Select(e => $"{e.Region ?? "?"}#{e.Index} {e.Sent}")));
+        Check("no plan and no landmark: the tap can never match",
+            !new GamePingBooster.Service.Discovery.ProbeTap([("asia-sg", [], ["57.155.0.0/22"])]).CanMatch);
+
+        var meta = new QualityMeta("0.5.1", "pubg", "sg-3", "vn-6-sg3", "Southeast Asia (Singapore)", "wired");
         var buffer = new MemoryStream();
         using (var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions { Indented = true }))
         {

@@ -28,6 +28,8 @@
     <Compile Include="..\GamePingBooster.Service\Discovery\KernelNetworkTrace.cs" Link="Discovery\KernelNetworkTrace.cs" />
     <Compile Include="..\GamePingBooster.Service\Discovery\FlowTable.cs" Link="Discovery\FlowTable.cs" />
     <Compile Include="..\GamePingBooster.Service\Discovery\ProbeTap.cs" Link="Discovery\ProbeTap.cs" />
+    <Compile Include="..\GamePingBooster.Service\Discovery\ProbePlan.cs" Link="Discovery\ProbePlan.cs" />
+    <Compile Include="..\GamePingBooster.Service\Discovery\ProbeRegionTable.cs" Link="Discovery\ProbeRegionTable.cs" />
     <Compile Include="..\GamePingBooster.Service\Discovery\SelfTest.cs" Link="Discovery\SelfTest.cs" />
     <Compile Include="..\GamePingBooster.Service\Discovery\Destinations.cs" Link="Discovery\Destinations.cs" />
   </ItemGroup>

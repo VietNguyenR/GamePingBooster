@@ -15,11 +15,16 @@ namespace GamePingBooster.Service.Discovery;
 /// be told apart: Singapore slow or silent on the line (a network cause - route the probes), or Singapore fast
 /// and the game chose Korea anyway (matchmaking, nothing a route changes).
 ///
-/// What counts as a probe. The profile's landmarks for the game ARE its probe endpoints (that is what a landmark
-/// is for PUBG), so a packet to or from one of them is a probe, and the remote port it used is learned from it. A
-/// packet on a learned port to an address that is not a landmark is kept too, as unmapped: the game probing an
-/// endpoint the profile does not know - a new region, or a moved one - is a finding of its own. Nothing about a
-/// port is written down here; a game whose landmarks are not probe endpoints simply never matches.
+/// What counts as a probe. A packet on the game's declared probe port (<see cref="ProbePlan"/>, PUBG UDP 8081), or
+/// to or from one of the profile's landmarks - for a game without a plan the landmarks ARE its probe endpoints, and
+/// the port is learned from them as before. Since PUBG's 2026-10-14 patch the endpoints rotate per session, so a
+/// landmark is no longer how a probe is recognised, only one way of naming it.
+///
+/// Where an endpoint is. Resolved once a round is taken, first match wins: an exact landmark (its region, and its
+/// place in that region's list as the index); a region of the plan, by the Azure prefixes it publishes; a region of
+/// the profile, by its ranges. A resolved endpoint that is not a landmark is indexed after that region's landmarks,
+/// so an index names one endpoint in a round. Anything else on the port is kept as unmapped (null region) - the game
+/// probing somewhere none of these know is a finding of its own. Resolving names only: no probe endpoint is routed.
 ///
 /// The round trip. ETW gives each send and receive with a QPC timestamp, not a pairing. A receive is paired with
 /// the latest send to the same endpoint before it that no earlier receive has taken, within <see cref="MaxRttMs"/>.
@@ -49,14 +54,21 @@ internal sealed class ProbeTap
 
     private readonly object _gate = new();
     private readonly Dictionary<uint, (string Region, int Index)> _landmarks;
+    private readonly Dictionary<string, int> _landmarkCounts = [];
+    private readonly ProbePlan? _plan;
+    private readonly (uint Start, uint End, string Region)[] _profileRanges;
     private readonly HashSet<ushort> _ports = [];
     private readonly Queue<Event> _events = new();
     private volatile bool _hasPorts;
 
-    public ProbeTap(IEnumerable<(string Region, IReadOnlyList<string> Landmarks)> regions)
+    /// <param name="regions">The profile's regions: their landmarks, and their ranges for naming an endpoint.</param>
+    /// <param name="plan">The game's declared probing, or null to learn the port from the landmarks alone.</param>
+    public ProbeTap(IEnumerable<(string Region, IReadOnlyList<string> Landmarks, IReadOnlyList<string> Cidrs)> regions,
+        ProbePlan? plan = null)
     {
         _landmarks = [];
-        foreach (var (region, landmarks) in regions)
+        var ranges = new List<(uint, uint, string)>();
+        foreach (var (region, landmarks, cidrs) in regions)
         {
             for (var i = 0; i < landmarks.Count; i++)
             {
@@ -65,24 +77,32 @@ internal sealed class ProbeTap
                     _landmarks.TryAdd(ToUInt(address), (region, i));
                 }
             }
+            _landmarkCounts[region] = landmarks.Count;
+            foreach (var cidr in cidrs)
+            {
+                if (ProbePlan.Range(cidr) is { } range) ranges.Add((range.Start, range.End, region));
+            }
         }
+        _profileRanges = ProbePlan.Disjoint(ranges);
+        _plan = plan;
     }
 
-    /// <summary>Whether the game has any IPv4 landmark - without one nothing can ever match.</summary>
-    public bool HasLandmarks => _landmarks.Count > 0;
+    /// <summary>Whether anything can ever match: a declared probe port, or an IPv4 landmark to learn one from.</summary>
+    public bool CanMatch => _plan is not null || _landmarks.Count > 0;
 
     /// <summary>One of the game's IPv4 UDP packets, already decoded: the far end, its port, and the QPC time.</summary>
     public void Observe(bool sent, uint remote, ushort remotePort, long timestamp)
     {
         var landmark = _landmarks.ContainsKey(remote);
-        if (!landmark && !_hasPorts) return;
+        var declared = _plan is { } plan && plan.Port == remotePort;
+        if (!landmark && !declared && !_hasPorts) return;
         lock (_gate)
         {
             if (landmark)
             {
                 if (_ports.Add(remotePort)) _hasPorts = true;
             }
-            else if (!_ports.Contains(remotePort))
+            else if (!declared && !_ports.Contains(remotePort))
             {
                 return;
             }
@@ -102,7 +122,8 @@ internal sealed class ProbeTap
 
     /// <summary>
     /// The probing held so far, as one round ending at <paramref name="matchAt"/> (QPC), and empties the tap. Null
-    /// when nothing in <see cref="Window"/> before it reached a landmark - unmapped traffic alone is not a round.
+    /// when nothing in <see cref="Window"/> before it reached an endpoint of a known region - unmapped traffic alone
+    /// is not a round.
     /// </summary>
     /// <param name="clock">This moment as (QPC, UTC), to date the match; the real clock when null. For tests.</param>
     public ProbeRound? Take(long matchAt, bool receivesVerified, (long Qpc, DateTimeOffset Utc)? clock = null)
@@ -115,21 +136,27 @@ internal sealed class ProbeTap
             events = [.. _events];
             _events.Clear();
         }
-        return Summarise(events, matchAt, matchUtc, receivesVerified, _landmarks);
+        return Summarise(events, matchAt, matchUtc, receivesVerified);
     }
 
-    private static ProbeRound? Summarise(Event[] all, long matchAt, DateTimeOffset matchUtc, bool receivesVerified,
-        IReadOnlyDictionary<uint, (string Region, int Index)> landmarks)
+    /// <summary>The region <paramref name="address"/> is named by, landmark first - see the class summary.</summary>
+    private string? RegionOf(uint address) =>
+        _landmarks.TryGetValue(address, out var landmark) ? landmark.Region
+        : _plan?.RegionOf(address) ?? ProbePlan.Find(_profileRanges, address);
+
+    private ProbeRound? Summarise(Event[] all, long matchAt, DateTimeOffset matchUtc, bool receivesVerified)
     {
         var from = matchAt - (long)(Window.TotalSeconds * Stopwatch.Frequency);
         var events = all.Where(e => e.Timestamp >= from && e.Timestamp <= matchAt).OrderBy(e => e.Timestamp).ToArray();
-        if (!events.Any(e => landmarks.ContainsKey(e.Address))) return null;
+        var regions = events.Select(e => e.Address).Distinct().ToDictionary(a => a, RegionOf);
+        if (!regions.Values.Any(r => r is not null)) return null;
 
         var maxTicks = (long)(MaxRttMs / 1000 * Stopwatch.Frequency);
         var endpoints = new List<ProbeEndpoint>();
         var unmapped = 0;
+        var nextIndex = new Dictionary<string, int>(_landmarkCounts);
         foreach (var group in events.GroupBy(e => e.Address)
-                     .OrderBy(g => landmarks.ContainsKey(g.Key) ? 0 : 1).ThenBy(g => g.First().Timestamp))
+                     .OrderBy(g => regions[g.Key] is null ? 1 : 0).ThenBy(g => g.First().Timestamp))
         {
             if (endpoints.Count >= MaxEndpoints) break;
 
@@ -157,10 +184,18 @@ internal sealed class ProbeTap
             }
 
             rtts.Sort();
-            var known = landmarks.TryGetValue(group.Key, out var where);
+            var region = regions[group.Key];
+            int index;
+            if (_landmarks.TryGetValue(group.Key, out var landmark)) index = landmark.Index;
+            else if (region is null) index = unmapped++;
+            else
+            {
+                index = nextIndex.GetValueOrDefault(region);
+                nextIndex[region] = index + 1;
+            }
             endpoints.Add(new ProbeEndpoint(
-                known ? where.Region : null,
-                known ? where.Index : unmapped++,
+                region,
+                index,
                 Address: ToAddress(group.Key),
                 Sent: sends.Count,
                 Received: received,

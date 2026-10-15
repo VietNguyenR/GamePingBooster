@@ -263,12 +263,14 @@ internal sealed class GameDestinationRecorder : IDisposable
             .Where(a => a is not null).Select(a => a!).ToHashSet();
 
         /// <summary>
-        /// The game's probes to its landmarks, for <see cref="EmitProbes"/>. None for a game without landmarks, or
-        /// whose landmarks are routed (CS2): there the "landmark" is the match server itself, not a probe endpoint.
+        /// The game's own datacentre probes, for <see cref="EmitProbes"/>: on its declared probe port (ProbePlan), or
+        /// learned from its landmarks. None for a game with neither, or whose landmarks are routed (CS2): there the
+        /// "landmark" is the match server itself, not a probe endpoint.
         /// </summary>
         private readonly ProbeTap? _probes = owner._probeRound is null || game.LandmarksRouted
             ? null
-            : new ProbeTap(game.Regions.Select(r => (r.Id, (IReadOnlyList<string>)r.Landmarks))) is { HasLandmarks: true } tap ? tap : null;
+            : new ProbeTap(game.Regions.Select(r => (r.Id, (IReadOnlyList<string>)r.Landmarks, (IReadOnlyList<string>)r.Cidrs)),
+                ProbePlan.For(game.Id)) is { CanMatch: true } tap ? tap : null;
 
         /// <summary>Settled once from the profile, so every comparison in this session uses one number
         /// and the log line that names it cannot drift from the one that decides.</summary>
@@ -674,9 +676,12 @@ internal sealed class GameDestinationRecorder : IDisposable
             var round = _probes.Take(matchAt, owner._held.Rules?.ReceiveRemoteIsDestination is not null);
             if (round is null) return;
 
+            // A probe endpoint inside the game's own ranges goes through the tunnel while the game is routed - the
+            // one thing a probe must never do (docs: probes-use-real-isp-path). Said here, where it can be seen.
             var parts = round.Endpoints.Select(e =>
-                $"{e.Region ?? "unmapped " + Destinations.Mask(e.Address)}: {e.Answered}/{e.Sent}" +
-                (e.MedianMs is { } median ? $" {median:F0} ms" : ""));
+                $"{e.Region ?? "unmapped " + Destinations.Mask(e.Address)}[{e.Index}]: {e.Answered}/{e.Sent}" +
+                (e.MedianMs is { } median ? $" {median:F0} ms" : "") +
+                (_ranges.Any(n => n.Contains(e.Address)) ? " (in a routed range)" : ""));
             _log($"Discovery: {Game.Name}'s own probes before this match ({matchOn}), last " +
                  $"{round.FirstSecondsBeforeMatch:F0} s: {string.Join(", ", parts)}" +
                  (round.ReceivesVerified ? "." : " - receives unverified on this Windows, sends only."));

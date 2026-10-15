@@ -371,6 +371,26 @@
       "note": "Captured 2026-10-14 from Hanoi (FPT), three matches. Gameplay is UDP to AWS on port 4192, about 53 packets/s:\n  54.115.65.157   155015 / 2906 s   match\n  54.115.66.91    108503 / 2008 s   match\n  54.115.5.59      56882 / 1071 s   match\n54.115.0.0/16 is published by AWS only as region GLOBAL, so awsRegions cannot vouch for it: every observed address lands in observed-wardogs-unverified.txt and the ranges come from manual-cidrs-wardogs.txt instead, where the evidence for Singapore is written down. They are the ANNOUNCED prefixes, not /20s, because AS16509 announces neighbouring parts of the /16 from the US. Nothing in them answers ICMP, UDP 4192 or TCP.\n\nNot routed: each match also holds a 10/s UDP stream to Unity/Multiplay AS35028 (85.236.102.48 :54008, .128 :54010, .54 :54018), the same /24 PUBG, R6 and Overwatch show as a trickle - that is Vivox voice, ~250 ms from Hanoi and 13-20 ms from the OVH box in Canada, so US East. TCP 443 goes to OVH/Scaleway/Azure/Cloudflare backends.\n\nREGIONS: the game measures its 13 server-browser regions itself, over HTTPS to DynamoDB in each AWS region (35.71.x and 3.218.x in tcp-sessions-wardogs.txt): ap-southeast-1 = Asia (South East), ap-northeast-2 = Asia (East), ap-south-1 = Asia (West), ap-southeast-2 = Oceania, us-east-1/us-east-2/us-west-2/ca-central-1 = North America, sa-east-1, and eu-central-1/eu-west-2/eu-south-1/eu-north-1 = Europe. Only Singapore has been seen. Asia (East) and (West) get a region only once one of their match servers is observed - from the HK trace 54.115.16.0/22 sits with Mumbai, but nobody has played there.\n\nLANDMARKS 35.71.118.129 and 35.71.118.133 are DynamoDB ap-southeast-1, the very endpoints the game pings to show its Asia (South East) number, so the landmark reads like the in-game ping. Min RTT 2026-10-14: sg-2 1.5, sg-3 0.9, hk-3 35, hk-2 35, vn 34, vn-3 21, vn-4 40, vn-5 38, PC (FPT) 42. Ready for the other regions when they are needed: 35.71.109.0 (Seoul, 78 from the PC) and 35.71.100.1 (Mumbai, 105)."
     },
 
+    "aion2": {
+      "name": "Aion 2",
+      "watchProcess": "AION2",
+      "tcpGameplay": true,
+      "persistentSession": true,
+      "probePort": null,
+      "observedPath": "observed-aion2.txt",
+      "landmarkPath": null,
+      "tcpSessionsPath": "tcp-sessions-aion2.txt",
+      "unverifiedPath": "observed-aion2-unverified.txt",
+      "manualCidrPath": "manual-cidrs-aion2.txt",
+      "profilePath": "../../profiles/aion2-vn.json",
+      "awsRegions": [],
+      "azureRegions": [
+        "japaneast"
+      ],
+      "asns": [],
+      "note": "Captured 2026-10-15 (two sessions, two lines, region Asia picked in game; tcp-sessions-aion2.txt). Gameplay is ONE long TCP 13328 connection to Azure japaneast (4.189.17.19, ~25 packets/s outbound, the character's world). Everything else in the capture is NOT the server list: 20.48.104.27:13700 (Azure japaneast, a few packets) is the world-list/login gateway, 443/80 go to NC (AS142005 KR), AWS ap-east-1/ap-northeast-2, CloudFront, Akamai - web/API/CDN, never routed. Global Aion 2 hosts its Asia cluster in Japan, so other Asia worlds are expected elsewhere in AzureCloud.japaneast; only one has been seen, the rest arrive through TCP discovery (/admin/discovery) or a capture on another world.\n\nLANDMARKS (asia-jp, outside the routed /20 on purpose - a landmark inside a routed prefix is probed through the tunnel): 20.210.0.1 + 48.210.0.1 (4.189.0.1 dropped 2026-10-15: the second world 4.189.4.69 made discovery publish 4.189.0.0/21 over it). Min RTT 2026-10-15, server = TCP 13328 handshake (it does not answer ICMP from VN boxes): hk-3 server 46 / 20.210.0.1 45.8 / 4.189.0.1 46.4; sg 70 / 68.7 / 68.8; vn 88 / 90 / 87.5; vn-3 94-98 / 98 / 114; vn-4 105-113 / 114 / 119; vn-5 75.5 / 76 / 77; PC 108 ICMP / 106 / 109. 4.189.17.20 (next to the server) tracks best but is inside the /20. 20.48.0.1 and the gateway read ~10 ms LOW from vn - rejected. 2026-10-15 re-measure incl. world 2 (4.189.4.69, same path as world 1 within 1 ms): 48.210.0.1 tracks both within ~1 ms on hk-3/sg/vn/vn-3/vn-4/vn-5; 20.210.0.1 is +8 on vn-4."
+    },
+
     "goosegooseduck": {
       "name": "Goose Goose Duck",
       "watchProcess": "Goose Goose Duck",
