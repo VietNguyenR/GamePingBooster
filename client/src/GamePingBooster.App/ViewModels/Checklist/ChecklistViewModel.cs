@@ -29,6 +29,7 @@ public sealed class ChecklistViewModel : INotifyPropertyChanged
         _items =
         [
             new DnsCheck(),
+            new NetworkCheck(),
         ];
         foreach (var item in _items) item.PropertyChanged += OnItemChanged;
 
