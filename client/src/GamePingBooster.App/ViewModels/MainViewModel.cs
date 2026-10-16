@@ -1263,6 +1263,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// <summary>Whether the service sends connection quality after each match; null from a service too old to.</summary>
     public bool? QualitySharing { get; private set; }
 
+    /// <summary>Whether the service writes the game's TCP connections to its log; null from a service too old to.</summary>
+    public bool? LobbyWatch { get; private set; }
+
     /// <summary>
     /// Says everything on this screen again in the language just chosen.
     ///
@@ -1450,6 +1453,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         LicenceRefusal = Say(status.LicenceRefusalCode, status.LicenceRefusalArgs, status.LicenceRefusal);
         ProfileSource = status.ProfileSource;
         QualitySharing = status.QualitySharing;
+        LobbyWatch = status.LobbyWatch;
         DevicePublicKey = status.DevicePublicKey;
         HasToken = status.HasToken;
         RefreshSignedIn();

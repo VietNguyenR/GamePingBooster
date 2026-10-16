@@ -154,7 +154,10 @@ public sealed class CommandMessage
     /// <summary>quality-ack: the ids of the records to remove from the outbox. 32 hex characters each.</summary>
     [JsonPropertyName("qualityIds")] public List<string>? QualityIds { get; set; }
 
-    /// <summary>set-quality-sharing: whether this installation sends connection quality after each match.</summary>
+    // set-lobby-watch -> write the game's TCP connections to the service log, or stop (Enabled). Logs only.
+
+    /// <summary>set-quality-sharing: whether this installation sends connection quality after each match;
+    /// set-lobby-watch: whether the game's TCP connections are logged.</summary>
     [JsonPropertyName("enabled")] public bool? Enabled { get; set; }
 }
 
@@ -577,6 +580,12 @@ public sealed class StatusMessage
     /// Additive, so no contract version bump.
     /// </summary>
     [JsonPropertyName("qualitySharing")] public bool? QualitySharing { get; set; }
+
+    /// <summary>
+    /// Whether the game's TCP connections are written to the service log (set-lobby-watch), or null from a service
+    /// too old to have the switch - the UI then hides it. Additive, so no contract version bump.
+    /// </summary>
+    [JsonPropertyName("lobbyWatch")] public bool? LobbyWatch { get; set; }
 
     /// <summary>
     /// quality-outbox only: the records to upload, oldest first, a batch at a time. Null on every

@@ -110,6 +110,22 @@ internal sealed class UnblockDns : IAsyncDisposable
     /// <summary>The split proxy's open connections, one clause per name and path (SplitProxy.DescribeOpen); null for none.</summary>
     public string? DescribeLobbyConnections() => _resolver?.Split?.DescribeOpen();
 
+    /// <summary>
+    /// What a connection of the game goes to, for the lobby watch: the name the resolver gave the address out for (and
+    /// "line" or "relay"), or for one to the split proxy the name and path it carries. Null when not known.
+    /// </summary>
+    public Tunnel.LobbyTcpWatch.Named? NameOfConnection(IPEndPoint remote, int localPort)
+    {
+        if (_resolver is not { } resolver) return null;
+        if (SplitProxy.IsOurs(remote.Address))
+            return resolver.Split?.CarriedFor(localPort) is { } carried
+                ? new(carried.Name, carried.Path, carried.Down, carried.Up, carried.EndedBy)
+                : null;
+        return resolver.AnsweredFor(remote.Address) is { } named
+            ? new(named.Name, named.ViaTunnel ? "the relay" : "the line", null, null, null)
+            : null;
+    }
+
     /// <summary>One line for the status pipe, so the UI can say something true about this half of the product.</summary>
     public string Detail
     {

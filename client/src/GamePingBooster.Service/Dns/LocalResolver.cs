@@ -165,6 +165,24 @@ internal sealed class LocalResolver : IAsyncDisposable
     /// <summary>Steam names the line cuts that the split proxy carries - see UnblockApp.SplitsBeforeTunnel.</summary>
     private readonly ConcurrentDictionary<string, byte> _splitFirst = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Which name each address was last given out for, and whether through the tunnel - so the lobby watch
+    /// (LobbyTcpWatch) can say "prod-live-images" instead of a bare CloudFront address. A CDN edge serves many names; the
+    /// last answer wins, which is the name the game most likely just connected for.
+    /// </summary>
+    private readonly ConcurrentDictionary<IPAddress, (string Name, bool ViaTunnel)> _answered = new();
+    private const int MaxAnswered = 4096;
+
+    /// <summary>The name an address was last answered for, and whether through the tunnel; null for one never answered.</summary>
+    public (string Name, bool ViaTunnel)? AnsweredFor(IPAddress address) =>
+        _answered.TryGetValue(address, out var named) ? named : null;
+
+    private void RememberAnswer(string name, IEnumerable<IPAddress> addresses, bool viaTunnel)
+    {
+        if (_answered.Count > MaxAnswered) _answered.Clear();
+        foreach (var address in addresses) _answered[address] = (name, viaTunnel);
+    }
+
     /// <summary>How long a cut name's answer waits for the split verdict: a probe is 3 s at most (SplitProxy.ProbeHandshake).</summary>
     private static readonly TimeSpan SplitJudgeWait = TimeSpan.FromSeconds(4);
 
@@ -447,6 +465,7 @@ internal sealed class LocalResolver : IAsyncDisposable
 
                 if (edges is not null)
                 {
+                    RememberAnswer(name, edges, viaTunnel);
                     Interlocked.Increment(ref _scoped);
                     var built = DnsWire.BuildAnswer(query, edges, viaTunnel ? _tunnelEdges!.AnswerTtl : WorkingEdges.AnswerTtlSeconds);
                     DnsWire.WriteId(built, id);
@@ -464,6 +483,7 @@ internal sealed class LocalResolver : IAsyncDisposable
                 try
                 {
                     var addresses = DnsWire.Parse(answer, answer.Length).Addresses;
+                    RememberAnswer(name, addresses, viaTunnel);
                     if (viaTunnel) _routes!.Route(name, [.. addresses]);
                     else _guard!.AnsweredForLine(name, [.. addresses]);
                 }

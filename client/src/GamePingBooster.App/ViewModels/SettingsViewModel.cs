@@ -22,13 +22,15 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private readonly bool _alreadyConfigured;
 
     public SettingsViewModel(IEnumerable<string>? currentEndpoints, bool alreadyConfigured,
-        string? currentLicenceUrl = "https://gamepingbooster.com", bool? qualitySharing = null)
+        string? currentLicenceUrl = "https://gamepingbooster.com", bool? qualitySharing = null, bool? lobbyWatch = null)
     {
         _endpoints = string.Join(Environment.NewLine, currentEndpoints ?? []);
         _alreadyConfigured = alreadyConfigured;
         _licenceUrl = currentLicenceUrl ?? string.Empty;
         _initialQualitySharing = qualitySharing;
         _qualitySharing = qualitySharing ?? true;
+        _initialLobbyWatch = lobbyWatch;
+        _lobbyWatch = lobbyWatch ?? false;
 
         // Kept so Save can tell whether there is anything for the service to do. See
         // RelaySettingsChanged.
@@ -72,6 +74,23 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     /// <summary>Only sent when it moved, so saving relay settings never touches it by accident.</summary>
     public bool QualitySharingChanged => _initialQualitySharing is { } initial && initial != QualitySharing;
+
+    /// <summary>
+    /// Whether the service writes the game's lobby, store and image connections to its log - a diagnostic, off by
+    /// default. Read back from the service; hidden when talking to a service too old to have it.
+    /// </summary>
+    private readonly bool? _initialLobbyWatch;
+    private bool _lobbyWatch;
+    public bool LobbyWatch
+    {
+        get => _lobbyWatch;
+        set { if (Set(ref _lobbyWatch, value)) Saved = false; }
+    }
+
+    public bool ShowLobbyWatch => _initialLobbyWatch is not null;
+
+    /// <summary>Only sent when it moved, like <see cref="QualitySharingChanged"/>.</summary>
+    public bool LobbyWatchChanged => _initialLobbyWatch is { } initial && initial != LobbyWatch;
 
     /// <summary>
     /// Where to sign in. Empty means self-hosted, which is the default.

@@ -69,6 +69,49 @@ internal static unsafe partial class TcpEStats
         return new Counters(DataSegsOut: u[1], DataSegsIn: u[3], DataBytesOut: u[0], DataBytesIn: u[2]);
     }
 
+    // TCP_ESTATS_PATH_ROD_v0: forty ULONGs, FastRetran first, SpuriousRtoDetections last.
+    private const int TcpConnectionEstatsPath = 3;
+    private const int PathRodSize = 160;
+
+    /// <summary>
+    /// How the path treats one connection: retransmitted segments, retransmission timeouts (the sender gave up waiting
+    /// for an ack - a black hole or a cut, not a slow server), smoothed RTT and MSS in ms and bytes.
+    /// </summary>
+    internal readonly record struct PathCounters(uint PktsRetrans, uint Timeouts, uint SmoothedRttMs, uint CurMss);
+
+    /// <summary>Switches path collection on for one connection; returns the Win32 error, 0 when it is on.</summary>
+    public static uint EnablePath(IPEndPoint local, IPEndPoint remote)
+    {
+        var row = RowFor(local, remote);
+        byte enable = 1;   // TCP_ESTATS_PATH_RW_v0 { BOOLEAN EnableCollection }
+        try
+        {
+            return SetPerTcpConnectionEStats(in row, TcpConnectionEstatsPath, &enable, 0, 1, 0);
+        }
+        catch (Exception)
+        {
+            return uint.MaxValue;
+        }
+    }
+
+    /// <summary>The connection's path counters, or null when Windows has none for it.</summary>
+    public static PathCounters? ReadPath(IPEndPoint local, IPEndPoint remote)
+    {
+        var row = RowFor(local, remote);
+        var rod = stackalloc byte[PathRodSize];
+        try
+        {
+            var error = GetPerTcpConnectionEStats(in row, TcpConnectionEstatsPath, null, 0, 0, null, 0, 0, rod, 0, PathRodSize);
+            if (error != 0) return null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+        var u = (uint*)rod;
+        return new PathCounters(PktsRetrans: u[5], Timeouts: u[1], SmoothedRttMs: u[27], CurMss: u[36]);
+    }
+
     /// <summary>MIB_TCPROW for a connection: addresses as the table holds them, ports in network order. The state is
     /// not part of the lookup.</summary>
     private static TcpConnections.Row RowFor(IPEndPoint local, IPEndPoint remote) => new()

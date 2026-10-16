@@ -174,6 +174,11 @@ internal static class StringsVi
             "Ping, các cú giật và chỗ sinh ra mỗi cú giật đó - mạng nhà bạn, đường tới máy chủ, bản thân máy chủ, hay máy " +
             "chủ game - kèm máy chủ và game đang dùng. Không gửi địa chỉ IP, không gửi gì về các phần mềm khác. Chỉ gửi " +
             "giữa các trận, không bao giờ gửi lúc đang chơi.",
+        ["settings.lobbyWatch"] = "Ghi log kết nối sảnh game (chẩn đoán)",
+        ["settings.lobbyWatch.hint"] =
+            "Ghi từng kết nối game mở tới sảnh, cửa hàng và hình ảnh vào log của dịch vụ, để tìm nguyên nhân khi sảnh " +
+            "tải chậm hay icon bị trắng. Chỉ bật khi được hỗ trợ yêu cầu - log sẽ dài hơn nhiều. Không thay đổi gì " +
+            "với game hay kết nối của bạn.",
         ["settings.language"] = "Ngôn ngữ",
         ["settings.language.hint"] = "Đổi là áp dụng ngay. Chỉ đổi ngôn ngữ của app, không đụng gì tới game.",
         ["settings.saved"] = "Đã lưu. Bấm Bắt đầu tăng tốc ở cửa sổ chính.",

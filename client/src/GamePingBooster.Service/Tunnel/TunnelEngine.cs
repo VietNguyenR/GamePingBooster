@@ -679,6 +679,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             phases.Mark("profile");
             _game = ChooseGameForConnect(gameId);
             GameServerTally.TcpGameplay(_game);
+            GameServerTally.ProbePort(_game);
             var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
 
             // Every relay compares the handshake's timestamp with its own clock, so a clock outside
@@ -3879,6 +3880,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             ProfileUpdatedAt = LastProfileSync()?.ToUnixTimeSeconds(),
             ProfileHashes = new Dictionary<string, string>(_profileHashes, StringComparer.Ordinal),
             QualitySharing = _config.ShareQuality,
+            LobbyWatch = LobbyWatchOn,
         };
     }
 
@@ -4144,6 +4146,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         }
         _game = game;
         GameServerTally.TcpGameplay(game);
+        GameServerTally.ProbePort(game);
 
         // The other tunnels were planned for the previous game's regions. The supervisor closes them before anything
         // else it does, and before a move to a relay that carries this game.

@@ -124,6 +124,18 @@ public sealed class ServiceConfig
     public bool? DiscoverDestinations { get; set; }
 
     /// <summary>
+    /// Whether the game's TCP connections - lobby, store, images - are written to the log per name while it runs
+    /// (LobbyTcpWatch). A diagnostic: it helps nobody's game, it makes the log longer and reads the TCP table twice a
+    /// second. OFF unless switched on, by the owner's decision on 2026-10-16; the switch is in Settings, for a player
+    /// whose lobby is slow and whose log we want to read.
+    ///
+    /// Nullable and never written while unset, for the reason DiscoverDestinations gives.
+    /// </summary>
+    [JsonPropertyName("lobbyWatch")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? LobbyWatch { get; set; }
+
+    /// <summary>
     /// Whether blocked names are answered over encrypted DNS - see UnblockDns.
     ///
     /// ON unless switched off, and NOT tied to the tunnel. It shares nothing with a connection:

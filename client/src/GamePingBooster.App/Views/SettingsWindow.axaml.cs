@@ -94,6 +94,10 @@ public partial class SettingsWindow : SurfaceWindow
             {
                 await _pipe.SendAsync(new CommandMessage { Verb = "set-quality-sharing", Enabled = vm.QualitySharing });
             }
+            if (vm.LobbyWatchChanged)
+            {
+                await _pipe.SendAsync(new CommandMessage { Verb = "set-lobby-watch", Enabled = vm.LobbyWatch });
+            }
 
             // Nothing for the service to write, so nothing to send and nothing to wait for. This
             // screen also carries the language, which this app saves by itself the moment it is

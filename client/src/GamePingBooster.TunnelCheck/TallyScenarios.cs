@@ -28,6 +28,39 @@ internal static partial class Program
     }
 
     /// <summary>
+    /// PUBG's UDP 8081 datacentre probes to Seoul ride routed ranges, and in a lobby they are the only UDP in the tunnel.
+    /// On 2026-10-16 they read as the game server and the app said "~109 ms to Korea" in a lobby on a Singapore relay.
+    /// </summary>
+    private static Task ProbesAreNoGameServer()
+    {
+        try
+        {
+            GameServerTally.ProbePort(new GameEntry { Id = "pubg" });
+            var tally = new GameServerTally();
+            for (var i = 0; i < 12; i++) tally.Note(Packet(17, "20.41.114.247", 8081));
+            for (var i = 0; i < 9; i++) tally.Note(Packet(17, "57.155.2.179", 8081));
+            Check("The game's own datacentre probes are no game server", tally.PrimaryDestination is null,
+                $"{tally.PrimaryDestination}");
+            Check("  but still count as game packets", tally.GamePackets == 21, $"{tally.GamePackets}");
+
+            for (var i = 0; i < 5; i++) tally.Note(Packet(17, "20.6.10.20", 7777));
+            Check("  and a quiet match beside them is the game server",
+                IPAddress.Parse("20.6.10.20").Equals(tally.PrimaryDestination), $"{tally.PrimaryDestination}");
+
+            GameServerTally.ProbePort(new GameEntry { Id = "fortnite" });
+            var other = new GameServerTally();
+            other.Note(Packet(17, "20.41.114.247", 8081));
+            Check("A game that declares no probes keeps port 8081",
+                IPAddress.Parse("20.41.114.247").Equals(other.PrimaryDestination), $"{other.PrimaryDestination}");
+        }
+        finally
+        {
+            GameServerTally.ProbePort(null);
+        }
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
     /// A game that plays over TCP (Aniimo: TCP 20000 to Alibaba Singapore, no UDP at all). Its TCP to its own region
     /// ranges is the match - counted in GamePackets and chosen as the game server - and every other TCP stays a lobby.
     /// A game that does not declare it keeps the old rule, so PUBG's lobby can never hold off a rescan.

@@ -187,6 +187,10 @@ public static class Program
         await using var unblock = new UnblockDns(() => engine.UnblockPolicy, log, engine);
         engine.LobbyConnections = unblock.DescribeLobbyConnections;
 
+        // The game's TCP connections - lobby, store, images - per name in the log, while it runs. Logs only.
+        engine.NameOfConnection = unblock.NameOfConnection;
+        var lobbyWatch = Task.Run(() => engine.RunLobbyWatchAsync(ct), CancellationToken.None);
+
         // When unblocking goes wrong, the line is checked the way tools\Check-Unblock.ps1 checks it and the result
         // sent to /admin/unblock/reports - under the same Settings switch as connection quality and discovery.
         using var unblockReports = engine.CreateUnblockReporter(

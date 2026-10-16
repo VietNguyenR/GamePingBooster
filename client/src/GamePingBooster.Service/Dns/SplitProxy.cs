@@ -207,6 +207,23 @@ internal sealed class SplitProxy : IAsyncDisposable
             lock (_lock) { _down += n; _lastDownMs = nowMs; }
         }
 
+        /// <summary>Bytes down and up so far.</summary>
+        public (long Down, long Up) Totals()
+        {
+            lock (_lock) return (_down, _up);
+        }
+
+        /// <summary>
+        /// Who ended it first, once one side has: "the game", "the server", or "reset" for a failure on either side.
+        /// The lobby watch cannot tell from Windows' table: a loopback connection rarely shows TIME_WAIT.
+        /// </summary>
+        public string? EndedBy { get; private set; }
+
+        public void Ended(string by)
+        {
+            lock (_lock) EndedBy ??= by;
+        }
+
         /// <summary>
         /// Bytes down; how long the game has waited for an answer (null when it is not waiting); how long since the
         /// last byte came down (an idle keep-alive is quiet too - only waiting says something is owed).
@@ -236,6 +253,47 @@ internal sealed class SplitProxy : IAsyncDisposable
                    $", quiet up to {reads.Max(r => r.QuietMs) / 1000} s, oldest {reads.Max(r => r.AgeMs) / 1000} s";
         }).ToArray();
         return groups.Length == 0 ? null : string.Join("; ", groups);
+    }
+
+    /// <summary>
+    /// The name and path of the connection the game opened to this from <paramref name="gamePort"/>, or null - so the
+    /// lobby watch can name a 127.77.0.1 connection by what it carries.
+    /// </summary>
+    public (string Name, string Path, long Down, long Up, string? EndedBy)? CarriedFor(int gamePort)
+    {
+        foreach (var (client, open) in _open)
+        {
+            try
+            {
+                if (client.RemoteEndPoint is IPEndPoint game && game.Port == gamePort) return Carried(open);
+            }
+            catch (ObjectDisposedException) { }
+        }
+        // Gone from here already: the watch looks after the game's side has left the table.
+        return _ended.TryGetValue(gamePort, out var ended) ? Carried(ended.Open) : null;
+
+        static (string, string, long, long, string?) Carried(OpenConnection open)
+        {
+            var (down, up) = open.Totals();
+            return (open.Name, open.Path, down, up, open.EndedBy);
+        }
+    }
+
+    /// <summary>Connections that ended, by the game's port, kept <see cref="EndedKeptMs"/> for <see cref="CarriedFor"/>.</summary>
+    private readonly ConcurrentDictionary<int, (OpenConnection Open, long AtMs)> _ended = new();
+    private const long EndedKeptMs = 10_000;
+
+    private void Forget(Socket client, OpenConnection? open)
+    {
+        if (open is null) return;
+        var now = _proxyClock.ElapsedMilliseconds;
+        try
+        {
+            if (client.RemoteEndPoint is IPEndPoint game) _ended[game.Port] = (open, now);
+        }
+        catch (ObjectDisposedException) { }
+        foreach (var (port, ended) in _ended)
+            if (now - ended.AtMs > EndedKeptMs) _ended.TryRemove(port, out _);
     }
 
     /// <summary>
@@ -656,6 +714,7 @@ internal sealed class SplitProxy : IAsyncDisposable
     private async Task HandleAsync(Socket client, CancellationToken ct)
     {
         Socket? edge = null;
+        OpenConnection? open = null;
         try
         {
             client.NoDelay = true;
@@ -713,24 +772,25 @@ internal sealed class SplitProxy : IAsyncDisposable
             if (reply is not null) await client.SendAsync(reply, SocketFlags.None, ct).ConfigureAwait(false);
             var run = viaProxy ? new ProxyRun() : null;
             if (run is not null) _proxied[client] = run;
-            var open = new OpenConnection(name,
+            open = new OpenConnection(name,
                 viaProxy ? $"the lobby proxy {(edge.RemoteEndPoint as IPEndPoint)?.Address}"
                 : overLine ? $"the line {(verdict!.Whole ? "whole" : "split")}" : "the relay",
                 _proxyClock.ElapsedMilliseconds);
             _open[client] = open;
+            var carried = open;
             Action<int> downBytes = n =>
             {
-                open.Down(n, _proxyClock.ElapsedMilliseconds);
+                carried.Down(n, _proxyClock.ElapsedMilliseconds);
                 if (run is null) return;
                 Interlocked.Add(ref _proxyBytes, n);
                 run.Down(n, _proxyClock.ElapsedMilliseconds);
             };
             Action<int> upBytes = n =>
             {
-                open.Up(n, _proxyClock.ElapsedMilliseconds);
+                carried.Up(n, _proxyClock.ElapsedMilliseconds);
                 run?.Up();
             };
-            if (await PumpAsync(client, edge, overLine, ct, downBytes, upBytes).ConfigureAwait(false) is { } dead)
+            if (await PumpAsync(client, edge, overLine, ct, downBytes, upBytes, carried.Ended).ConfigureAwait(false) is { } dead)
             {
                 // Reset, not closed: the game must see a failure at once and open the connection again - and the
                 // name is on the relay by then, so the new one goes through the tunnel.
@@ -749,6 +809,7 @@ internal sealed class SplitProxy : IAsyncDisposable
         {
             _proxied.TryRemove(client, out _);
             _open.TryRemove(client, out _);
+            Forget(client, open);
             edge?.Dispose();
             client.Dispose();
         }
@@ -966,7 +1027,7 @@ internal sealed class SplitProxy : IAsyncDisposable
     /// <see cref="StallWatch"/> and <see cref="LineDropped"/>.
     /// </summary>
     private static async Task<string?> PumpAsync(Socket client, Socket edge, bool overLine, CancellationToken ct,
-        Action<int>? downBytes = null, Action<int>? upBytes = null)
+        Action<int>? downBytes = null, Action<int>? upBytes = null, Action<string>? ended = null)
     {
         using var done = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var flow = new Flow();
@@ -977,6 +1038,7 @@ internal sealed class SplitProxy : IAsyncDisposable
         var watch = overLine ? WatchAsync(edge, flow, done) : Task.CompletedTask;
 
         var first = await Task.WhenAny(up, down).ConfigureAwait(false);
+        ended?.Invoke(!await first.ConfigureAwait(false) || flow.Why is not null ? "reset" : first == up ? "the game" : "the server");
         if (!await first.ConfigureAwait(false) || flow.Why is not null)
         {
             await done.CancelAsync().ConfigureAwait(false);

@@ -131,6 +131,21 @@ internal static partial class TcpConnections
         [.. OwnedRows().Where(r => pids.Contains(r.Pid) && r.State is > StateListen and < StateTimeWait &&
             !(IPAddress.IsLoopback(r.Remote.Address) && r.Remote.Address.GetAddressBytes()[1] != 77))];
 
+    /// <summary>
+    /// <see cref="OfProcesses"/>, and every TIME_WAIT connection on the machine as (local port, remote) - Windows gives
+    /// those no owner. A connection the game closed itself passes through TIME_WAIT; one the server closed (CLOSE_WAIT,
+    /// LAST_ACK) or one reset by either end does not. One read of the table for both.
+    /// </summary>
+    internal static (List<Owned> Game, HashSet<(int LocalPort, IPEndPoint Remote)> TimeWait) OfProcessesAndTimeWait(
+        IReadOnlySet<uint> pids)
+    {
+        var rows = OwnedRows();
+        var game = rows.Where(r => pids.Contains(r.Pid) && r.State is > StateListen and < StateTimeWait &&
+            !(IPAddress.IsLoopback(r.Remote.Address) && r.Remote.Address.GetAddressBytes()[1] != 77)).ToList();
+        var timeWait = rows.Where(r => r.State == StateTimeWait).Select(r => (r.LocalPort, r.Remote)).ToHashSet();
+        return (game, timeWait);
+    }
+
     private static List<Owned> OwnedRows()
     {
         var result = new List<Owned>();

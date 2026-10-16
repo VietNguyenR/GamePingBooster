@@ -93,6 +93,16 @@ internal sealed class GameServerTally
         Volatile.Write(ref s_tcpGameplay, [.. ranges]);
     }
 
+    /// <summary>
+    /// The remote UDP port the running game probes its datacentres on (<see cref="Discovery.ProbePlan"/>), or 0 when it
+    /// declares none. Never the game server: see <see cref="PrimaryDestination"/>. Shared and swapped like the TCP ranges.
+    /// </summary>
+    private static int s_probePort;
+
+    /// <summary>Makes UDP to <paramref name="game"/>'s declared probe port never read as its game server.</summary>
+    public static void ProbePort(GameEntry? game) =>
+        Volatile.Write(ref s_probePort, game is null ? 0 : Discovery.ProbePlan.For(game.Id)?.Port ?? 0);
+
     private static bool IsTcpGameplay(uint destination)
     {
         foreach (var (network, mask) in Volatile.Read(ref s_tcpGameplay))
@@ -204,6 +214,10 @@ internal sealed class GameServerTally
     /// as "the game server". Null while only lobby TCP is seen - in a lobby there is no match to
     /// measure. A game that plays over TCP (Aniimo) declares it, and only its region ranges count.
     ///
+    /// Never the game's datacentre probes. PUBG's UDP 8081 probes to Seoul and Singapore fall in routed ranges, and in a
+    /// lobby they are the only UDP in the tunnel: on 2026-10-16 every matchmaking round flipped the headline between
+    /// "to Singapore" and "to Korea" and left it on Korea in the lobby, with the player on a Singapore relay and no match.
+    ///
     /// Unlike <see cref="Format"/> this does not clear. It is read once a second, and a reader
     /// that emptied the tally would blind the 30-second log line that shares it.
     /// </summary>
@@ -216,9 +230,11 @@ internal sealed class GameServerTally
                 if (_flows.Count == 0) return null;
 
                 var byAddress = new Dictionary<uint, long>();
+                var probePort = Volatile.Read(ref s_probePort);
                 foreach (var (key, flow) in _flows)
                 {
                     if (key.Protocol != 17 && !(key.Protocol == 6 && IsTcpGameplay(key.Address))) continue;
+                    if (key.Protocol == 17 && probePort != 0 && key.Port == probePort) continue;
                     byAddress.TryGetValue(key.Address, out var running);
                     byAddress[key.Address] = running + flow.Packets;
                 }

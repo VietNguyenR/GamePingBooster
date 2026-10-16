@@ -174,6 +174,11 @@ internal static class StringsEn
             "Ping, lag spikes and which part of the path each one came from - your network, the route to the relay, " +
             "the relay, or the game server - plus the relay and game used. No IP addresses and nothing about other " +
             "programs. Sent between matches, never during one.",
+        ["settings.lobbyWatch"] = "Log the game's lobby connections (diagnostic)",
+        ["settings.lobbyWatch.hint"] =
+            "Writes each connection the game opens to its lobby, store and images into the service log, so a slow " +
+            "lobby or blank icons can be traced. Only turn it on when support asks - it makes the log much longer. " +
+            "Changes nothing about your game or your connection.",
         ["settings.language"] = "Language",
         ["settings.language.hint"] = "Applies immediately. Only this app changes; the game is untouched.",
         ["settings.saved"] = "Saved. Press Start boosting in the main window.",

@@ -410,6 +410,19 @@ internal sealed class PipeServer
                 break;
             }
 
+            case "set-lobby-watch":
+            {
+                var error = cmd.Enabled is { } enabled
+                    ? _engine.SetLobbyWatch(enabled)
+                    : "Say whether the lobby log is on or off.";
+                if (error is not null) _log($"set-lobby-watch rejected: {error}");
+                var reply = _engine.Snapshot();
+                reply.AckVerb = "set-lobby-watch";
+                reply.CommandError = error;
+                await PushAsync(reply).ConfigureAwait(false);
+                break;
+            }
+
             // Only a request to look now. Which release, whether to install it and when are AutoUpdater's.
             case "check-update":
                 _updater.CheckNow();

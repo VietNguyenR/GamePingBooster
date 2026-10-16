@@ -74,6 +74,12 @@
       <TextBlock Classes="hint" Text="{DynamicResource settings.quality.hint}" />
     </StackPanel>
 
+    <StackPanel IsVisible="{Binding ShowLobbyWatch}">
+      <CheckBox IsChecked="{Binding LobbyWatch}" Foreground="#ababab" FontSize="13"
+                Content="{DynamicResource settings.lobbyWatch}" />
+      <TextBlock Classes="hint" Text="{DynamicResource settings.lobbyWatch.hint}" />
+    </StackPanel>
+
     <Border Background="#7F1D1D" CornerRadius="8" Padding="12"
             IsVisible="{Binding HasError}">
       <TextBlock Text="{Binding Error}" Foreground="#FEE2E2" FontSize="12" TextWrapping="Wrap" />
