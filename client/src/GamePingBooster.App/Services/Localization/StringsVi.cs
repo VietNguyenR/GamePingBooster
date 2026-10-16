@@ -67,13 +67,13 @@ internal static class StringsVi
         ["action.connect"] = "Bắt đầu tăng tốc",
         ["action.connect.hint"] = "Tự nhận game bạn đang chơi, không cần chọn",
 
-        // ------------------------------------------------------------------ Kiểm tra máy panel
-        ["check.panel.title"] = "Kiểm tra máy",
+        // ------------------------------------------------------------------ Tối ưu máy panel (the "Kiểm tra máy" checklist)
+        ["check.panel.title"] = "Danh sách tối ưu",
         ["check.panel.attention"] = "{0} mục cần xem",
         ["check.panel.allGood"] = "Mọi thứ đều ổn",
         ["check.panel.good"] = "Đang tốt ({0})",
         ["check.panel.collapse"] = "Thu gọn",
-        ["check.panel.expand"] = "Mở Kiểm tra máy",
+        ["check.panel.expand"] = "Mở danh sách tối ưu",
         ["check.restore"] = "Khôi phục",
         ["check.restoreAll"] = "Khôi phục tất cả",
         ["check.pending"] = "Kiểm tra khi bấm Bắt đầu tăng tốc",

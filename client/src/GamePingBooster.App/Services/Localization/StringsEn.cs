@@ -68,12 +68,12 @@ internal static class StringsEn
         ["action.connect.hint"] = "Works with any supported game - detected automatically",
 
         // ------------------------------------------------------------------ PC check panel
-        ["check.panel.title"] = "PC check",
+        ["check.panel.title"] = "Optimization list",
         ["check.panel.attention"] = "{0} to look at",
         ["check.panel.allGood"] = "All good",
         ["check.panel.good"] = "Good ({0})",
         ["check.panel.collapse"] = "Collapse",
-        ["check.panel.expand"] = "Open PC check",
+        ["check.panel.expand"] = "Open optimization list",
         ["check.restore"] = "Restore",
         ["check.restoreAll"] = "Restore all",
         ["check.pending"] = "Checked when you press Start boosting",

@@ -4,6 +4,7 @@ using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using GamePingBooster.App.Services;
 using GamePingBooster.App.ViewModels;
 using GamePingBooster.App.ViewModels.Checklist;
@@ -67,6 +68,7 @@ public partial class MainWindow : SurfaceWindow
         _panelWidth = target;
 
         MinWidth = BaseMinWidth + target;
+        PlaceCaptionButtons();
         if (WindowState != WindowState.Normal) return;
 
         // Before the window exists Width is the markup's 420 and nothing is on screen yet: just size it.
@@ -84,6 +86,32 @@ public partial class MainWindow : SurfaceWindow
                 Position = new PixelPoint(Math.Max(screen.WorkingArea.X, Position.X - overflow), Position.Y);
             }
         }
+    }
+
+    /// <summary>
+    /// Keeps minimise, maximise and close over the main part of the window, not over the panel: the panel is its own
+    /// area, and with the buttons at the window's real corner they sat on the panel's header (open) or across the
+    /// strip's dividing line (collapsed) - owner, 2026-10-17.
+    ///
+    /// Avalonia 12 draws the caption buttons itself (see SurfaceWindow) in a right-aligned StackPanel named
+    /// PART_OverlayPanel, in the decorations layer above this window. They are moved, not redrawn: the real ones keep
+    /// their hit-testing roles, so Windows' snap layouts on maximise and the close-on-hover colour still work. If a
+    /// later Avalonia renames the part, nothing is found and the buttons simply stay in the corner as before.
+    /// </summary>
+    private void PlaceCaptionButtons()
+    {
+        if (FindDecorationPart("PART_OverlayPanel") is { } buttons)
+        {
+            buttons.Margin = new Thickness(0, 0, _panelWidth, 0);
+        }
+    }
+
+    private Control? FindDecorationPart(string name)
+    {
+        // The decorations are siblings of this window under the TopLevelHost, not inside it.
+        Visual top = this;
+        while (top.GetVisualParent() is { } parent) top = parent;
+        return top.GetVisualDescendants().OfType<Control>().FirstOrDefault(c => c.Name == name);
     }
 
     private void OnChecklistToggle(object? sender, RoutedEventArgs e) => _checklist?.Toggle();
@@ -502,6 +530,8 @@ public partial class MainWindow : SurfaceWindow
     {
         base.OnOpened(e);
         _hasOpened = true;
+        // The decorations are built by now, but laid out a moment later: posted, so the buttons move before anyone sees them.
+        Dispatcher.UIThread.Post(PlaceCaptionButtons, DispatcherPriority.Loaded);
         Dispatcher.UIThread.Post(OfferSignIn);
         if (!_offerWhenOpened) return;
         _offerWhenOpened = false;
@@ -574,6 +604,9 @@ public partial class MainWindow : SurfaceWindow
         base.OnPropertyChanged(change);
 
         if (change.Property != WindowStateProperty) return;
+
+        // Maximise and restore rebuild the caption buttons' state; put them back over the main part.
+        Dispatcher.UIThread.Post(PlaceCaptionButtons, DispatcherPriority.Loaded);
 
         if (change.GetNewValue<WindowState>() is not WindowState.Minimized)
         {
