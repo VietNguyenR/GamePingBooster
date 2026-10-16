@@ -4,6 +4,7 @@ using Avalonia.Media;
 using Avalonia.Threading;
 using GamePingBooster.App.Services;
 using GamePingBooster.App.Services.Localization;
+using GamePingBooster.App.ViewModels.Checklist;
 using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Updates;
 using GamePingBooster.Core.Protocol;
@@ -24,12 +25,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _pipe = pipe;
         _pipe.StatusReceived += OnStatus;
         _pipe.Disconnected += OnDisconnected;
+        Checklist = new ChecklistViewModel(pipe);
 
         // Every line on this screen is computed, so switching language is a matter of telling the
         // bindings to ask again. This view model lives as long as the app, so there is nothing to
         // unsubscribe from.
         Loc.Changed += OnLanguageChanged;
     }
+
+    /// <summary>The "Kiểm tra máy" panel on the window's right.</summary>
+    public ChecklistViewModel Checklist { get; }
 
     // ------------------------------------------------------------ licence
     //

@@ -6,6 +6,7 @@ using Avalonia.Markup.Xaml;
 using Avalonia.Threading;
 using GamePingBooster.App.Services;
 using GamePingBooster.App.ViewModels;
+using GamePingBooster.App.ViewModels.Checklist;
 using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Updates;
 
@@ -19,6 +20,117 @@ public partial class MainWindow : SurfaceWindow
     }
 
     private void InitializeComponent() => AvaloniaXamlLoader.Load(this);
+
+    // ------------------------------------------------------------ Kiểm tra máy panel
+
+    /// <summary>The open "Kiểm tra máy" panel, added to the right of the window as it always was.</summary>
+    public const double PanelWidth = 280;
+
+    /// <summary>The strip left on the right edge when the panel is collapsed.</summary>
+    public const double StripWidth = 26;
+
+    /// <summary>The window's own minimum width without the panel - the MinWidth in the markup.</summary>
+    private const double BaseMinWidth = 380;
+
+    /// <summary>The width of the right column the window is currently sized for; 0 before the first DataContext.</summary>
+    private double _panelWidth;
+
+    private ChecklistViewModel? _checklist;
+
+    protected override void OnDataContextChanged(EventArgs e)
+    {
+        base.OnDataContextChanged(e);
+
+        if (_checklist is not null) _checklist.PropertyChanged -= OnChecklistChanged;
+        _checklist = (DataContext as MainViewModel)?.Checklist;
+        if (_checklist is null) return;
+        _checklist.PropertyChanged += OnChecklistChanged;
+        ApplyPanelWidth();
+    }
+
+    private void OnChecklistChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ChecklistViewModel.IsOpen)) ApplyPanelWidth();
+    }
+
+    /// <summary>
+    /// Widens or narrows the window by the panel, so the left part - the window players already know - keeps its size.
+    /// Grows to the right, and slides left only as far as it must to stay on the screen. A maximised window is left as
+    /// it is: the panel just takes its column.
+    /// </summary>
+    private void ApplyPanelWidth()
+    {
+        if (_checklist is null) return;
+        var target = _checklist.IsOpen ? PanelWidth : StripWidth;
+        var delta = target - _panelWidth;
+        if (delta == 0) return;
+        _panelWidth = target;
+
+        MinWidth = BaseMinWidth + target;
+        if (WindowState != WindowState.Normal) return;
+
+        // Before the window exists Width is the markup's 420 and nothing is on screen yet: just size it.
+        var width = (double.IsNaN(Width) ? Bounds.Width : Width) + delta;
+        Width = Math.Max(width, MinWidth);
+        if (!IsVisible || delta <= 0) return;
+
+        if (Screens.ScreenFromWindow(this) is { } screen)
+        {
+            var scale = screen.Scaling;
+            var right = Position.X + (int)Math.Ceiling(Width * scale);
+            var overflow = right - screen.WorkingArea.Right;
+            if (overflow > 0)
+            {
+                Position = new PixelPoint(Math.Max(screen.WorkingArea.X, Position.X - overflow), Position.Y);
+            }
+        }
+    }
+
+    private void OnChecklistToggle(object? sender, RoutedEventArgs e) => _checklist?.Toggle();
+
+    private void OnChecklistGoodToggle(object? sender, RoutedEventArgs e) => _checklist?.ToggleGood();
+
+    private async void OnChecklistRestoreAll(object? sender, RoutedEventArgs e)
+    {
+        if (_checklist is not null) await _checklist.RestoreAllAsync();
+    }
+
+    private async void OnCheckFix(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { DataContext: CheckItem item } button || !item.HasFix) return;
+        // One press at a time: a fix may go through the service and take a moment.
+        button.IsEnabled = false;
+        try
+        {
+            await item.FixAsync();
+        }
+        catch (Exception)
+        {
+            // The item re-measures and says where it stands; a fix that failed is just a fix not applied.
+        }
+        finally
+        {
+            button.IsEnabled = true;
+        }
+    }
+
+    private async void OnCheckRestore(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { DataContext: CheckItem item } button || !item.CanRestore) return;
+        button.IsEnabled = false;
+        try
+        {
+            await item.RestoreAsync();
+        }
+        catch (Exception)
+        {
+            // As above: the item says what is still changed.
+        }
+        finally
+        {
+            button.IsEnabled = true;
+        }
+    }
 
     private PipeClient? _pipe;
 

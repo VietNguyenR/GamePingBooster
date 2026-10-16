@@ -66,6 +66,21 @@ internal static class StringsVi
         ["status.unknown"] = "Không rõ",
         ["action.connect"] = "Bắt đầu tăng tốc",
         ["action.connect.hint"] = "Tự nhận game bạn đang chơi, không cần chọn",
+
+        // ------------------------------------------------------------------ Kiểm tra máy panel
+        ["check.panel.title"] = "Kiểm tra máy",
+        ["check.panel.attention"] = "{0} mục cần xem",
+        ["check.panel.allGood"] = "Mọi thứ đều ổn",
+        ["check.panel.good"] = "Đang tốt ({0})",
+        ["check.panel.collapse"] = "Thu gọn",
+        ["check.panel.expand"] = "Mở Kiểm tra máy",
+        ["check.restore"] = "Khôi phục",
+        ["check.restoreAll"] = "Khôi phục tất cả",
+        ["check.pending"] = "Kiểm tra khi bấm Bắt đầu tăng tốc",
+        ["check.dns.title"] = "DNS",
+        ["check.dns.good"] = "Đang được app xử lý",
+        ["check.dns.starting"] = "Đang bật...",
+        ["check.dns.problem"] = "Windows không cho app xử lý DNS",
         ["action.disconnect"] = "Dừng tăng tốc",
 
         ["detail.starting"] = "Đang khởi động...",

@@ -66,6 +66,21 @@ internal static class StringsEn
         ["status.unknown"] = "Unknown",
         ["action.connect"] = "Start boosting",
         ["action.connect.hint"] = "Works with any supported game - detected automatically",
+
+        // ------------------------------------------------------------------ PC check panel
+        ["check.panel.title"] = "PC check",
+        ["check.panel.attention"] = "{0} to look at",
+        ["check.panel.allGood"] = "All good",
+        ["check.panel.good"] = "Good ({0})",
+        ["check.panel.collapse"] = "Collapse",
+        ["check.panel.expand"] = "Open PC check",
+        ["check.restore"] = "Restore",
+        ["check.restoreAll"] = "Restore all",
+        ["check.pending"] = "Checked when you press Start boosting",
+        ["check.dns.title"] = "DNS",
+        ["check.dns.good"] = "Handled by the app",
+        ["check.dns.starting"] = "Turning on...",
+        ["check.dns.problem"] = "Windows will not let the app handle DNS",
         ["action.disconnect"] = "Stop boosting",
 
         ["detail.starting"] = "Starting up...",

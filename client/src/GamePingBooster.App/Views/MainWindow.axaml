@@ -2,6 +2,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:GamePingBooster.App.ViewModels"
         xmlns:views="using:GamePingBooster.App.Views"
+        xmlns:ck="using:GamePingBooster.App.ViewModels.Checklist"
         x:Class="GamePingBooster.App.Views.MainWindow"
         x:DataType="vm:MainViewModel"
         Title="Game Ping Booster"
@@ -77,9 +78,74 @@
     <Style Selector="Button.update:pointerover TextBlock">
       <Setter Property="Foreground" Value="#93C5FD" />
     </Style>
+
+    <!-- Kiểm tra máy -->
+    <Style Selector="Border.checkcard">
+      <Setter Property="Background" Value="#242424" />
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="Padding" Value="12" />
+    </Style>
+    <Style Selector="Button.chevron">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="10" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.chevron:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#242424" />
+    </Style>
+    <Style Selector="Button.strip">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="0" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="VerticalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Top" />
+      <Setter Property="Cursor" Value="Hand" />
+    </Style>
+    <Style Selector="Button.strip:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#1a1a1a" />
+    </Style>
+    <Style Selector="Button.checkfix">
+      <Setter Property="Background" Value="#2563EB" />
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Padding" Value="12,5" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="CornerRadius" Value="6" />
+    </Style>
+    <Style Selector="Button.checklink">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="Foreground" Value="#60A5FA" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.checklink:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="#93C5FD" />
+    </Style>
+    <Style Selector="Button.checklink:disabled /template/ ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="#4b4b4b" />
+    </Style>
   </views:SurfaceWindow.Styles>
 
-  <Grid RowDefinitions="Auto,*">
+  <!--
+    Two columns: the window as it always was on the left, unchanged, and the "Kiểm tra máy" panel on the right
+    (pc-checklist-handoff.md). The panel's width is added to the window's in code-behind (ApplyPanelWidth), so the
+    left part keeps its size whether the panel is open, collapsed to its strip, or neither.
+  -->
+  <Grid ColumnDefinitions="*,Auto">
+
+  <Grid Grid.Column="0" RowDefinitions="Auto,*">
 
     <!--
       A spacer, not a title bar - see SurfaceWindow for why there is no title bar to draw.
@@ -314,5 +380,135 @@
       </Button>
     </Grid>
   </Grid>
+  </Grid>
+
+  <!-- ===================================================== Kiểm tra máy -->
+
+  <!-- Open. Header and footer stay put; only the list scrolls. The top 38 px is the caption buttons' and a drag area. -->
+  <Border Grid.Column="1" Width="{x:Static views:MainWindow.PanelWidth}"
+          IsVisible="{Binding Checklist.IsOpen}"
+          BorderBrush="#242424" BorderThickness="1,0,0,0">
+    <Grid RowDefinitions="38,Auto,*,Auto">
+      <Border Grid.Row="0" Background="Transparent" PointerPressed="OnTitleBarPressed" />
+
+      <Grid Grid.Row="1" ColumnDefinitions="*,Auto" Margin="16,0,8,12">
+        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+          <TextBlock Text="{DynamicResource check.panel.title}" Foreground="#e5e5e5" FontSize="15" FontWeight="SemiBold" />
+          <TextBlock Text="{Binding Checklist.HeaderText}" IsVisible="{Binding Checklist.HasHeaderText}"
+                     Foreground="{Binding Checklist.HeaderBrush}" FontSize="12" />
+        </StackPanel>
+        <Button Grid.Column="1" Classes="chevron" Click="OnChecklistToggle"
+                ToolTip.Tip="{DynamicResource check.panel.collapse}">
+          <Path Data="M1,1 L5,5 L1,9" Stroke="#ababab" StrokeThickness="1.6" />
+        </Button>
+      </Grid>
+
+      <ScrollViewer Grid.Row="2" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="16,0,16,12" Spacing="8">
+
+          <ItemsControl ItemsSource="{Binding Checklist.Attention}">
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate>
+                <StackPanel Spacing="8" />
+              </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="ck:CheckItem">
+                <Border Classes="checkcard">
+                  <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
+                    <Path Grid.Column="0" Data="{Binding SeverityIcon}" Stroke="{Binding SeverityBrush}"
+                          StrokeThickness="1.6" Width="16" Height="16" Stretch="None" VerticalAlignment="Top" Margin="0,1,0,0" />
+                    <StackPanel Grid.Column="1" Spacing="4">
+                      <TextBlock Text="{Binding Title}" Foreground="#e5e5e5" FontSize="13" FontWeight="SemiBold" />
+                      <TextBlock Text="{Binding Summary}" Foreground="#ababab" FontSize="12" TextWrapping="Wrap" />
+                      <SelectableTextBlock Text="{Binding Detail}" IsVisible="{Binding HasDetail}"
+                                           Foreground="#787878" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0" />
+                      <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,4,0,0"
+                                  IsVisible="{Binding HasActions}">
+                        <Button Classes="checkfix" Content="{Binding FixLabel}" IsVisible="{Binding HasFix}"
+                                Click="OnCheckFix" />
+                        <Button Classes="checklink" Content="{DynamicResource check.restore}" IsVisible="{Binding CanRestore}"
+                                Click="OnCheckRestore" />
+                      </StackPanel>
+                    </StackPanel>
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+
+          <!-- The good ones, folded. Closed by default: a line that is fine has nothing to say twice. -->
+          <StackPanel Spacing="6" IsVisible="{Binding Checklist.HasGood}">
+            <Button Classes="checklink" Click="OnChecklistGoodToggle" Margin="0,4,0,0">
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <Path Data="{Binding Checklist.GoodChevron}" Stroke="#ababab" StrokeThickness="1.4"
+                      Width="10" Height="10" Stretch="None" VerticalAlignment="Center" />
+                <TextBlock Text="{Binding Checklist.GoodHeader}" Foreground="#ababab" FontSize="12" FontWeight="SemiBold" />
+              </StackPanel>
+            </Button>
+            <ItemsControl ItemsSource="{Binding Checklist.Good}" IsVisible="{Binding Checklist.IsGoodExpanded}">
+              <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate>
+                  <StackPanel Spacing="6" />
+                </ItemsPanelTemplate>
+              </ItemsControl.ItemsPanel>
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="ck:CheckItem">
+                  <Border Classes="checkcard" Padding="12,8">
+                    <Grid ColumnDefinitions="Auto,Auto,*" ColumnSpacing="10">
+                      <Path Grid.Column="0" Data="{Binding SeverityIcon}" Stroke="{Binding SeverityBrush}"
+                            StrokeThickness="1.6" Width="16" Height="16" Stretch="None" VerticalAlignment="Center" />
+                      <TextBlock Grid.Column="1" Text="{Binding Title}" Foreground="#e5e5e5" FontSize="12" FontWeight="SemiBold"
+                                 VerticalAlignment="Center" />
+                      <TextBlock Grid.Column="2" Text="{Binding Summary}" Foreground="#ababab" FontSize="12"
+                                 TextTrimming="CharacterEllipsis" VerticalAlignment="Center" ToolTip.Tip="{Binding Summary}" />
+                    </Grid>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+        </StackPanel>
+      </ScrollViewer>
+
+      <Border Grid.Row="3" BorderBrush="#242424" BorderThickness="0,1,0,0" Padding="16,10">
+        <Button Classes="checklink" HorizontalAlignment="Center"
+                Content="{DynamicResource check.restoreAll}"
+                IsEnabled="{Binding Checklist.CanRestoreAll}" Click="OnChecklistRestoreAll" />
+      </Border>
+    </Grid>
+  </Border>
+
+  <!-- Collapsed: a strip on the right edge with the way back, a count, and one icon per problem. Below the caption
+       buttons, which sit over the window's top-right corner whatever is under them. -->
+  <Border Grid.Column="1" Width="{x:Static views:MainWindow.StripWidth}"
+          IsVisible="{Binding Checklist.IsCollapsed}"
+          BorderBrush="#242424" BorderThickness="1,0,0,0">
+    <Button Classes="strip" Click="OnChecklistToggle" ToolTip.Tip="{DynamicResource check.panel.expand}">
+      <StackPanel Spacing="10" HorizontalAlignment="Center" Margin="0,48,0,0">
+        <Path Data="M5,1 L1,5 L5,9" Stroke="#ababab" StrokeThickness="1.6" HorizontalAlignment="Center" />
+        <Border Background="#fbbf24" CornerRadius="8" MinWidth="16" Height="16" Padding="3,0"
+                HorizontalAlignment="Center" IsVisible="{Binding Checklist.HasProblems}">
+          <TextBlock Text="{Binding Checklist.BadgeText}" Foreground="#111111" FontSize="10" FontWeight="Bold"
+                     HorizontalAlignment="Center" VerticalAlignment="Center" />
+        </Border>
+        <ItemsControl ItemsSource="{Binding Checklist.Problems}">
+          <ItemsControl.ItemsPanel>
+            <ItemsPanelTemplate>
+              <StackPanel Spacing="10" />
+            </ItemsPanelTemplate>
+          </ItemsControl.ItemsPanel>
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="ck:CheckItem">
+              <Path Data="{Binding Icon}" Stroke="{Binding SeverityBrush}" StrokeThickness="1.4"
+                    Width="16" Height="16" Stretch="Uniform" HorizontalAlignment="Center"
+                    ToolTip.Tip="{Binding Title}" />
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </StackPanel>
+    </Button>
+  </Border>
+
   </Grid>
 </views:SurfaceWindow>
