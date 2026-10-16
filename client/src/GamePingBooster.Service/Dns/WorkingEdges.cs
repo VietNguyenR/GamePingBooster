@@ -274,7 +274,7 @@ internal sealed class WorkingEdges
     private async Task<IPAddress[]> KeepAsync(string name, IPAddress[] was, CancellationToken ct)
     {
         var connected = new bool[was.Length];
-        var checks = was.Select((a, i) => EdgeProber.WorksAsync(a, name, ct, () => connected[i] = true)).ToArray();
+        var checks = was.Select((a, i) => EdgeProber.WorksEveryTimeAsync(a, name, ct, () => connected[i] = true)).ToArray();
         var works = await Task.WhenAll(checks).ConfigureAwait(false);
         IPAddress[] still = [.. was.Where((_, i) => works[i])];
         IPAddress[] noConnection = [.. was.Where((_, i) => !works[i] && !connected[i])];
@@ -749,10 +749,11 @@ internal sealed class WorkingEdges
         // A borrowed edge must also answer as a host of the name, not just hold its certificate - see
         // EdgeProber.ServesNameAsync. The name's own addresses are not asked: it costs a round trip, and an
         // upstream naming them is already the claim that they serve it.
+        // Every one of EdgeProber.Handshakes must pass, so Elapsed is the slowest of them.
         private async Task<(bool Works, TimeSpan Elapsed)> RunAsync(string name, Stopwatch round, CancellationToken ct)
         {
             var clock = Stopwatch.StartNew();
-            var works = await EdgeProber.WorksAsync(Address, name, ct,
+            var works = await EdgeProber.WorksEveryTimeAsync(Address, name, ct,
                 () => Interlocked.Exchange(ref _connectedAtMs, round.ElapsedMilliseconds),
                 servesName: !Own).ConfigureAwait(false);
             return (works, clock.Elapsed);

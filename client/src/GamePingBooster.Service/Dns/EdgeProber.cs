@@ -97,6 +97,60 @@ internal static class EdgeProber
         }
     }
     /// <summary>
+    /// How many handshakes an edge must pass, side by side, before it is handed out.
+    ///
+    /// One was not proof. FPT, 2026-10-16 23:58: CloudFront 18.65.14.x reset prod-live-images' hello on 17 of 20
+    /// connections and passed the other 3 (www.amazon.com on the same address: every time) - the filter sits on some of
+    /// the line's parallel paths, and each connection's source port picks one. The probe's single handshake landed on a
+    /// clean one, the edge was answered for two minutes, and the lobby lost most of its images. With an edge passing
+    /// one connection in five, one handshake lets it through 20% of the time and three 0.8%. In-country edges passed
+    /// 12 of 12 that night, so an honest edge pays nothing: the three run together and cost one handshake's time.
+    /// </summary>
+    public const int Handshakes = 3;
+
+    /// <summary>
+    /// <see cref="WorksAsync"/> <see cref="Handshakes"/> times at once, each on its own connection: true only when every
+    /// one completes. The first failure decides - the rest are cancelled, so a reset still settles it in milliseconds.
+    /// <paramref name="connected"/> is called once, for the first connection taken; only the first handshake asks
+    /// <paramref name="servesName"/>, which is about the edge, not the path.
+    /// </summary>
+    public static Task<bool> WorksEveryTimeAsync(IPAddress address, string sni, CancellationToken ct, Action? connected = null,
+        bool servesName = false) =>
+        EveryTimeAsync((first, token, onConnect) => WorksAsync(address, sni, token, onConnect, servesName && first),
+            ct, connected);
+
+    /// <summary>The rule of <see cref="WorksEveryTimeAsync"/> around any one handshake - internal for TunnelCheck.</summary>
+    internal static async Task<bool> EveryTimeAsync(Func<bool, CancellationToken, Action, Task<bool>> once,
+        CancellationToken ct, Action? connected = null, int times = Handshakes)
+    {
+        var said = 0;
+        void Connected()
+        {
+            if (Interlocked.Exchange(ref said, 1) == 0) connected?.Invoke();
+        }
+
+        using var round = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var pending = Enumerable.Range(0, times).Select(i => once(i == 0, round.Token, Connected)).ToList();
+        try
+        {
+            while (pending.Count > 0)
+            {
+                var done = await Task.WhenAny(pending).ConfigureAwait(false);
+                pending.Remove(done);
+                if (!await done.ConfigureAwait(false)) return false;
+            }
+            return true;
+        }
+        finally
+        {
+            // A handshake still hanging on a filter is not waited out - cancelled, and let finish before the token goes.
+            round.Cancel();
+            try { await Task.WhenAll(pending).ConfigureAwait(false); }
+            catch (Exception) { }
+        }
+    }
+
+    /// <summary>
     /// Whether the edge, asked for the name over the handshake just made, answers as a host of it.
     ///
     /// A certificate valid for the name is not that. On 2026-10-02 an FPT line in Ho Chi Minh City reset every

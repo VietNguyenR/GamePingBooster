@@ -75,6 +75,7 @@ internal static partial class Program
             ("Discovery: a TCP game's match is found by its segments", TcpDiscoveryJudgesTheMatchConnectionByItsSegments),
             ("Discovery: Windows counts a real connection's segments", TcpCountersCountARealConnection),
             ("Unblock: tunnel names are kept fresh", OnlyAskedListedNamesAreKeptFresh),
+            ("Unblock: an edge must pass every handshake", AnEdgeMustPassEveryHandshake),
             ("Split: the hello is two records of the same hello", () => { TheSplitHelloIsTwoRecordsOfTheSameHello(); return Task.CompletedTask; }),
             ("Split: a filter reading the first record is passed", TheSplitHelloPassesAFilterThatReadsTheFirstRecord),
             ("Split: a filter on some edges still sends the name split", AFilterOnSomeEdgesStillSendsTheNameSplit),
