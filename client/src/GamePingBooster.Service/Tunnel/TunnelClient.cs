@@ -899,8 +899,9 @@ internal sealed partial class TunnelClient : IDisposable
         Destinations.Note(packet);
 
         // UDP only: the game's own stream. The lobby's TCP connection shares the tunnel and
-        // goes quiet for seconds at a time, which would read as a frozen game.
-        if (packet.Length >= IcmpEcho.Ipv4HeaderLen && packet[9] == 17)
+        // goes quiet for seconds at a time, which would read as a frozen game. Nor the game's datacentre
+        // probes: PUBG's 8081 burst in the lobby read as a match start - see GameServerTally.IsProbe.
+        if (packet.Length >= IcmpEcho.Ipv4HeaderLen && packet[9] == 17 && !GameServerTally.IsProbe(packet, inbound: false))
         {
             NoteCadence(ref _lastUpUdpAt, ref _maxUpGap, ref _upUdpPackets);
         }
@@ -1029,7 +1030,7 @@ internal sealed partial class TunnelClient : IDisposable
                                 break;
                             }
 
-                            if (ip.Length >= IcmpEcho.Ipv4HeaderLen && ip[9] == 17)
+                            if (ip.Length >= IcmpEcho.Ipv4HeaderLen && ip[9] == 17 && !GameServerTally.IsProbe(ip, inbound: true))
                             {
                                 NoteCadence(ref _lastDownUdpAt, ref _maxDownGap, ref _downUdpPackets);
                             }

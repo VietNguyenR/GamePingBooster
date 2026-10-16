@@ -70,6 +70,7 @@ internal static partial class Program
             ("Side by side: the budget", TheBudgetStillEndsIt),
             ("The in-game ping measures the match, not the lobby", TheGameServerIsTheUdpOne),
             ("The in-game ping ignores the game's datacentre probes", ProbesAreNoGameServer),
+            ("A probe burst in the lobby is no match start", AProbeBurstIsNoMatchStart),
             ("A TCP game's match counts, its lobby does not", TcpGameplayCountsOnlyItsOwnRanges),
             ("Discovery: a TCP game's match is found by its segments", TcpDiscoveryJudgesTheMatchConnectionByItsSegments),
             ("Discovery: Windows counts a real connection's segments", TcpCountersCountARealConnection),

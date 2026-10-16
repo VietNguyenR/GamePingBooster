@@ -62,7 +62,9 @@ internal sealed class GameServerTally
     /// the move between matches and the region planner all read it to tell a match on the tunnel from
     /// one that is not.
     ///
-    /// UDP always counts: only game routes carry UDP into the adapter. TCP counts only to the ranges in
+    /// UDP counts, except to the game's datacentre probe port (<see cref="IsProbe"/>): PUBG's UDP 8081 burst ~60 s after
+    /// launch, with no matchmaking, read as a 30-45 s match on 2026-10-16 and filled QualityMatch with fake Korea matches.
+    /// TCP counts only to the ranges in
     /// <see cref="TcpGameplay"/> - a game that plays over TCP (<see cref="GameEntry.TcpGameplay"/>,
     /// Aniimo). Every other TCP in the adapter is a lobby, a login or an unblocked store, which must
     /// never read as a match: PUBG's lobby would then hold off every rescan for as long as it is open.
@@ -102,6 +104,22 @@ internal sealed class GameServerTally
     /// <summary>Makes UDP to <paramref name="game"/>'s declared probe port never read as its game server.</summary>
     public static void ProbePort(GameEntry? game) =>
         Volatile.Write(ref s_probePort, game is null ? 0 : Discovery.ProbePlan.For(game.Id)?.Port ?? 0);
+
+    /// <summary>
+    /// Whether <paramref name="packet"/> (an inner IPv4 packet) is UDP to - or, coming back, from - the running game's
+    /// datacentre probe port. Such packets are the game measuring regions, never a match: the match counters
+    /// (<see cref="GamePackets"/>, the recorder's cadence) skip them, the per-flow tally and the routing do not.
+    /// A later fragment carries no port and is not a probe; probes are a few dozen bytes and never fragment.
+    /// </summary>
+    public static bool IsProbe(ReadOnlySpan<byte> packet, bool inbound)
+    {
+        var probePort = Volatile.Read(ref s_probePort);
+        if (probePort == 0 || packet.Length < 20 || packet[9] != 17) return false;
+        var headerLen = (packet[0] & 0x0F) * 4;
+        if (headerLen < 20 || packet.Length < headerLen + 4) return false;
+        if ((BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(6, 2)) & 0x1FFF) != 0) return false;
+        return BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(headerLen + (inbound ? 0 : 2), 2)) == probePort;
+    }
 
     private static bool IsTcpGameplay(uint destination)
     {
@@ -150,7 +168,7 @@ internal sealed class GameServerTally
 
         var protocol = packet[9];
         var destination = BinaryPrimitives.ReadUInt32BigEndian(packet.Slice(16, 4));
-        if (protocol == 17 || (protocol == 6 && IsTcpGameplay(destination)))
+        if ((protocol == 17 && !IsProbe(packet, inbound: false)) || (protocol == 6 && IsTcpGameplay(destination)))
         {
             Interlocked.Increment(ref _gamePackets);
             var sentAt = System.Diagnostics.Stopwatch.GetTimestamp();

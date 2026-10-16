@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Net;
 using GamePingBooster.Core.Profiles;
 using GamePingBooster.Service.Tunnel;
@@ -41,17 +42,24 @@ internal static partial class Program
             for (var i = 0; i < 9; i++) tally.Note(Packet(17, "57.155.2.179", 8081));
             Check("The game's own datacentre probes are no game server", tally.PrimaryDestination is null,
                 $"{tally.PrimaryDestination}");
-            Check("  but still count as game packets", tally.GamePackets == 21, $"{tally.GamePackets}");
+            // 2026-10-16: the burst ~60 s after launch, with no matchmaking, became a 30-45 s "match" in Korea.
+            Check("  nor a match: they are not game packets", tally.GamePackets == 0 && tally.LastGameAt == 0,
+                $"{tally.GamePackets}");
+            Check("  and their answers are probes too, coming back from the port",
+                GameServerTally.IsProbe(Reply(17, "20.41.114.247", 8081), inbound: true) &&
+                !GameServerTally.IsProbe(Reply(17, "20.6.10.20", 7777), inbound: true), "");
 
             for (var i = 0; i < 5; i++) tally.Note(Packet(17, "20.6.10.20", 7777));
-            Check("  and a quiet match beside them is the game server",
+            Check("  and a quiet match beside them counts", tally.GamePackets == 5, $"{tally.GamePackets}");
+            Check("  and is the game server",
                 IPAddress.Parse("20.6.10.20").Equals(tally.PrimaryDestination), $"{tally.PrimaryDestination}");
 
             GameServerTally.ProbePort(new GameEntry { Id = "fortnite" });
             var other = new GameServerTally();
             other.Note(Packet(17, "20.41.114.247", 8081));
             Check("A game that declares no probes keeps port 8081",
-                IPAddress.Parse("20.41.114.247").Equals(other.PrimaryDestination), $"{other.PrimaryDestination}");
+                IPAddress.Parse("20.41.114.247").Equals(other.PrimaryDestination) && other.GamePackets == 1,
+                $"{other.PrimaryDestination}, {other.GamePackets}");
         }
         finally
         {
@@ -102,6 +110,55 @@ internal static partial class Program
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// The same probes through a live tunnel, both ways: neither the game-packet count nor the cadence the spike recorder
+    /// reads may move. On 2026-10-16 PUBG's 8081 burst ~60 s after launch, with no matchmaking, was logged as "a match
+    /// started" and uploaded as a 30-45 s match in Korea - two thirds of the "KR" matches after the 10-14 patch.
+    /// </summary>
+    private static async Task AProbeBurstIsNoMatchStart()
+    {
+        GameServerTally.ProbePort(new GameEntry { Id = "pubg" });
+        try
+        {
+            using var relay = new FakeRelay(Psk);
+            using var rig = new Rig();
+            var tunnel = await rig.StartAsync(relay, clientId: 7);
+            var inner = U32(tunnel.Session.ClientIp);
+            var session = relay.SessionOf(tunnel.SessionId)!;
+            tunnel.TakeCadence();
+
+            static byte[] OnPort(byte[] packet, int offset)
+            {
+                BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(offset), 8081);
+                return packet;
+            }
+            for (var i = 0; i < 20; i++) rig.Device.FromWindows(OnPort(Game(inner, Servers[i % 3], i), 22));
+            await WaitUntil(() => relay.Arrivals.Count >= 20);
+            for (var i = 0; i < 20; i++) relay.SendToClient(session, OnPort(Game(Servers[i % 3], inner, i), 20));
+            await WaitUntil(() => rig.Device.ToWindows.Count >= 20);
+
+            var probes = tunnel.TakeCadence();
+            Check("A probe burst still goes through the tunnel, both ways",
+                relay.Arrivals.Count == 20 && rig.Device.ToWindows.Count == 20,
+                $"{relay.Arrivals.Count} up, {rig.Device.ToWindows.Count} down");
+            Check("  but is no match: no game packets, no cadence for the spike recorder",
+                tunnel.Destinations.GamePackets == 0 && probes.UpPackets == 0 && probes.DownPackets == 0,
+                $"game packets {tunnel.Destinations.GamePackets}, cadence up {probes.UpPackets} down {probes.DownPackets}");
+
+            for (var i = 0; i < 5; i++) rig.Device.FromWindows(Game(inner, Servers[0], 100 + i));
+            for (var i = 0; i < 5; i++) relay.SendToClient(session, Game(Servers[0], inner, 100 + i));
+            await WaitUntil(() => relay.Arrivals.Count >= 25 && rig.Device.ToWindows.Count >= 25);
+            var match = tunnel.TakeCadence();
+            Check("  while the match's own packets count",
+                tunnel.Destinations.GamePackets == 5 && match.UpPackets == 5 && match.DownPackets == 5,
+                $"game packets {tunnel.Destinations.GamePackets}, cadence up {match.UpPackets} down {match.DownPackets}");
+        }
+        finally
+        {
+            GameServerTally.ProbePort(null);
+        }
+    }
+
     /// <summary>A minimal IPv4 packet with a transport header's ports, enough for the tally to read.</summary>
     private static byte[] Packet(byte protocol, string destination, ushort port)
     {
@@ -112,6 +169,15 @@ internal static partial class Program
         IPAddress.Parse(destination).GetAddressBytes().CopyTo(packet, 16);
         packet[20] = 0xC3; packet[21] = 0x50;
         packet[22] = (byte)(port >> 8); packet[23] = (byte)port;
+        return packet;
+    }
+
+    /// <summary><see cref="Packet"/> coming back: from <paramref name="source"/>:<paramref name="port"/> to the adapter.</summary>
+    private static byte[] Reply(byte protocol, string source, ushort port)
+    {
+        var packet = Packet(protocol, "10.77.0.2", 50000);
+        IPAddress.Parse(source).GetAddressBytes().CopyTo(packet, 12);
+        packet[20] = (byte)(port >> 8); packet[21] = (byte)port;
         return packet;
     }
 }
