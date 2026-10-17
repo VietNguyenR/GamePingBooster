@@ -179,6 +179,11 @@ public static class Program
         // is guaranteed to run after a crash is the next start, so it is cleaned up here.
         UnblockDns.RemoveLeftovers(log);
 
+        // The same for a Windows Update pause (PC tune-up panel): it lasts one game, and a crash must not make it last.
+        Network.NetworkApps.RestoreLeftovers(log);
+        using var netApps = new Network.NetworkApps(engine.GameProcessNames, engine.AnyGameRunning,
+            () => engine.TunnelInnerAddress, log);
+
         // The policy is read through the engine because that is where the delivered profile lands,
         // and read on every attempt rather than captured once: the profile arrives after startup,
         // so a list captured here would be the built-in fallback for the life of the process.
@@ -272,7 +277,7 @@ public static class Program
                 "It will be tried again on the next connect.");
         }
 
-        pipe = new PipeServer(engine, unblock, updater, log);
+        pipe = new PipeServer(engine, unblock, updater, netApps, log);
 
         log($"Listening on pipe \\\\.\\pipe\\{Core.Ipc.IpcConstants.PipeName}");
         await pipe.RunAsync(ct).ConfigureAwait(false);

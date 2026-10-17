@@ -4240,6 +4240,9 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     public bool AnyGameRunning() =>
         _profile is { } profile && GameProcessWatcher.FindRunning(profile.Games.SelectMany(g => g.ProcessNames)) is not null;
 
+    /// <summary>Every game's process names, as the profile lists them ("TslGame.exe"). Empty with no profile.</summary>
+    public List<string> GameProcessNames() => _profile is { } profile ? [.. profile.Games.SelectMany(g => g.ProcessNames)] : [];
+
     /// <summary>The profile's game when it has exactly one, else null.</summary>
     private string? OnlyGameName => _profile is { Games.Count: 1 } profile ? profile.Games[0].Name : null;
 

@@ -25,6 +25,9 @@ internal sealed partial class TunnelEngine
     /// <summary>The lobby host routes of every game that plays over TCP, as InstallLobbyRoutes last installed them.</summary>
     private volatile IReadOnlyList<string> _tcpLobbyRoutes = [];
 
+    /// <summary>The virtual adapter's address while connected, for counters that leave the tunnel's own traffic out.</summary>
+    public IPAddress? TunnelInnerAddress => AdapterIp();
+
     /// <summary>The virtual adapter's address - the local address of every connection riding the tunnel.</summary>
     private IPAddress? AdapterIp()
     {

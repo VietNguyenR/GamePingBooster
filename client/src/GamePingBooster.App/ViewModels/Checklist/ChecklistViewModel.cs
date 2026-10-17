@@ -30,6 +30,7 @@ public sealed class ChecklistViewModel : INotifyPropertyChanged
         [
             new DnsCheck(),
             new NetworkCheck(),
+            new NetAppsCheck(pipe),
             new ResourceCheck(pipe),
         ];
         foreach (var item in _items) item.PropertyChanged += OnItemChanged;

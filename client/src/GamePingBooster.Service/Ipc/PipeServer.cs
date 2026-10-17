@@ -32,18 +32,22 @@ internal sealed class PipeServer
     private readonly TunnelEngine _engine;
     private readonly UnblockDns _unblock;
     private readonly AutoUpdater _updater;
+    private readonly Network.NetworkApps _netApps;
     private readonly Action<string> _log;
     private StreamWriter? _writer;
     private uint? _uiSession;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
 
-    public PipeServer(TunnelEngine engine, UnblockDns unblock, AutoUpdater updater, Action<string> log)
+    public PipeServer(TunnelEngine engine, UnblockDns unblock, AutoUpdater updater, Network.NetworkApps netApps,
+        Action<string> log)
     {
         _engine = engine;
         _unblock = unblock;
         _updater = updater;
+        _netApps = netApps;
         _log = log;
         _engine.StatusChanged += status => _ = PushAsync(status);
+        _netApps.Changed += () => _ = PushAsync(_engine.Snapshot());
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -423,6 +427,39 @@ internal sealed class PipeServer
                 break;
             }
 
+            // PC tune-up panel, item 3. Read-only: process names and rates, never an address. Answered after the count
+            // (a few seconds) and NOT awaited here, like relays: a connect sent right behind it must not wait.
+            case "net-apps":
+                _ = Task.Run(async () =>
+                {
+                    var (apps, error) = await _netApps.CountAsync(ct).ConfigureAwait(false);
+                    var reply = _engine.Snapshot();
+                    reply.AckVerb = "net-apps";
+                    reply.NetApps = apps;
+                    reply.CommandError = error;
+                    await PushAsync(reply).ConfigureAwait(false);
+                }, ct);
+                break;
+
+            // Pauses Windows Update for the length of the running game, or resumes it. No parameters beyond on/off:
+            // which services, and for how long, are decided here. Not awaited: stopping a service takes seconds.
+            case "pause-updates":
+            {
+                var on = cmd.Enabled ?? true;
+                _ = Task.Run(async () =>
+                {
+                    string? error = null;
+                    if (on) error = _netApps.PauseUpdates();
+                    else _netApps.ResumeUpdates("the player pressed Restore");
+                    if (error is not null) _log($"pause-updates refused: {error}");
+                    var reply = _engine.Snapshot();
+                    reply.AckVerb = "pause-updates";
+                    reply.CommandError = error;
+                    await PushAsync(reply).ConfigureAwait(false);
+                }, ct);
+                break;
+            }
+
             // Only a request to look now. Which release, whether to install it and when are AutoUpdater's.
             case "check-update":
                 _updater.CheckNow();
@@ -474,6 +511,7 @@ internal sealed class PipeServer
         status.UnblockDetail = _unblock.Detail;
         status.UnblockServices = [.. _unblock.Services];
         status.UnblockProblemCode = _unblock.ProblemCode;
+        status.UpdatesPaused = _netApps.UpdatesPaused;
         _updater.Stamp(status);
 
         await _writeLock.WaitAsync().ConfigureAwait(false);

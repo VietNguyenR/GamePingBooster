@@ -156,9 +156,31 @@ public sealed class CommandMessage
 
     // set-lobby-watch -> write the game's TCP connections to the service log, or stop (Enabled). Logs only.
 
+    // net-apps      -> a status with AckVerb "net-apps" and NetApps filled, ~3 s later (the service counts TCP bytes
+    //                  per connection for that long), or CommandError when it cannot count.
+    // pause-updates -> Enabled true pauses Windows Update until the game closes; false resumes it now. Refused
+    //                  when no game is running: the pause only exists for the length of one.
+
     /// <summary>set-quality-sharing: whether this installation sends connection quality after each match;
-    /// set-lobby-watch: whether the game's TCP connections are logged.</summary>
+    /// set-lobby-watch: whether the game's TCP connections are logged; pause-updates: pause or resume.</summary>
     [JsonPropertyName("enabled")] public bool? Enabled { get; set; }
+}
+
+/// <summary>
+/// One app moving data while the game runs, for the "Ứng dụng dùng mạng" item of the PC tune-up panel. What a player
+/// needs to recognise it and what the app can offer about it - never an address.
+/// </summary>
+public sealed class NetAppUsage
+{
+    /// <summary>Stable key: "windows-update", "steam", "epic", or the process name for anything else.</summary>
+    [JsonPropertyName("key")] public string Key { get; set; } = "";
+
+    /// <summary>The name to show: "Windows Update", or the exe's description as Task Manager shows it.</summary>
+    [JsonPropertyName("name")] public string Name { get; set; } = "";
+
+    /// <summary>Megabytes per second received / sent over the counted window.</summary>
+    [JsonPropertyName("downMbps")] public double DownMbps { get; set; }
+    [JsonPropertyName("upMbps")] public double UpMbps { get; set; }
 }
 
 /// <summary>One record waiting in the service's outbox, as the JSON the licence server receives.</summary>
@@ -599,6 +621,18 @@ public sealed class StatusMessage
     /// grows with each game has no business in a once-a-second heartbeat. Additive, so no contract bump.
     /// </summary>
     [JsonPropertyName("games")] public List<SupportedGame>? Games { get; set; }
+
+    /// <summary>
+    /// net-apps only: the apps that moved data over TCP during the few seconds the service counted, busiest first.
+    /// Null on every other status. Process names and rates only, never an address.
+    /// </summary>
+    [JsonPropertyName("netApps")] public List<NetAppUsage>? NetApps { get; set; }
+
+    /// <summary>
+    /// Windows Update is paused by the app (pause-updates) and comes back by itself when the game closes. On every
+    /// status, so an app opened after the press still shows it and can undo it.
+    /// </summary>
+    [JsonPropertyName("updatesPaused")] public bool UpdatesPaused { get; set; }
 
     /// <summary>
     /// relays and set-relay-choice only: every relay the player can choose. A relays reply comes once the
