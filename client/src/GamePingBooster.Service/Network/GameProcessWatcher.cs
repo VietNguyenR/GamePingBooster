@@ -81,22 +81,32 @@ internal sealed class GameProcessWatcher : IDisposable
     /// <summary>
     /// The first of <paramref name="processNames"/> that is running, or null. Also used once at
     /// connect, before a watcher exists, to measure relays for a game that is already open.
+    ///
+    /// One process list per call, not one per name: GetProcessesByName takes the whole list every time and filters
+    /// it, so asking for each of 21 games' names cost ~190 ms of CPU every 2 s - about 9 % of a core for as long as
+    /// the tunnel was up, game or no game (measured 2026-10-17, 530 processes). One list is ~8 ms.
+    /// Pass <paramref name="running"/> (<see cref="RunningNames"/>) when asking about several games at once.
     /// </summary>
-    public static string? FindRunning(IEnumerable<string> processNames)
+    public static string? FindRunning(IEnumerable<string> processNames, IReadOnlySet<string>? running = null)
     {
+        running ??= RunningNames();
+        // Profile order, as before: the first listed name that is running wins.
         foreach (var name in Normalise(processNames))
         {
-            var procs = Process.GetProcessesByName(name);
-            try
-            {
-                if (procs.Length > 0) return name;
-            }
-            finally
-            {
-                foreach (var p in procs) p.Dispose();
-            }
+            if (running.Contains(name)) return name;
         }
         return null;
+    }
+
+    /// <summary>The names of every running process (no ".exe"), from one process list.</summary>
+    public static HashSet<string> RunningNames()
+    {
+        var running = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var p in Process.GetProcesses())
+        {
+            using (p) running.Add(p.ProcessName);
+        }
+        return running;
     }
 
     /// <summary>Process.GetProcessesByName expects names WITHOUT the .exe suffix.</summary>

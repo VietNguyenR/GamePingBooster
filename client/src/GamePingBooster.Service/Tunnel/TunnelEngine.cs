@@ -4213,6 +4213,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         var profile = _profile;
         if (profile is null) return [];
 
+        var running = GameProcessWatcher.RunningNames();
         return profile.Games
             .Select(game => new SupportedGame
             {
@@ -4220,7 +4221,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                 Name = game.Name,
                 ProcessNames = [.. game.ProcessNames],
                 Regions = [.. game.Regions.Select(r => r.Name).Where(n => n.Length > 0)],
-                Running = GameProcessWatcher.FindRunning(game.ProcessNames) is not null,
+                Running = GameProcessWatcher.FindRunning(game.ProcessNames, running) is not null,
                 LastPlayed = game.Id.Equals(_config.LastGameId, StringComparison.OrdinalIgnoreCase),
             })
             .OrderByDescending(g => g.Running)
@@ -4237,7 +4238,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     /// while one is: a player in a match without boosting may press Start boosting any second.
     /// </summary>
     public bool AnyGameRunning() =>
-        _profile is { } profile && profile.Games.Any(game => GameProcessWatcher.FindRunning(game.ProcessNames) is not null);
+        _profile is { } profile && GameProcessWatcher.FindRunning(profile.Games.SelectMany(g => g.ProcessNames)) is not null;
 
     /// <summary>The profile's game when it has exactly one, else null.</summary>
     private string? OnlyGameName => _profile is { Games.Count: 1 } profile ? profile.Games[0].Name : null;

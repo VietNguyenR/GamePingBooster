@@ -215,7 +215,9 @@
                    TextWrapping="Wrap" TextAlignment="Center"
                    MaxWidth="320" />
 
-        <ProgressBar IsIndeterminate="True" Height="3" Margin="0,4,0,0"
+        <!-- IsIndeterminate bound too, not "True": hiding the bar does not stop its animation, and the window kept
+             redrawing at ~15 % of a core for good after the first connect (measured 2026-10-17). -->
+        <ProgressBar IsIndeterminate="{Binding IsBusy}" Height="3" Margin="0,4,0,0"
                      IsVisible="{Binding IsBusy}" />
       </StackPanel>
     </Border>
