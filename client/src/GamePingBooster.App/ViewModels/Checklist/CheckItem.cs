@@ -87,8 +87,27 @@ public abstract class CheckItem : INotifyPropertyChanged
         get => _lines;
         protected set
         {
+            // Items re-evaluate on every status (once a second) and build new lines each time. Swapping in an equal
+            // list would recreate every button under the mouse, and a click whose press and release straddle the swap
+            // is lost (found 2026-10-17: "Chắc chắn?" missed most presses). Same text and same buttons: keep the old.
+            if (SameLines(_lines, value)) return;
             if (Set(ref _lines, value)) Raise(nameof(HasLines));
         }
+    }
+
+    private static bool SameLines(IReadOnlyList<DetailLine> a, IReadOnlyList<DetailLine> b)
+    {
+        if (a.Count != b.Count) return false;
+        for (var i = 0; i < a.Count; i++)
+        {
+            if (a[i].Text != b[i].Text || a[i].IsEntry != b[i].IsEntry) return false;
+            var x = a[i].AllButtons;
+            var y = b[i].AllButtons;
+            if (x.Count != y.Count) return false;
+            for (var j = 0; j < x.Count; j++)
+                if (x[j].Text != y[j].Text) return false;
+        }
+        return true;
     }
 
     public bool HasLines => Lines.Count > 0;

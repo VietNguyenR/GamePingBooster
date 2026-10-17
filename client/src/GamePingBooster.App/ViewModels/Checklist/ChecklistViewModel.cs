@@ -32,6 +32,7 @@ public sealed class ChecklistViewModel : INotifyPropertyChanged
             new NetworkCheck(),
             new NetAppsCheck(pipe),
             new ResourceCheck(pipe),
+            new PowerCheck(pipe),
         ];
         foreach (var item in _items) item.PropertyChanged += OnItemChanged;
 

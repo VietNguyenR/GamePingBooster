@@ -33,21 +33,24 @@ internal sealed class PipeServer
     private readonly UnblockDns _unblock;
     private readonly AutoUpdater _updater;
     private readonly Network.NetworkApps _netApps;
+    private readonly Network.PowerTune _power;
     private readonly Action<string> _log;
     private StreamWriter? _writer;
     private uint? _uiSession;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
 
     public PipeServer(TunnelEngine engine, UnblockDns unblock, AutoUpdater updater, Network.NetworkApps netApps,
-        Action<string> log)
+        Network.PowerTune power, Action<string> log)
     {
         _engine = engine;
         _unblock = unblock;
         _updater = updater;
         _netApps = netApps;
+        _power = power;
         _log = log;
         _engine.StatusChanged += status => _ = PushAsync(status);
         _netApps.Changed += () => _ = PushAsync(_engine.Snapshot());
+        _power.Changed += () => _ = PushAsync(_engine.Snapshot());
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -460,6 +463,41 @@ internal sealed class PipeServer
                 break;
             }
 
+            // PC tune-up panel, item 5. On/off only: which plan, which card and which settings are decided here, never sent
+            // by the app. Not awaited: a card restart takes seconds.
+            case "power-boost":
+            {
+                var on = cmd.Enabled ?? true;
+                _ = Task.Run(async () =>
+                {
+                    string? error = null;
+                    if (on) error = _power.Boost();
+                    else _power.Unboost("the player pressed Restore");
+                    if (error is not null) _log($"power-boost refused: {error}");
+                    var reply = _engine.Snapshot();
+                    reply.AckVerb = "power-boost";
+                    reply.CommandError = error;
+                    await PushAsync(reply).ConfigureAwait(false);
+                }, ct);
+                break;
+            }
+
+            case "nic-power":
+            {
+                var off = cmd.Enabled ?? true;
+                _ = Task.Run(async () =>
+                {
+                    var error = off ? await _power.TurnOffNicPowerSavingAsync().ConfigureAwait(false)
+                        : await _power.RestoreNicAsync().ConfigureAwait(false);
+                    if (error is not null) _log($"nic-power {(off ? "off" : "restore")}: {error}");
+                    var reply = _engine.Snapshot();
+                    reply.AckVerb = "nic-power";
+                    reply.CommandError = error;
+                    await PushAsync(reply).ConfigureAwait(false);
+                }, ct);
+                break;
+            }
+
             // Only a request to look now. Which release, whether to install it and when are AutoUpdater's.
             case "check-update":
                 _updater.CheckNow();
@@ -512,6 +550,8 @@ internal sealed class PipeServer
         status.UnblockServices = [.. _unblock.Services];
         status.UnblockProblemCode = _unblock.ProblemCode;
         status.UpdatesPaused = _netApps.UpdatesPaused;
+        status.PowerBoosted = _power.Boosted;
+        status.NicPowerChanged = _power.NicChanged;
         _updater.Stamp(status);
 
         await _writeLock.WaitAsync().ConfigureAwait(false);

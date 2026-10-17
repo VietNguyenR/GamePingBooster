@@ -160,9 +160,16 @@ public sealed class CommandMessage
     //                  per connection for that long), or CommandError when it cannot count.
     // pause-updates -> Enabled true pauses Windows Update until the game closes; false resumes it now. Refused
     //                  when no game is running: the pause only exists for the length of one.
+    // power-boost   -> Enabled true switches to a faster power plan until the game closes (or boosting stops before
+    //                  a game ran); false puts the player's plan back now. Refused outside a game session.
+    // nic-power     -> Enabled true turns off the line card's power saving (lasting; the card restarts, a few seconds
+    //                  without network); false puts its old settings back. Refused while a game runs or the tunnel
+    //                  is up. CommandError "game-running" / "tunnel-up" / "reboot" (written, takes effect after a
+    //                  restart of the PC) / a sentence.
 
     /// <summary>set-quality-sharing: whether this installation sends connection quality after each match;
-    /// set-lobby-watch: whether the game's TCP connections are logged; pause-updates: pause or resume.</summary>
+    /// set-lobby-watch: whether the game's TCP connections are logged; pause-updates: pause or resume;
+    /// power-boost: boost or put back; nic-power: turn power saving off or put it back.</summary>
     [JsonPropertyName("enabled")] public bool? Enabled { get; set; }
 }
 
@@ -633,6 +640,14 @@ public sealed class StatusMessage
     /// status, so an app opened after the press still shows it and can undo it.
     /// </summary>
     [JsonPropertyName("updatesPaused")] public bool UpdatesPaused { get; set; }
+
+    /// <summary>
+    /// The power plan is boosted by the app (power-boost) and goes back by itself when the game closes. On every status.
+    /// </summary>
+    [JsonPropertyName("powerBoosted")] public bool PowerBoosted { get; set; }
+
+    /// <summary>The network card's power saving was turned off by the app (nic-power) and can be put back. On every status.</summary>
+    [JsonPropertyName("nicPowerChanged")] public bool NicPowerChanged { get; set; }
 
     /// <summary>
     /// relays and set-relay-choice only: every relay the player can choose. A relays reply comes once the

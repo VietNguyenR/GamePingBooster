@@ -184,6 +184,10 @@ public static class Program
         using var netApps = new Network.NetworkApps(engine.GameProcessNames, engine.AnyGameRunning,
             () => engine.TunnelInnerAddress, log);
 
+        // And a power plan boost (item 5): it lasts one game session too.
+        Network.PowerTune.RestoreLeftovers(log);
+        using var power = new Network.PowerTune(engine.AnyGameRunning, () => engine.State, log);
+
         // The policy is read through the engine because that is where the delivered profile lands,
         // and read on every attempt rather than captured once: the profile arrives after startup,
         // so a list captured here would be the built-in fallback for the life of the process.
@@ -277,7 +281,7 @@ public static class Program
                 "It will be tried again on the next connect.");
         }
 
-        pipe = new PipeServer(engine, unblock, updater, netApps, log);
+        pipe = new PipeServer(engine, unblock, updater, netApps, power, log);
 
         log($"Listening on pipe \\\\.\\pipe\\{Core.Ipc.IpcConstants.PipeName}");
         await pipe.RunAsync(ct).ConfigureAwait(false);

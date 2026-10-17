@@ -32,6 +32,9 @@ internal static partial class Program
         if (args.Length > 0 && args[0] == "ticket") return TicketMain(args[1..]);
         if (args.Length > 0 && args[0] == "netapps") return NetAppsMain(args[1..]);
         if (args.Length > 0 && args[0] == "pauseupdates") return PauseUpdatesMain(args[1..]);
+        if (args.Length > 0 && args[0] == "powerread") return PowerReadMain(args[1..]);
+        if (args.Length > 0 && args[0] == "powertune") return PowerTuneMain(args[1..]);
+        if (args.Length > 0 && args[0] == "cardrestart") return CardRestartMain(args[1..]);
         return AllScenarios();
     }
 
