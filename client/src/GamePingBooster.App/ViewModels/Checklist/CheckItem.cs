@@ -76,6 +76,35 @@ public abstract class CheckItem : INotifyPropertyChanged
 
     public bool HasDetail => !string.IsNullOrWhiteSpace(Detail);
 
+    private IReadOnlyList<DetailLine> _lines = [];
+
+    /// <summary>
+    /// Detail as separate lines, for an item that needs a button on some of them (an app to skip). Shown where
+    /// <see cref="Detail"/> is; an item uses one or the other.
+    /// </summary>
+    public IReadOnlyList<DetailLine> Lines
+    {
+        get => _lines;
+        protected set
+        {
+            if (Set(ref _lines, value)) Raise(nameof(HasLines));
+        }
+    }
+
+    public bool HasLines => Lines.Count > 0;
+
+    private bool _isExpanded;
+
+    /// <summary>
+    /// A good line opened by a click to show its whole summary (and detail): the panel is too narrow for "Wi-Fi 5 GHz ✓ ·
+    /// sóng 81% · ..." on one line, and a tooltip was not enough (owner, 2026-10-17). Not remembered.
+    /// </summary>
+    public bool IsExpanded
+    {
+        get => _isExpanded;
+        set => Set(ref _isExpanded, value);
+    }
+
     /// <summary>The fix button's text, or null when the app has nothing to press for this item.</summary>
     public virtual string? FixLabel => null;
 
@@ -169,3 +198,15 @@ public abstract class CheckItem : INotifyPropertyChanged
 
     protected void Raise(string? name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 }
+
+/// <summary>
+/// One line of an item's detail. IsEntry marks a line about one thing (an app), drawn a little brighter and indented;
+/// its buttons, if any, sit at its right.
+/// </summary>
+public sealed record DetailLine(string Text, bool IsEntry = false, IReadOnlyList<LineButton>? Buttons = null)
+{
+    public IReadOnlyList<LineButton> AllButtons => Buttons ?? [];
+}
+
+/// <summary>A link-style button on a detail line.</summary>
+public sealed record LineButton(string Text, Action OnClick);

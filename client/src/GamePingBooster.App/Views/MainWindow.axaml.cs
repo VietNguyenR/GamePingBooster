@@ -1,6 +1,7 @@
 ﻿using System.Diagnostics;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
 using Avalonia.Threading;
@@ -117,6 +118,18 @@ public partial class MainWindow : SurfaceWindow
     private void OnChecklistToggle(object? sender, RoutedEventArgs e) => _checklist?.Toggle();
 
     private void OnChecklistGoodToggle(object? sender, RoutedEventArgs e) => _checklist?.ToggleGood();
+
+    private void OnCheckItemTapped(object? sender, TappedEventArgs e)
+    {
+        // A button inside the card ("Bỏ qua") is its own click, not a fold.
+        if ((e.Source as Visual)?.FindAncestorOfType<Button>(includeSelf: true) is not null) return;
+        if ((sender as Control)?.DataContext is CheckItem item) item.IsExpanded = !item.IsExpanded;
+    }
+
+    private void OnDetailLineButton(object? sender, RoutedEventArgs e)
+    {
+        if (sender is Button { DataContext: LineButton button }) button.OnClick();
+    }
 
     private async void OnChecklistRestoreAll(object? sender, RoutedEventArgs e)
     {

@@ -123,6 +123,16 @@
       <Setter Property="MinHeight" Value="0" />
       <Setter Property="CornerRadius" Value="6" />
     </Style>
+    <Style Selector="TextBlock.detail">
+      <Setter Property="Foreground" Value="#787878" />
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="TextBlock.detail.entry">
+      <Setter Property="Foreground" Value="#ababab" />
+      <Setter Property="Margin" Value="8,0,0,0" />
+    </Style>
     <Style Selector="Button.checklink">
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="BorderThickness" Value="0" />
@@ -435,6 +445,32 @@
                       <TextBlock Text="{Binding Summary}" Foreground="#ababab" FontSize="12" TextWrapping="Wrap" />
                       <SelectableTextBlock Text="{Binding Detail}" IsVisible="{Binding HasDetail}"
                                            Foreground="#787878" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0" />
+                      <ItemsControl ItemsSource="{Binding Lines}" IsVisible="{Binding HasLines}" Margin="0,2,0,0">
+                        <ItemsControl.ItemsPanel>
+                          <ItemsPanelTemplate>
+                            <StackPanel Spacing="2" />
+                          </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate x:DataType="ck:DetailLine">
+                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                              <TextBlock Classes="detail" Classes.entry="{Binding IsEntry}" Text="{Binding Text}" />
+                              <ItemsControl Grid.Column="1" ItemsSource="{Binding AllButtons}" VerticalAlignment="Center">
+                                <ItemsControl.ItemsPanel>
+                                  <ItemsPanelTemplate>
+                                    <StackPanel Orientation="Horizontal" Spacing="10" />
+                                  </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                  <DataTemplate x:DataType="ck:LineButton">
+                                    <Button Classes="checklink" FontSize="11" Content="{Binding Text}" Click="OnDetailLineButton" />
+                                  </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                              </ItemsControl>
+                            </Grid>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
                       <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,4,0,0"
                                   IsVisible="{Binding HasActions}">
                         <Button Classes="checkfix" Content="{Binding FixLabel}" IsVisible="{Binding HasFix}"
@@ -466,14 +502,47 @@
               </ItemsControl.ItemsPanel>
               <ItemsControl.ItemTemplate>
                 <DataTemplate x:DataType="ck:CheckItem">
-                  <Border Classes="checkcard" Padding="12,8">
-                    <Grid ColumnDefinitions="Auto,Auto,*" ColumnSpacing="10">
+                  <!-- One line, trimmed; a click opens the whole summary and detail under the title, a second folds it. -->
+                  <Border Classes="checkcard" Padding="12,8" Cursor="Hand" Tapped="OnCheckItemTapped">
+                    <Grid ColumnDefinitions="Auto,Auto,*" RowDefinitions="Auto,Auto" ColumnSpacing="10">
                       <Path Grid.Column="0" Data="{Binding SeverityIcon}" Stroke="{Binding SeverityBrush}"
                             StrokeThickness="1.6" Width="16" Height="16" Stretch="None" VerticalAlignment="Center" />
                       <TextBlock Grid.Column="1" Text="{Binding Title}" Foreground="#e5e5e5" FontSize="12" FontWeight="SemiBold"
                                  VerticalAlignment="Center" />
                       <TextBlock Grid.Column="2" Text="{Binding Summary}" Foreground="#ababab" FontSize="12"
-                                 TextTrimming="CharacterEllipsis" VerticalAlignment="Center" ToolTip.Tip="{Binding Summary}" />
+                                 TextTrimming="CharacterEllipsis" VerticalAlignment="Center" IsVisible="{Binding !IsExpanded}" />
+                      <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Spacing="4" Margin="0,4,0,0"
+                                  IsVisible="{Binding IsExpanded}">
+                        <TextBlock Text="{Binding Summary}" Foreground="#ababab" FontSize="12" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding Detail}" IsVisible="{Binding HasDetail}"
+                                   Foreground="#787878" FontSize="11" TextWrapping="Wrap" />
+                        <ItemsControl ItemsSource="{Binding Lines}" IsVisible="{Binding HasLines}">
+                          <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                              <StackPanel Spacing="2" />
+                            </ItemsPanelTemplate>
+                          </ItemsControl.ItemsPanel>
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="ck:DetailLine">
+                              <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                <TextBlock Classes="detail" Classes.entry="{Binding IsEntry}" Text="{Binding Text}" />
+                                <ItemsControl Grid.Column="1" ItemsSource="{Binding AllButtons}" VerticalAlignment="Center">
+                                  <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                      <StackPanel Orientation="Horizontal" Spacing="10" />
+                                    </ItemsPanelTemplate>
+                                  </ItemsControl.ItemsPanel>
+                                  <ItemsControl.ItemTemplate>
+                                    <DataTemplate x:DataType="ck:LineButton">
+                                      <Button Classes="checklink" FontSize="11" Content="{Binding Text}" Click="OnDetailLineButton" />
+                                    </DataTemplate>
+                                  </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                              </Grid>
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                      </StackPanel>
                     </Grid>
                   </Border>
                 </DataTemplate>
