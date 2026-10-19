@@ -3,6 +3,7 @@ using System.Net;
 using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Paths;
 using GamePingBooster.Core.Profiles;
+using GamePingBooster.Core.Quality;
 
 namespace GamePingBooster.Service.Tunnel;
 
@@ -37,6 +38,12 @@ internal sealed partial class TunnelEngine
         /// switch policy's way back, as ChooseDoorAsync's detour is for home. Null when it was opened on the road.
         /// </summary>
         public string? LeftDoor { get; init; }
+
+        /// <summary>
+        /// Set when this was home until a move between matches, kept open for what was in use on it - see
+        /// TunnelEngine.HeldTunnel.cs. Null for a tunnel a plan opened.
+        /// </summary>
+        public HeldTunnelClock? Held { get; init; }
     }
 
     /// <summary>The dispatcher, or null while the connection is one tunnel. Supervisor and teardown only.</summary>
@@ -198,6 +205,7 @@ internal sealed partial class TunnelEngine
             _log($"Region routing collapsed to the home tunnel for the rest of this connection: {fault}. Tunnels to other " +
                  "relays close as the servers in use on them go quiet.");
         }
+        RetireHeldTunnels(paths);
 
         List<OtherTunnel> others;
         lock (_otherTunnels) others = [.. _otherTunnels.Values];

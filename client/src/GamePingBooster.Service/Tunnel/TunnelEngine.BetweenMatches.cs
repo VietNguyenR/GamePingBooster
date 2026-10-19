@@ -22,10 +22,11 @@ namespace GamePingBooster.Service.Tunnel;
 /// score since 2026-09-29: a path losing packets counts <see cref="RelayLoss.PenaltyMs"/> slower, so a relay the
 /// line has started losing packets into is left for a clean one, and a clean one is never left for a lossy one.
 ///
-/// What the move costs: every TCP connection that rode the old relay - the lobby's, Steam's - which cannot go on
-/// through another relay's address and has to be opened again. They are closed on purpose right after the swap
-/// (<see cref="CloseWhatRodeIt"/>): left alone they fail silently, and on 2026-10-06 PUBG sat on "Initializing..."
-/// for over two minutes after a move made 5 s after a training match ended.
+/// What the move costs: every TCP connection that rode the old relay - the lobby's, Steam's - cannot go on through
+/// another relay's address. Since 2026-10-19 the old tunnel stays open for them until the next match is well under way
+/// (TunnelEngine.HeldTunnel.cs): cutting them while the lobby loaded left PUBG on smoke. When it cannot stay they are
+/// closed on purpose right after the swap (<see cref="CloseWhatRodeIt"/>): left alone they fail silently, and on
+/// 2026-10-06 PUBG sat on "Initializing..." for over two minutes after a move made 5 s after a training match ended.
 ///
 /// THE WORST CASE is the next match starting while the tunnel is being swapped, and three things keep it
 /// away. The move is made only if the tunnel has carried NO game UDP since the gap began, checked again right
@@ -212,8 +213,18 @@ internal sealed partial class TunnelEngine
         // With region routing in force the planner has already compared every relay for every region, and moving
         // home would replace the tunnel the other tunnels' servers were planned against. A move off a relay not
         // used for the game only comes with a game change, which closes the other tunnels first.
-        if (!forGame && _paths is not null) return;
+        // A dispatcher a move left behind is not region routing: it plans nothing, and moves go on as before.
+        if (!forGame && _paths is not null && !PathsOnlyHold) return;
         if (!forGame && _config.RescanBetweenMatches == false) return;
+
+        // A tunnel still kept open for what rode it before the last move: the next match retires it (HeldTunnel.cs), and a
+        // second move before then would keep a second one. The move off a relay not for the game is made all the same.
+        if (!forGame && HeldTunnels() is { Count: > 0 } stillHeld)
+        {
+            _log($"Between matches: staying on {current.Name} - the tunnel to {stillHeld[0].Way.Name} is still open for " +
+                 "what rode it before the last move, and the relays are measured again once the next match has retired it.");
+            return;
+        }
         if (!SessionHold.AllowsMove(_game, SessionBegun(tunnel)))
         {
             // Not cleared by a later pass: the session runs until the game closes, and a move then is the next connect's.
@@ -233,8 +244,10 @@ internal sealed partial class TunnelEngine
         if (!(_watcher?.IsGameRunning ?? false)) return;
 
         var currentRelayId = RelayPaths.RelayIdOf(current);
+        // Never a relay another tunnel is on - one kept open by a move: a handshake to it would take that tunnel's
+        // session, and what rides it with it (G5).
         var others = RelaysForGame(_game)
-            .Where(r => !r.Id.Equals(currentRelayId, StringComparison.OrdinalIgnoreCase))
+            .Where(r => !r.Id.Equals(currentRelayId, StringComparison.OrdinalIgnoreCase) && OtherTunnelTo(r.Id) is null)
             .ToList();
         if (others.Count == 0)
         {
@@ -576,20 +589,36 @@ internal sealed partial class TunnelEngine
             LogGameDestinations(old);
             var previousIp = old.Session.ClientIp;
 
-            // Read before the swap, while they are still the old relay's: closed once the new tunnel runs.
-            var riding = TcpConnections.From(previousIp);
+            // Read before the swap, while they are still the old relay's: kept on it, or closed once the new tunnel runs.
+            var riding = RidingTunnel(old);
+            var whyNotHold = WhyNotHold(riding);
+            var held = whyNotHold is null;
 
-            // The new relay's /32 goes in BEFORE the old tunnel stops, while nothing depends on it yet. It
-            // replaces the old relay's pin, which is harmless now: the old tunnel sends one Disconnect and no more.
+            // The new relay's /32 goes in BEFORE the old tunnel stops, while nothing depends on it yet. It replaces the
+            // old relay's pin: harmless when the old tunnel sends one Disconnect and no more, and put back as another
+            // tunnel's pin when it is kept.
             routes.PinRelayRoute(ParseEndpoint(target.Endpoint).Address);
 
-            // With a Disconnect: this relay is being left, and its address goes back to its pool. The adapter's
-            // reader is taken off it first, so what the game sends during the swap waits in the adapter and leaves
-            // through the new relay; Dispose then stops the old downlink.
-            StopUplink();
-            _tunnel = null;
-            old.Dispose();
-            var closedNote = CloseWhatRodeIt(riding);
+            string closedNote;
+            if (held)
+            {
+                // Kept: packets leave by it until StartTunnel moves home, and what rode it stays on it after that.
+                closedNote = HoldForWhatRodeIt(old, previous, target, riding, routes);
+                StopUplink();
+                _tunnel = null;
+            }
+            else
+            {
+                // With a Disconnect: this relay is being left, and its address goes back to its pool. The adapter's
+                // reader is taken off it first, so what the game sends during the swap waits in the adapter and leaves
+                // through the new relay; Dispose then stops the old downlink. With a dispatcher the reader is its, and
+                // home is lost first, so nothing is sent on the disposed tunnel.
+                StopUplink();
+                _tunnel = null;
+                _paths?.LoseHome();
+                old.Dispose();
+                closedNote = CloseWhatRodeIt(riding) + (whyNotHold is { Length: > 0 } why ? $" Not kept open: {why}." : "");
+            }
 
             _relay = target;
             _path = path is null ? null : new PathMeasurement(path.RegionName, Math.Max(0, nowMs - chosen.LegOneMs), path.Landmark);
@@ -600,11 +629,13 @@ internal sealed partial class TunnelEngine
 
             _tunnel = client;
             ResetThroughputBaseline();
-            if (!client.Session.ClientIp.Equals(previousIp))
+            // With a dispatcher the adapter keeps its address and the new tunnel rewrites: re-addressing would break every
+            // connection still on another tunnel.
+            if (_paths is null && !client.Session.ClientIp.Equals(previousIp))
             {
                 routes.ConfigureAdapter(adapter.InterfaceIndex, client.Session.ClientIp, prefixLength: 24, client.Session.Mtu);
             }
-            StartTunnel(client, ct);
+            StartTunnel(client, ct, oldHomeHeld: held);
             var swapMs = Stopwatch.GetElapsedTime(swapStarted).TotalMilliseconds;
 
             // After the pumps, off the critical half second: the routes were never taken out, so this only puts

@@ -79,6 +79,19 @@ internal sealed class PathDispatcher
     }
 
     /// <summary>
+    /// A move between matches put <paramref name="home"/> in place of the old home, and the old one stays open as
+    /// another tunnel for what was in use on it (TunnelEngine.HeldTunnel.cs). Unlike <see cref="ReplaceHome"/> nothing
+    /// stuck moves: those connections finish on the relay they started on, and only what is new goes to the new home.
+    /// </summary>
+    public void MoveHome(TunnelClient home) => _home = home;
+
+    /// <summary>Sticks a destination already in use to <paramref name="tunnel"/> - see <see cref="StickyDestinations{T}.Stick"/>.</summary>
+    public void Stick(uint destination, TunnelClient tunnel) => _sticky.Stick(destination, tunnel, NowMs());
+
+    /// <summary>Every destination stuck to <paramref name="tunnel"/> right now, host order.</summary>
+    public List<uint> DestinationsOf(TunnelClient tunnel) => _sticky.DestinationsOf(tunnel, NowMs());
+
+    /// <summary>
     /// The home tunnel is gone and there is no new one yet. What was stuck to it is released - its routes are out,
     /// so those destinations go over the player's own line until the reconnect puts them back - and packets the
     /// pump still reads for home are dropped rather than sent on a disposed tunnel.

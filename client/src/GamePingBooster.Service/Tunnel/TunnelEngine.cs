@@ -3028,9 +3028,9 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         var psk = System.Text.Encoding.UTF8.GetBytes(_config.Psk);
 
         // The TCP connections riding this relay, read before it is let go: if the tunnel comes back on ANOTHER relay
-        // they cannot continue, and are closed so the programs open them again (CloseWhatRodeIt). Not with several
-        // tunnels - the adapter's address is theirs too, and their connections are fine.
-        List<TcpConnections.Row> riding = previousIp is null || _paths is not null ? [] : TcpConnections.From(previousIp);
+        // they cannot continue, and are closed so the programs open them again (CloseWhatRodeIt). With several tunnels
+        // only those to a destination stuck to home - the adapter's address is the others' too, and theirs are fine.
+        List<TcpConnections.Row> riding = _tunnel is not { } leaving ? [] : RidingTunnel(leaving);
 
         // A TCP game's connections riding this relay survive a reconnect to the SAME relay - its reservation gives the
         // same inner IP back - but not the routes being pulled from under them. So they stay in while that relay is
@@ -3668,16 +3668,18 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     /// at it. The ONE way a tunnel starts carrying traffic - connect, reconnect and a move between matches all
     /// come through here. The reader is created on the first call after the adapter session opens.
     /// </summary>
-    private void StartTunnel(TunnelClient tunnel, CancellationToken ct)
+    private void StartTunnel(TunnelClient tunnel, CancellationToken ct, bool oldHomeHeld = false)
     {
         var adapter = _adapter ?? throw new InvalidOperationException("There is no virtual adapter to pump.");
 
         // Several tunnels: the new home rewrites to the adapter's fixed address from its first packet, and what
-        // was on the old home is on this one now. Before the pump points at it, so nothing slips past either.
+        // was on the old home is on this one now - unless a move kept the old home open for it (HeldTunnel.cs).
+        // Before the pump points at it, so nothing slips past either.
         var paths = _paths;
         if (paths is not null) tunnel.Dispatcher = paths;
         tunnel.StartPumping(adapter, ct);
-        paths?.ReplaceHome(tunnel);
+        if (oldHomeHeld) paths?.MoveHome(tunnel);
+        else paths?.ReplaceHome(tunnel);
 
         if (_pump is null)
         {
@@ -4150,7 +4152,14 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
 
         // The other tunnels were planned for the previous game's regions. The supervisor closes them before anything
         // else it does, and before a move to a relay that carries this game.
-        if (_paths is not null) Volatile.Write(ref _multiTunnelResetReason, $"{game.Name} started");
+        // A dispatcher a move left behind plans nothing for any game: it stays, and so does the adapter's address, unless
+        // this game routes regions and needs a table of its own - re-addressing would cut what still rides the adapter.
+        if (_paths is not null &&
+            (!PathsOnlyHold || GamePingBooster.Core.Paths.RegionRouting.Resolve(_config.RegionRouting, game.RegionRouting).Mode ==
+                GamePingBooster.Core.Paths.RegionRoutingMode.On))
+        {
+            Volatile.Write(ref _multiTunnelResetReason, $"{game.Name} started");
+        }
 
         // Both belonged to the previous game's server. The probe loop measures the new one within a
         // second of its first packet.

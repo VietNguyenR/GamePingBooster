@@ -105,6 +105,26 @@ public sealed class StickyDestinations<TTunnel> where TTunnel : class
     }
 
     /// <summary>
+    /// Sticks <paramref name="destination"/> to <paramref name="tunnel"/> as if a packet had just gone to it, whatever
+    /// it was stuck to before. For connections already open when the table is created - a relay move that keeps the old
+    /// tunnel for them, before any packet of theirs has been through a dispatcher.
+    /// </summary>
+    public void Stick(uint destination, TTunnel tunnel, long nowMs)
+    {
+        lock (_gate) _entries[destination] = new Entry(tunnel, nowMs);
+    }
+
+    /// <summary>Every destination stuck to <paramref name="tunnel"/> right now.</summary>
+    public List<uint> DestinationsOf(TTunnel tunnel, long nowMs)
+    {
+        lock (_gate)
+        {
+            return [.. _entries.Where(e => ReferenceEquals(e.Value.Tunnel, tunnel) && nowMs - e.Value.LastMs <= _stickyForMs)
+                .Select(e => e.Key)];
+        }
+    }
+
+    /// <summary>
     /// A packet FROM <paramref name="source"/> came back through <paramref name="tunnel"/>. Keeps a flow
     /// that is quiet one way stuck, and never sticks anything new: only the uplink decides where a
     /// destination goes.

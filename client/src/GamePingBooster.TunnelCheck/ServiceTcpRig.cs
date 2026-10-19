@@ -15,8 +15,9 @@ namespace GamePingBooster.TunnelCheck;
 /// sits on its open connection saying nothing, and B becomes the clearly faster relay.
 ///
 ///   1. tcpGameplay WITHOUT persistentSession, the control: the quiet reads as a gap between matches - TCP counting as
-///      the match, end to end - the tunnel moves to B, and the move closes the game's connection. This is the break a
-///      game like Aniimo must never see.
+///      the match, end to end - and the tunnel moves to B. Until 2026-10-19 the move closed the game's connection, the
+///      break a game like Aniimo must never see; it now keeps the tunnel to A open for it (TunnelEngine.HeldTunnel.cs),
+///      and the same connection carries on through A.
 ///   2. The same with persistentSession: the tunnel stays on A, the log says why, and the same connection carries on
 ///      after the quiet with nothing lost.
 ///   3. Step 3, routes going out: relay A goes silent under the connection. The reconnect keeps the routes in while A is
@@ -65,7 +66,9 @@ internal static partial class Program
         var game = Process.Start(new ProcessStartInfo(rigGameExe, $"\"{control}\" \"{stats}\"") { UseShellExecute = false, CreateNoWindow = true })!;
         started(game);
 
-        // ------------------------------------------------ 1. without persistentSession: the move happens and cuts it
+        // ------------------------------------------------ 1. without persistentSession: the move happens, A is kept for it
+        // Until 2026-10-19 the move closed the game's connection here. It now keeps the tunnel to A open for what rode it
+        // (TunnelEngine.HeldTunnel.cs) - the connection lives through the move, and only what opens afterwards takes B.
         Console.WriteLine();
         Console.WriteLine("A TCP game without persistentSession (the control):");
         var cut = await TcpQuietSpell(run, control, stats, wsl);
@@ -74,15 +77,20 @@ internal static partial class Program
             var moved = await run.WaitFor(@"Between matches: moved from Rig A \[a\] to Rig B \[b\][^\n]*", 45_000);
             Check($"The quiet read as a gap between matches - TCP counted as the match - and home moved to B: {moved?.Value.Trim()}",
                 moved is not null, Tail(run));
-            var closed = Regex.Match(run.Seen, @"Closed (\d+) of (\d+) TCP connection\(s\) that rode the old relay");
-            Check($"  the move closed the game's connection ({closed.Value})",
-                closed.Success && int.Parse(closed.Groups[1].Value) >= 1, Tail(run));
+            var kept = Regex.Match(run.Seen, @"Kept the tunnel to Rig A open for the (\d+) TCP connection\(s\) that rode it");
+            Check($"  the move kept A open for the game's connection instead of closing it ({kept.Value})",
+                kept.Success && int.Parse(kept.Groups[1].Value) >= 1 && !run.Seen.Contains("that rode the old relay (the lobby"),
+                Tail(run));
+            Check("  and both relays are pinned", PinnedVia(wsl) is var both && both.Contains(_a.Address.ToString()) &&
+                both.Contains(_b.Address.ToString()), string.Join(", ", PinnedVia(wsl)));
             File.WriteAllText(control, "tcp");
-            await Task.Delay(5_000);
+            await Task.Delay(15_000);
             var after = GameStats(stats, "tcp");
-            Check($"  the game saw its connection break ({after.Breaks - c.Breaks} break(s)), and a new one plays through B " +
-                  $"({after.Back - c.Back} echoed since)",
-                after.Breaks > c.Breaks && after.Back > c.Back, $"{after}");
+            Check($"  the same connection carried on through A: no break, nothing lost ({after.Back - c.Back} echoed since)",
+                after.Breaks == c.Breaks && after.Lost == c.Lost && after.Back - c.Back > 300, $"{after} against {c}");
+            run.Read();
+            Check("  and A is not let go while the game still plays on it", !run.Seen.Contains("Closed the tunnel to Rig A"),
+                Tail(run));
         }
         File.WriteAllText(control, "quiet");
         await run.Send("disconnect");

@@ -189,6 +189,22 @@ internal static partial class Program
             Check("Replies alone keep a destination stuck - a flow quiet one way is still a flow", still == a, $"went to {still}");
         }
         {
+            // A move between matches keeps the old tunnel for what rode it: those destinations are stuck to it before any
+            // packet of theirs went through a dispatcher, and the plan's answer (the new home) never reaches them.
+            var sticky = new StickyDestinations<FakeTunnel>();
+            sticky.Resolve(server, 0, () => b);
+            sticky.Stick(server, a, 1_000);
+            sticky.Stick(Addr(1, 1, 1, 1), a, 1_000);
+            var stays = sticky.Resolve(server, 2_000, () => b);
+            var fresh = sticky.Resolve(Addr(2, 2, 2, 2), 2_000, () => b);
+            var ofA = sticky.DestinationsOf(a, 2_000);
+            Check("Stick holds a destination in use on the tunnel given, over what it was on, and new ones take the plan",
+                stays == a && fresh == b && ofA.Count == 2 && ofA.Contains(server) && ofA.Contains(Addr(1, 1, 1, 1)),
+                $"stays {stays}, fresh {fresh}, {ofA.Count} on a");
+            Check("and what is stuck to a tunnel is listed only while in use",
+                sticky.DestinationsOf(a, 2_000 + window + 1).Count == 0 && sticky.DestinationsOf(b, 2_000).Count == 1);
+        }
+        {
             var sticky = new StickyDestinations<FakeTunnel>();
             sticky.Touch(server, a, 0);
             sticky.Resolve(server, 0, () => b);

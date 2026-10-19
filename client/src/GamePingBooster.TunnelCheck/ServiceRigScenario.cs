@@ -22,7 +22,8 @@ namespace GamePingBooster.TunnelCheck;
 ///
 /// `service tcp` is a run of its own, with its own profile and config (ServiceTcpRig.cs): a game that plays over one
 /// long TCP connection, as Aniimo does - first without persistentSession, where the move between matches must happen
-/// and cut the connection, then with it, where the tunnel must stay and the connection live through the quiet.
+/// and keep the old tunnel for the connection, then with it, where the tunnel must stay and the connection live through
+/// the quiet.
 ///
 /// Asks for Administrator once (Run-ServiceRig.ps1, for LocalSystem and one route) and puts the PC back afterwards:
 /// %ProgramData%\GamePingBooster moved aside and restored, the route and every pin removed. Close the app first - a UI

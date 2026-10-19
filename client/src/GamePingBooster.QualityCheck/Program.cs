@@ -104,6 +104,7 @@ internal static partial class Program
         AMatchKeepsItsGapClosed();
         TheGapIsTimedFromTheLastPacket();
         RescanComparesMediansByAClearMargin();
+        ATunnelKeptByAMoveGoesAfterTheNextMatch();
         AGameThatHoldsItsSessionStaysOnceItHasSent();
         AReconnectKeepsATcpGamesRoutes();
 
@@ -988,6 +989,67 @@ internal static partial class Program
         Check("known exactly, the quiet counts from the last packet, not the reading before it",
             !fired && due == 1_500, $"fired {fired}, due in {due} ms");
         Check("  ...and completes the gap ten seconds after it", gap.Feed(1016_500, packets, 1006_500), "not fired");
+    }
+
+    private static void ATunnelKeptByAMoveGoesAfterTheNextMatch()
+    {
+        // Readings every 5 s from the move at 0. The lobby sends no game UDP; a match sends 25 a second.
+        {
+            var clock = new HeldTunnelClock(0);
+            string? why = null;
+            long packets = 0;
+            long t;
+            for (t = 5_000; t <= 300_000 && why is null; t += 5_000) why = clock.Feed(t, packets);
+            Check("a held tunnel stays while the player is in the lobby", why is null, $"went at {t - 5_000} ms: {why}");
+            for (; t <= 600_000 && why is null; t += 5_000) why = clock.Feed(t, packets);
+            Check("  ...and goes ten minutes after the move with no match", why == "time" && t - 5_000 == 600_000,
+                $"{why} at {t - 5_000} ms");
+        }
+        {
+            var clock = new HeldTunnelClock(0);
+            long packets = 0;
+            clock.Feed(30_000, packets);
+            string? why = null;
+            long t;
+            for (t = 35_000; t <= 200_000 && why is null; t += 5_000)
+            {
+                packets += 125;
+                why = clock.Feed(t, packets);
+            }
+            Check("the next match retires it once it has run a minute on the new relay",
+                why == "match" && t - 5_000 == 90_000, $"{why} at {t - 5_000} ms");
+        }
+        {
+            var clock = new HeldTunnelClock(0);
+            long packets = 0;
+            clock.Feed(5_000, packets);
+            string? why = null;
+            for (long t = 10_000; t <= 120_000 && why is null; t += 5_000)
+            {
+                // A trickle under the match rate - a result screen, a lobby ping - is not a match.
+                packets += 20;
+                why = clock.Feed(t, packets);
+            }
+            Check("a trickle under the match rate never retires it", why is null, why ?? "");
+        }
+        {
+            var clock = new HeldTunnelClock(0);
+            long packets = 0;
+            clock.Feed(5_000, packets);
+            for (long t = 10_000; t <= 40_000; t += 5_000) clock.Feed(t, packets += 125);
+            // Home reconnects: the new tunnel counts from zero, and the match has to be seen for a minute on it again.
+            var afterReconnect = clock.Feed(45_000, 0);
+            string? why = null;
+            packets = 0;
+            long at = 0;
+            for (long t = 50_000; t <= 200_000 && why is null; t += 5_000)
+            {
+                why = clock.Feed(t, packets += 125);
+                at = t;
+            }
+            Check("a reconnect of home starts the minute again", afterReconnect is null && why == "match" && at == 105_000,
+                $"{why} at {at} ms");
+        }
     }
 
     private static void RescanComparesMediansByAClearMargin()
