@@ -59,6 +59,21 @@ internal static partial class Program
         MatchSummaryCountsSpikes();
 
         Console.WriteLine();
+        Console.WriteLine("The home line (household / congested):");
+        AnotherDeviceFillingTheLineIsHousehold();
+        AShortSpikeIsNeverHousehold();
+        ThisPcDownloadingIsNeverHousehold();
+        AQuietHouseIsNotHouseholdButTheRouterQueued();
+        WithoutCountersTheRouterQueueingIsCongested();
+        ViettelMatchPhoneSpeedTestIsCongested();
+        ViettelPhoneSpeedTestRecordingIsCongested();
+        WeakSignalPhoneSpeedTestRecordingIsCongested();
+        LateEchoesOnACalmFloorAreNotCongested();
+        ASlowRouteIsNeitherHouseholdNorCongested();
+        ARouterThatDoesNotAnswerPingsIsNeverCongested();
+        MatchSummaryCountsTheHomeLine();
+
+        Console.WriteLine();
         Console.WriteLine("Moving between ways into one relay:");
         RouteToTheRelayBadWhileTheEntryIsCleanMoves();
         AFiveSecondSpikeDoesNotMove();
@@ -513,6 +528,147 @@ internal static partial class Program
         {
             Check("  ...is flagged as a busy line", s.Events[0].BusyLine, "BusyLine false");
         }
+    }
+
+    // A phone speed test on the same Wi-Fi (2026-10-20): everything from the router on rises together, the router's counters
+    // show the phone, this PC is quiet.
+    private static void AnotherDeviceFillingTheLineIsHousehold()
+    {
+        var s = new Session();
+        s.Calm(240);
+        s.Repeat(16, () => s.Tick(gateway: 60, wire: 60, process: 60, datacentre: 60, other: 700));
+        s.Finish();
+        ExpectOne("four seconds slow while other devices move 700 Mbps", s, SpikeVerdicts.Router);
+        if (s.Events.Count != 1) return;
+        Check("  ...is household", s.Events[0].Household, "Household false");
+        Check("  ...is not also congested", !s.Events[0].Congested, "Congested true");
+        Check("  ...says what the others moved", s.Events[0].OtherMbps is > 650 and < 750, $"{s.Events[0].OtherMbps}");
+    }
+
+    private static void AShortSpikeIsNeverHousehold()
+    {
+        var s = new Session();
+        s.Calm(240);
+        s.Repeat(8, () => s.Tick(gateway: 60, wire: 60, process: 60, datacentre: 60, other: 700));
+        s.Finish();
+        Check("two seconds slow with other traffic is not household",
+            s.Events.Count == 1 && !s.Events[0].Household && !s.Events[0].Congested, Got(s));
+    }
+
+    private static void ThisPcDownloadingIsNeverHousehold()
+    {
+        var s = new Session();
+        s.Calm(240);
+        s.Repeat(16, () => s.Tick(gateway: 60, wire: 60, process: 60, datacentre: 60, other: 700, lineDown: 300));
+        s.Finish();
+        Check("this PC downloading 300 Mbps is neither household nor congested",
+            s.Events.Count == 1 && !s.Events[0].Household && !s.Events[0].Congested && s.Events[0].BusyLine, Got(s));
+    }
+
+    private static void AQuietHouseIsNotHouseholdButTheRouterQueued()
+    {
+        var s = new Session();
+        s.Calm(240);
+        s.Repeat(16, () => s.Tick(gateway: 60, wire: 60, process: 60, datacentre: 60, other: 2));
+        s.Finish();
+        Check("the router queueing while other devices move 2 Mbps is congested, not household",
+            s.Events.Count == 1 && !s.Events[0].Household && s.Events[0].Congested, Got(s));
+    }
+
+    private static void WithoutCountersTheRouterQueueingIsCongested()
+    {
+        var s = new Session();
+        s.Calm(240);
+        s.Repeat(16, () => s.Tick(gateway: 60, wire: 60, process: 60, datacentre: 60));
+        s.Finish();
+        Check("the router queueing with no counters is congested, never household",
+            s.Events.Count == 1 && !s.Events[0].Household && s.Events[0].Congested && s.Events[0].OtherMbps is null, Got(s));
+    }
+
+    // The owner's PUBG match on Viettel (ZTE F6601P, Wi-Fi 83 %), 2026-10-20 17:40:39 local, a phone speed test on the same
+    // Wi-Fi, no router counters: the spike as recorded, tick by tick. The median rule missed it (gateway median excess 24 ms).
+    private static void ViettelMatchPhoneSpeedTestIsCongested()
+    {
+        var s = new Session();
+        s.Replay(1, 43,
+            [2, 1, 7, 1, 21, 24, 13, 50, 227, 31, 15, 367, 125, 22, 5, 22, 31, 13, 25, 7, 28, 95, 13, 8, 30, 20, 14, 86, 29, 31, 87, 46, 19, 24, 9, 124, 9, 74, 21, 40, 2, 1, 1, 1],
+            [43, 46, 43, 43, 65, 67, 61, 91, 269, 67, 50, 409, 162, 72, 51, 62, 71, 56, 70, 51, 63, 133, 46, 50, 72, 68, 56, 122, 65, 73, 127, 92, 65, 65, 45, 169, 51, 114, 61, 90, 43, 43, 43, 43],
+            [41.6, 42.5, 41.5, 42.8, 70.4, 70.1, 61.6, 94.7, 266.1, 138.1, 56.3, 420.7, 172.8, 72.6, 54.4, 83.5, 71.8, 62.8, 71.5, 58.5, 66.3, 137.1, 52.6, 50.8, 75.2, 69.6, 59.9, 125.4, 67.3, 93.3, 133.8, 93.7, 65.5, 117.2, 46.2, 171.1, 54.5, 228, 66.6, 60.5, 41.7, 41.5, 41.8, 43.5],
+            [42.5, 46.2, 42.3, 44, 70.3, 72.2, 64.4, 98.1, 273.7, 79.2, 56.2, 420.7, 172.7, 72.6, 54.3, 83.4, 71.7, 62.7, 71.4, 61.5, 66.3, 137, 53.3, 50.7, 75.1, 72.4, 59.7, 127.8, 70.2, 93.4, 134.1, 93.6, 72.4, 78.2, 46.2, 171.8, 55.1, 118.9, 76.9, 61.2, 43.1, 42.9, 42.6, 43.4]);
+        Check("Viettel match, phone speed test, no counters: congested",
+            s.Events.Count == 1 && s.Events[0].Verdict == SpikeVerdicts.Router && s.Events[0].Congested && !s.Events[0].Household, Got(s));
+    }
+
+    // Recorded 2026-10-20 18:12:55-18:13:20 on the same Viettel line (no game; 1.1.1.1 stands in for the relay): the phone's
+    // speed test. Only the first 3 s window of the floor needs to rise, so any spike in it must be congested.
+    private static void ViettelPhoneSpeedTestRecordingIsCongested()
+    {
+        var s = new Session();
+        s.Replay(1.8, 30,
+            [2.2, 1.6, 1.5, 3.4, 2.4, 2.5, 1.9, 2.4, 2.8, 2.6, 1.9, 1.5, 1.9, 2.7, 2.6, 2.2, 2.4, 570.5, 7.6, 18.6, 283.3, 712.8, 9.6, 18.5, 161.4, 53, 14.2, 14.2, 15, 118.8, 162.1, 41.2, null, null, 92.6, 57.5, 18.5, 124, 27.9, 569.1, 32.8, 27.7, null, 193.6, 3.1, 2.2, 19.2, 19.1, 3.9, 1.5, 1.7, 1.9, 2.1, 1.7, 2.9, 2.9, 3.8, 63.3, 14.3, 43.9, 33.5, null, 487.4, 2, 25.5, 53.8, 199.5, 9.8, 17.2, 55.8, 21.9, 36.6, 259.4, 71.7, 65.8, 2.3, 3.6, 1.8, 2.1, 5.2, 2.4, 1.3, 1.7, 7.4, 2.3, 2, 2, 2.4],
+            [30.3, 29.9, 29.8, 31.1, 30.2, 29.7, 30, 33.1, 30.6, 30.6, 29.8, 29.6, 30.5, 30.3, 30.4, 29.6, 30.9, 597.9, 49.7, 409.1, 68.4, 733.4, 45.5, 160.6, 34.4, 83.5, 37.9, 46.8, 33.7, 142.3, 185.1, 65.9, null, null, 117, 70, 39.6, 114.2, 163.4, 137.1, 650.1, 36.9, 75.5, null, 223.3, 101.5, 35.3, 59, 46.7, 30.9, 31.3, 34.3, 29.8, 30.1, 29, 30.9, 30.8, 36.6, 94.7, 47.3, 68.6, 70.2, null, 512.2, 30.8, 29.9, 65.3, 36.4, 225.6, 37.6, 65.6, 83, 51.6, 59.1, 286.6, 69.5, 90.7, 30.9, 30.9, 29.9, 30.7, 34.2, 30.7, 30, 29.8, 40.2, 30.1, 29.7, 29.2, 30.8]);
+        Check("Viettel recording, phone speed test: a congested spike",
+            s.Events.Any(e => e.Congested) && s.Events.All(e => !e.Household), Got(s));
+    }
+
+    // Recorded 2026-10-20 18:25:25-18:25:48 on VNPT with the PC at 29 % signal (link 28 Mbps): the phone's speed test.
+    private static void WeakSignalPhoneSpeedTestRecordingIsCongested()
+    {
+        var s = new Session();
+        s.Replay(1.9, 24.5,
+            [1.9, 1.5, 2.6, 2.9, 2.1, 2.3, 2.1, 2, 1.9, 9.1, 14.9, 9.6, null, 710.5, 29, 10.3, 5.8, null, 340.2, 98.7, 198.6, 2, 2, 38.2, 49.3, 304.9, 9.7, 355.8, 31.6, 34.8, 124.1, 22.4, 11, 39.6, 155.3, 31.7, 15.8, 532.3, 31.4, 60.7, 3.5, 4.8, 115.2, 3.8, 6.2, 1.6, 2, 1.9, 2, 1.7, 4.2, 6.3, 4.2, 275.7, null, null, 112.9, 13.9, 6, null, 10.2, 2.7, 13.5, 56, 2.6, 42.2, 2.4, 2.3, 2.4, 2, 1.6, 2.2, 2.2, 1.7, 1.6],
+            [24.5, 24.7, 25.9, 25.2, 24.4, 24.2, 25, 23.9, 24.4, 127.9, 36.1, 72.2, null, 738.3, 111.1, null, 404.8, 77.6, 200.9, 49.2, 156.4, 156.6, 71.6, 336.6, 42.7, 383, 172.4, 31.2, 145.5, 57, 47, 86.3, 186.3, 55, 35.7, 594.6, 55.3, 47.6, 26.3, 31.4, 153.6, 26.2, 26.7, 24.5, 29.1, 24.6, 24.6, 24.4, 25.2, 31.9, 32.9, 323.9, null, null, 126.6, 44, 36.6, 32.8, 41.7, 72.8, 37.4, 78.2, 26.3, 67, 37.5, 25.3, 25.6, 23.7, 23.7, 24.6, 26, 24.2, 23.7]);
+        Check("VNPT recording at 29 % signal, phone speed test: a congested spike",
+            s.Events.Any(e => e.Congested) && s.Events.All(e => !e.Household), Got(s));
+    }
+
+    // What a weak signal or interference looks like: half the echoes retry and arrive late, the others are as quick as ever.
+    // The median rule called this congested; the floor did not rise, so no queue - not another device.
+    private static void LateEchoesOnACalmFloorAreNotCongested()
+    {
+        var s = new Session();
+        var late = false;
+        s.Calm(240);
+        s.Repeat(40, () =>
+        {
+            late = !late;
+            return s.Tick(gateway: late ? 150 : 0, wire: late ? 150 : 0, process: late ? 150 : 0, datacentre: late ? 150 : 0);
+        });
+        s.Finish();
+        Check("every other echo 150 ms late on a calm floor: not congested",
+            s.Events.Count >= 1 && s.Events.All(e => !e.Congested && !e.Household), Got(s));
+    }
+
+    private static void ASlowRouteIsNeitherHouseholdNorCongested()
+    {
+        var s = new Session();
+        s.Calm(240);
+        s.Repeat(16, () => s.Tick(wire: 60, process: 60, datacentre: 60));
+        s.Finish();
+        Check("the route slow past a calm router is neither", s.Events.Count == 1 && s.Events[0].Verdict == SpikeVerdicts.Relay &&
+            !s.Events[0].Household && !s.Events[0].Congested, Got(s));
+    }
+
+    private static void ARouterThatDoesNotAnswerPingsIsNeverCongested()
+    {
+        var s = new Session { Gateway = false };
+        s.Calm(240);
+        s.Repeat(16, () => s.Tick(wire: 60, process: 60, datacentre: 60));
+        s.Finish();
+        Check("no router ping, no counters: neither", s.Events.Count == 1 && !s.Events[0].Household && !s.Events[0].Congested, Got(s));
+    }
+
+    private static void MatchSummaryCountsTheHomeLine()
+    {
+        var s = new Session();
+        s.Calm(240);
+        s.Repeat(16, () => s.Tick(gateway: 60, wire: 60, process: 60, datacentre: 60, other: 700));
+        s.Calm(80);
+        s.Repeat(16, () => s.Tick(gateway: 60, wire: 60, process: 60, datacentre: 60, other: 1));
+        s.Finish();
+        var summary = s.Detector.EndMatch();
+        Check("the match counts one household and one congested spike",
+            summary is { HouseholdSpikes: 1, CongestedSpikes: 1 }, $"{summary?.HouseholdSpikes} / {summary?.CongestedSpikes}");
     }
 
     private static void MatchSummaryCountsSpikes()
@@ -1337,12 +1493,39 @@ internal static partial class Program
 
         public QualityTick Idle() => new(_index++, Time(_index)) { Active = false };
 
+        /// <summary>
+        /// Feeds a recorded series as is (null = lost): a calm minute at the recording's own normal first, the series, then
+        /// calm again. The relay pong and the datacentre echo follow the wire when not given.
+        /// </summary>
+        public void Replay(double calmGateway, double calmWire, double?[] gateway, double?[] wire,
+            double?[]? process = null, double?[]? datacentre = null)
+        {
+            for (var i = 0; i < 240; i++) Feed(Raw(calmGateway + Math.Abs(Noise()) / 3, calmWire + Noise() / 3));
+            var count = Math.Min(gateway.Length, wire.Length);
+            for (var i = 0; i < count; i++)
+            {
+                Feed(Raw(gateway[i], wire[i], process?[i] ?? wire[i] + 1, datacentre?[i] ?? wire[i] + 2));
+            }
+            for (var i = 0; i < 12; i++) Feed(Raw(calmGateway, calmWire));
+            Events.AddRange(Detector.Flush());
+        }
+
+        private QualityTick Raw(double? gateway, double? wire, double? process = null, double? datacentre = null)
+        {
+            var tick = Tick();
+            tick.GatewayMs = gateway;
+            tick.RelayWireMs = wire;
+            tick.RelayProcessMs = process ?? wire + 1;
+            tick.DatacentreMs = datacentre ?? wire + 2;
+            return tick;
+        }
+
         public QualityTick Tick(
             double gateway = 0, double wire = 0, double process = 0, double datacentre = 0,
             bool loseWire = false, bool loseProcess = false, bool loseDatacentre = false, bool loseGateway = false,
             double downGap = -1, int downPackets = 13,
             double upGap = -1, int upPackets = 15,
-            double? lineDown = null, double localLag = 0)
+            double? lineDown = null, double localLag = 0, double? other = null)
         {
             var tick = new QualityTick(_index, Time(_index)) { Active = true, LocalLagMs = localLag };
             _index++;
@@ -1369,6 +1552,8 @@ internal static partial class Program
 
             tick.LineDownMbps = lineDown ?? 0.4;
             tick.LineUpMbps = 0.3;
+            tick.OtherDownMbps = other;
+            tick.OtherUpMbps = other is null ? null : 0.5;
             return tick;
         }
 

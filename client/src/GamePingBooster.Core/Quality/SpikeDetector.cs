@@ -72,6 +72,15 @@ public sealed class QualityTick(long index, DateTimeOffset startUtc)
     public double? LineUpMbps { get; set; }
 
     /// <summary>
+    /// G: what the OTHER devices at home moved through the router, in Mbps, averaged over the last three seconds: the
+    /// router's own WAN byte counters (UPnP IGD) less this PC's adapter. Null when the router gives no counters - most
+    /// ISP modems (Viettel ZTE F6601P, VNPT ZTE F671Y measured 2026-10-20). The one proof that a slow line was somebody
+    /// else at home; see <see cref="SpikeEvent.Household"/>.
+    /// </summary>
+    public double? OtherDownMbps { get; set; }
+    public double? OtherUpMbps { get; set; }
+
+    /// <summary>
     /// How late the recorder itself ran this quarter second, in ms - a measure of how busy this PC was.
     ///
     /// relayd's pong and the datacentre echo are both timed inside the service, while the ICMP probes
@@ -290,6 +299,33 @@ public sealed class SpikeEvent
     /// <summary>The physical line was carrying far more than a game during the spike - a download, a stream, someone else.</summary>
     public bool BusyLine { get; init; }
 
+    /// <summary>
+    /// What the other devices at home moved through the router during the spike (the median of
+    /// max(<see cref="QualityTick.OtherDownMbps"/>, <see cref="QualityTick.OtherUpMbps"/>)), or null when the router gives
+    /// no counters.
+    /// </summary>
+    public double? OtherMbps { get; init; }
+
+    /// <summary>
+    /// Another device at home filled the line, proven: a latency spike of at least three seconds on the home network or the
+    /// way to the relay, the router's counters showing other devices moving at least 20 Mbps through it, and this PC
+    /// quiet. Measured 2026-10-20 on FPT with a phone speed test: every flagged second fell inside the phone's downloads,
+    /// none in idle time, this PC's own 300 Mbps download, or the ISP hop's own noise. Independent of the verdict, which
+    /// stays what the probes said (often "router": on Wi-Fi the other device's traffic queues on the radio, so the
+    /// gateway echo rises too).
+    /// </summary>
+    public bool Household { get; init; }
+
+    /// <summary>
+    /// The home router itself held a queue (for three seconds even the quicker gateway echoes were 5 ms or more over normal)
+    /// while this PC was quiet, and <see cref="Household"/> could not be proven - the router gives no counters, or they
+    /// showed nothing. A queue is data waiting in the router, and this PC sent none, so it was another device at home:
+    /// on 2026-10-20 a weak signal (29 %) alone never raised the floor, phone speed tests always did. Which device cannot
+    /// be told from here (no router counters, phones on random MACs, no names), so whatever reads this never names one.
+    /// Not measured: heavy interference from neighbouring networks on the same channel.
+    /// </summary>
+    public bool Congested { get; init; }
+
     public required QualityBaseline Baseline { get; init; }
 
     /// <summary>The spike with context either side. <see cref="EventFrom"/> and <see cref="EventTo"/> index the spike itself.</summary>
@@ -308,6 +344,10 @@ public sealed class MatchSummary
 
     /// <summary>How many of <see cref="Spikes"/> were low confidence - so "this match had a spike" can mean a trusted one.</summary>
     public int LowConfidenceSpikes { get; init; }
+
+    /// <summary>How many of <see cref="Spikes"/> were <see cref="SpikeEvent.Household"/>, and <see cref="SpikeEvent.Congested"/>.</summary>
+    public int HouseholdSpikes { get; init; }
+    public int CongestedSpikes { get; init; }
 
     public double? DatacentreP50 { get; init; }
     public double? DatacentreP95 { get; init; }
@@ -407,6 +447,19 @@ public sealed class SpikeDetector
     // The lag report's own "this line is not idle" figures, so the two agree on what busy means.
     internal const double BusyDownMbps = 20;
     internal const double BusyUpMbps = 5;
+
+    // The home line (SpikeEvent.Household / Congested). The rule replayed on 505 s of recordings on 2026-10-20 with no
+    // false second: other devices >= 20 Mbps, this PC < 5 Mbps each way, held three seconds.
+    internal const double HouseholdOtherMbps = 20;
+    internal const double QuietOwnMbps = 5;
+    internal const double HomeLineMinMs = 3000;
+
+    // SpikeEvent.Congested: the gateway echo's floor - the lower quarter of three seconds of echoes - this far over normal.
+    // Replayed on 2026-10-20 recordings: phone speed tests caught on Viettel (strong signal) and VNPT (29 % signal), no
+    // false second in idle, YouTube 4K on the phone, this PC's own 300 Mbps, or a weak signal alone.
+    internal const double CongestedFloorMs = 5;
+    internal const int FloorWindowTicks = 3 * TicksPerSecond;
+    internal const int FloorMinAnswers = FloorWindowTicks / 2;
 
     /// <summary>
     /// How far over normal a round trip must go. 15 ms is the smallest jump a player reports; the
@@ -560,7 +613,7 @@ public sealed class SpikeDetector
             return;
         }
 
-        _match.NoteSpike(built.Verdict, built.LowConfidence);
+        _match.NoteSpike(built);
         (closed ??= []).Add(built);
     }
 
@@ -902,6 +955,17 @@ public sealed class SpikeDetector
         var start = spike[0].StartUtc;
         if (!latency) start -= TimeSpan.FromMilliseconds(silence);
 
+        // The home line. Only a latency spike long enough to be a queue, never a silence or the PC itself, and only with
+        // this PC quiet - its own download is item 3's case and BusyLine's.
+        var others = spike.Where(t => t.OtherDownMbps is not null || t.OtherUpMbps is not null)
+            .Select(t => Math.Max(t.OtherDownMbps ?? 0, t.OtherUpMbps ?? 0)).ToList();
+        double? otherMbps = others.Count == 0 ? null : Median(others);
+        var homeLine = latency && !pcGap && spike.Count * TickMs >= HomeLineMinMs &&
+                       verdict is SpikeVerdicts.Router or SpikeVerdicts.Relay or SpikeVerdicts.Unclear &&
+                       (lineDown ?? 0) < QuietOwnMbps && (lineUp ?? 0) < QuietOwnMbps;
+        var household = homeLine && otherMbps >= HouseholdOtherMbps;
+        var congested = homeLine && !household && verdict == SpikeVerdicts.Router && GatewayFloorRose(spike, baseline);
+
         return new SpikeEvent
         {
             StartUtc = start,
@@ -932,11 +996,47 @@ public sealed class SpikeDetector
             LineDownMbps = lineDown,
             LineUpMbps = lineUp,
             BusyLine = lineDown > BusyDownMbps || lineUp > BusyUpMbps,
+            OtherMbps = otherMbps,
+            Household = household,
+            Congested = congested,
             Baseline = baseline,
             Ticks = window,
             EventFrom = first,
             EventTo = last,
         };
+    }
+
+    private static double Median(List<double> values)
+    {
+        values.Sort();
+        var mid = values.Count / 2;
+        return values.Count % 2 == 1 ? values[mid] : (values[mid - 1] + values[mid]) / 2;
+    }
+
+    /// <summary>
+    /// Whether the router held a queue: some three seconds of the spike in which even the quicker gateway echoes were late
+    /// - the lower quarter of them at least <see cref="CongestedFloorMs"/> over normal. A queue in the router delays every
+    /// packet behind it, so the floor rises; a weak signal or interference makes some echoes retry and leaves the others
+    /// quick, so only the peaks rise. The median missed the owner's Viettel match on 2026-10-20 (a phone speed test: floor
+    /// 13-30 ms, peaks to 700, median excess 24 ms). Lost echoes are left out - a router that rate-limits pings loses them
+    /// all the time - and a window needs half its echoes answered. False when the router does not answer pings.
+    /// </summary>
+    private static bool GatewayFloorRose(List<QualityTick> spike, QualityBaseline baseline)
+    {
+        if (baseline.Of(QualitySignal.Gateway) is not { } normal) return false;
+        var window = new List<double>(FloorWindowTicks);
+        for (var end = FloorWindowTicks; end <= spike.Count; end++)
+        {
+            window.Clear();
+            for (var i = end - FloorWindowTicks; i < end; i++)
+            {
+                if (spike[i].GatewaySent && spike[i].GatewayMs is { } ms) window.Add(ms);
+            }
+            if (window.Count < FloorMinAnswers) continue;
+            window.Sort();
+            if (window[window.Count / 4] - normal >= CongestedFloorMs) return true;
+        }
+        return false;
     }
 
     /// <summary>Whether any probe on the path to the datacentre was lost or over threshold between two ticks.</summary>
@@ -1048,6 +1148,7 @@ public sealed class SpikeDetector
         private double _maxDownGap;
         private readonly Dictionary<string, int> _spikes = [];
         private int _lowConfidence;
+        private int _household, _congested;
 
         /// <summary>Four hours of quarter seconds. Past it the percentiles stop growing, the counts do not.</summary>
         private const int MaxSamples = 4 * 3600 * TicksPerSecond;
@@ -1073,10 +1174,12 @@ public sealed class SpikeDetector
             if (tick.DownPackets > 0 && tick.DownGapMs < MaxGapMs) _maxDownGap = Math.Max(_maxDownGap, tick.DownGapMs);
         }
 
-        public void NoteSpike(string verdict, bool lowConfidence)
+        public void NoteSpike(SpikeEvent spike)
         {
-            _spikes[verdict] = _spikes.GetValueOrDefault(verdict) + 1;
-            if (lowConfidence) _lowConfidence++;
+            _spikes[spike.Verdict] = _spikes.GetValueOrDefault(spike.Verdict) + 1;
+            if (spike.LowConfidence) _lowConfidence++;
+            if (spike.Household) _household++;
+            if (spike.Congested) _congested++;
         }
 
         public MatchSummary? End()
@@ -1095,6 +1198,8 @@ public sealed class SpikeDetector
                 Spikes = _spikes.Values.Sum(),
                 SpikesByVerdict = new Dictionary<string, int>(_spikes),
                 LowConfidenceSpikes = _lowConfidence,
+                HouseholdSpikes = _household,
+                CongestedSpikes = _congested,
                 DatacentreP50 = _datacentre.Count == 0 ? null : Percentile(_datacentre, 50),
                 DatacentreP95 = _datacentre.Count == 0 ? null : Percentile(_datacentre, 95),
                 DatacentreSent = _datacentreSent,
@@ -1119,6 +1224,7 @@ public sealed class SpikeDetector
             _maxDownGap = 0;
             _spikes.Clear();
             _lowConfidence = 0;
+            _household = _congested = 0;
         }
     }
 }

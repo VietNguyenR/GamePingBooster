@@ -731,6 +731,46 @@ public sealed class StatusMessage
     /// asks the network anything.
     /// </summary>
     [JsonPropertyName("commandError")] public string? CommandError { get; set; }
+
+    /// <summary>
+    /// The home line as the spike recorder saw it, for the panel's "Mạng trong nhà" item. Null until a match has been
+    /// recorded since the service started. Additive: an older UI ignores it.
+    /// </summary>
+    [JsonPropertyName("homeLine")] public HomeLineStatus? HomeLine { get; set; }
+}
+
+/// <summary>
+/// What the spike recorder knows about the home line: whether the router gives UPnP WAN counters, and the last spike
+/// another device at home was PROVEN to cause with the router's counters (SpikeEvent.Household), or the router held a
+/// queue while this PC was quiet, with no counters to say which device (SpikeEvent.Congested). Times are Unix seconds, when the spike ended. Counts are since the service started.
+/// </summary>
+public sealed class HomeLineStatus
+{
+    /// <summary>True: the router gives counters. False: it does not. Null: not asked yet.</summary>
+    [JsonPropertyName("routerCounters")] public bool? RouterCounters { get; set; }
+
+    /// <summary>
+    /// What the other devices at home are moving through the router right now (3 s average, Mbps). Null without counters,
+    /// outside a match, or when the last reading is more than 5 s old - so the panel can tell a load that is still going
+    /// from one that has stopped.
+    /// </summary>
+    [JsonPropertyName("otherMbpsNow")] public double? OtherMbpsNow { get; set; }
+
+    [JsonPropertyName("householdCount")] public int HouseholdCount { get; set; }
+    [JsonPropertyName("householdAt")] public long? HouseholdAt { get; set; }
+    [JsonPropertyName("householdSeconds")] public double? HouseholdSeconds { get; set; }
+    /// <summary>How far the game's ping went over normal.</summary>
+    [JsonPropertyName("householdExcessMs")] public double? HouseholdExcessMs { get; set; }
+    /// <summary>What the other devices moved through the router meanwhile.</summary>
+    [JsonPropertyName("householdOtherMbps")] public double? HouseholdOtherMbps { get; set; }
+
+    [JsonPropertyName("congestedCount")] public int CongestedCount { get; set; }
+    [JsonPropertyName("congestedAt")] public long? CongestedAt { get; set; }
+    [JsonPropertyName("congestedSeconds")] public double? CongestedSeconds { get; set; }
+    /// <summary>How far the router's own ping went over normal.</summary>
+    [JsonPropertyName("congestedGatewayMs")] public double? CongestedGatewayMs { get; set; }
+
+    public HomeLineStatus Copy() => (HomeLineStatus)MemberwiseClone();
 }
 
 /// <summary>

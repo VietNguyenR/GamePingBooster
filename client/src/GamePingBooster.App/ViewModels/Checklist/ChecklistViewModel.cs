@@ -30,6 +30,7 @@ public sealed class ChecklistViewModel : INotifyPropertyChanged
         [
             new DnsCheck(),
             new NetworkCheck(),
+            new HomeLineCheck(),
             new NetAppsCheck(pipe),
             new ResourceCheck(pipe),
             new PowerCheck(pipe),

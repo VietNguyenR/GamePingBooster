@@ -20,6 +20,12 @@ internal readonly record struct QualityMeta(
     string? HostModel = null);
 
 /// <summary>
+/// The home router as the match saw it: whether it gave UPnP WAN counters (null when the question was not settled
+/// during the match) and its model from the UPnP description (null without UPnP). See Network.RouterCounters.
+/// </summary>
+internal readonly record struct RouterInfo(bool? Counters, string? Model);
+
+/// <summary>
 /// A move to another relay between matches and how the next match went, for <see cref="QualityFile.WriteRelayMove"/>.
 /// <paramref name="Reason"/> is "rescan" for a faster relay, "game" for leaving one not set to carry the game.
 /// <paramref name="FollowEnded"/> says why following stopped: "held", "no-match" (none within ten minutes),
@@ -202,6 +208,10 @@ internal sealed class QualityFile(Action<string> log)
         Number(w, "lineDownMbps", spike.LineDownMbps, 1);
         Number(w, "lineUpMbps", spike.LineUpMbps, 1);
         w.WriteBoolean("busyLine", spike.BusyLine);
+        // The home line (SpikeEvent.Household / Congested). otherMbps is absent when the router gives no counters.
+        Number(w, "otherMbps", spike.OtherMbps, 1);
+        w.WriteBoolean("household", spike.Household);
+        w.WriteBoolean("congested", spike.Congested);
 
         w.WriteStartObject("baseline");
         Number(w, "gateway", spike.Baseline.GatewayMs, 1);
@@ -225,6 +235,12 @@ internal sealed class QualityFile(Action<string> log)
         Series(w, "serverPath", spike.Ticks, t => Probe(t.ServerPathSent, t.ServerPathMs));
         Series(w, "downGap", spike.Ticks, t => t.DownPackets > 0 ? t.DownGapMs : null);
         Series(w, "upGap", spike.Ticks, t => t.UpPackets > 0 ? t.UpGapMs : null);
+        // What the other devices at home moved, when the router gives counters - the evidence behind "household".
+        if (spike.Ticks.Any(t => t.OtherDownMbps is not null))
+        {
+            Series(w, "otherDownMbps", spike.Ticks, t => t.OtherDownMbps);
+            Series(w, "otherUpMbps", spike.Ticks, t => t.OtherUpMbps);
+        }
         // The counts behind the two gap series. A stall only counts inside a steady stream, and whether
         // a stream was steady - or a loading screen sending in bursts - cannot be read from gaps alone.
         Counts(w, "downPackets", spike.Ticks, t => t.DownPackets);
@@ -251,7 +267,7 @@ internal sealed class QualityFile(Action<string> log)
         w.WriteEndObject();
     });
 
-    public void WriteMatch(MatchSummary match, QualityMeta meta) => Append((w, id) =>
+    public void WriteMatch(MatchSummary match, QualityMeta meta, RouterInfo? router = null) => Append((w, id) =>
     {
         w.WriteStartObject();
         w.WriteString("id", id);
@@ -283,6 +299,20 @@ internal sealed class QualityFile(Action<string> log)
         w.WriteEndObject();
 
         w.WriteNumber("maxDownGapMs", Round(match.MaxDownGapMs));
+
+        // The home line: how many spikes were another device at home (proven by the router's counters) and how many the
+        // router queueing with no proof of why - and whether this router gives counters at all, with its model, so the
+        // share of players the proof can reach is known from data. Never an address.
+        w.WriteNumber("householdSpikes", match.HouseholdSpikes);
+        w.WriteNumber("congestedSpikes", match.CongestedSpikes);
+        if (router is { } r)
+        {
+            w.WriteStartObject("router");
+            if (r.Counters is { } counters) w.WriteBoolean("counters", counters);
+            else w.WriteNull("counters");
+            String(w, "model", r.Model);
+            w.WriteEndObject();
+        }
         w.WriteEndObject();
     });
 

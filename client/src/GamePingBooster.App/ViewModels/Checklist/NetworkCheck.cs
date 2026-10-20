@@ -21,6 +21,11 @@ namespace GamePingBooster.App.ViewModels.Checklist;
 /// Wired: one line "Mạng dây", and jitter to the router is still measured but only named when it is bad (a bad cable
 /// or port does show). Wi-Fi: signal as Windows draws it, the band, and jitter to the router.
 ///
+/// When the router is busy with another device at home (<see cref="HomeLineCheck.RouterBusy"/>), the same queue is what
+/// raises the jitter to the router: the jitter is still shown but not judged, and the card says where it comes from, so
+/// the player is not told to move closer to the router for a phone's download (owner, Viettel, 2026-10-20). A weak
+/// signal is still judged.
+///
 /// Runs only while connected, off the connect path: the adapter is looked up after Connect has finished, from this
 /// user process, never in the service's route path (slow-connect-was-netsh-and-adapter-enumeration).
 /// </summary>
@@ -50,9 +55,11 @@ public sealed class NetworkCheck : CheckItem
     // Written by the measuring loop, read on the UI thread through Evaluate (posted after each change).
     private volatile Finding? _finding;
     private CancellationTokenSource? _loop;
+    private HomeLineStatus? _homeLine;
 
     public override void OnStatus(StatusMessage status)
     {
+        _homeLine = status.HomeLine;
         if (status.State == TunnelState.Connected)
         {
             if (_loop is null)
@@ -72,6 +79,7 @@ public sealed class NetworkCheck : CheckItem
 
     public override void OnServiceGone()
     {
+        _homeLine = null;
         Stop();
         Evaluate();
     }
@@ -222,9 +230,11 @@ public sealed class NetworkCheck : CheckItem
             return;
         }
 
+        var routerBusy = f.JitterMs is not null && HomeLineCheck.RouterBusy(_homeLine, DateTimeOffset.UtcNow);
         var jitterSeverity = f.JitterMs switch
         {
             null => CheckSeverity.Good,
+            _ when routerBusy => CheckSeverity.Good,
             >= JitterCriticalMs => CheckSeverity.Critical,
             >= JitterWarnMs => CheckSeverity.Warning,
             _ => CheckSeverity.Good,
@@ -233,10 +243,11 @@ public sealed class NetworkCheck : CheckItem
         if (!f.Wireless)
         {
             Severity = jitterSeverity;
-            Summary = jitterSeverity == CheckSeverity.Good
+            Summary = jitterSeverity == CheckSeverity.Good && !routerBusy
                 ? T("check.net.wired")
                 : Loc.F("check.net.wiredJitter", Ms(f.JitterMs!.Value));
-            Detail = jitterSeverity == CheckSeverity.Good ? null : T("check.net.wiredAdvice");
+            Detail = routerBusy ? T("check.net.routerBusy")
+                : jitterSeverity == CheckSeverity.Good ? null : T("check.net.wiredAdvice");
             return;
         }
 
@@ -255,14 +266,16 @@ public sealed class NetworkCheck : CheckItem
         if (f.JitterMs is { } jitter) parts.Add(Loc.F("check.net.jitter", Ms(jitter)));
         Summary = string.Join(" · ", parts);
 
+        var busyNote = routerBusy ? T("check.net.routerBusy") : null;
         if (Severity == CheckSeverity.Good)
         {
-            Detail = null;
+            Detail = busyNote;
             return;
         }
-        Detail = f.Wifi?.Band == WifiBand.GHz24
+        var advice = f.Wifi?.Band == WifiBand.GHz24
             ? T("check.net.wifiAdvice") + " " + T("check.net.use5")
             : T("check.net.wifiAdvice");
+        Detail = busyNote is null ? advice : busyNote + " " + advice;
     }
 
     /// <summary>" 5 GHz ✓" on the better bands, " 2.4 GHz" on the crowded one.</summary>

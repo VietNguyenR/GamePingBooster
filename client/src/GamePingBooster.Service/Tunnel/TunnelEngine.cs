@@ -3843,6 +3843,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             // loss that had just started, and loss that had stopped stayed on screen for the rest of the evening.
             LossRatio = carrier?.RecentLoss() is { Sent: >= 5 } recent ? recent.Share : null,
             GameRunning = _watcher?.IsGameRunning ?? false,
+            HomeLine = _recorder?.HomeLine,
             // The game being played, or - when none is - the only one there is. With several there is
             // no selector, so naming the one relays happened to be measured for would read as a choice
             // nobody made; the UI says how many instead of listing them all.

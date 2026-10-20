@@ -4,7 +4,9 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Reflection;
 using GamePingBooster.Core.Native;
+using GamePingBooster.Core.Ipc;
 using GamePingBooster.Core.Quality;
+using GamePingBooster.Service.Network;
 
 namespace GamePingBooster.Service.Tunnel;
 
@@ -180,6 +182,25 @@ internal sealed class SpikeRecorder : IQualitySink
     private double? _lineDown;
     private double? _lineUp;
 
+    // The home router's own counters (Network.RouterCounters), read once a second while a match runs. Everything below
+    // is written by the router task and read by Step, so it goes under _routerGate.
+    private readonly RouterCounters _router = new();
+    private readonly object _routerGate = new();
+    private Task? _routerTask;
+    private IPAddress? _routerFor;
+    private bool? _routerCounters;
+    private string? _routerModel;
+    private long _routerAskedAt;
+    private (long At, ulong Received, ulong Sent, long OwnReceived, long OwnSent)? _routerLast;
+    private readonly Queue<(long At, double Down, double Up)> _otherWindow = new();
+    private double? _otherDown;
+    private double? _otherUp;
+    private long _otherAt;
+    private CancellationToken _stopping;
+
+    // What the panel's "Mạng trong nhà" item shows (HomeLine), from the spikes reported since the service started.
+    private HomeLineStatus? _homeLine;
+
     private DateTimeOffset _windowStart;
     private int _windowLogged;
     private int _windowSuppressed;
@@ -308,6 +329,7 @@ internal sealed class SpikeRecorder : IQualitySink
 
     public async Task RunAsync(CancellationToken ct)
     {
+        _stopping = ct;
         using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(SpikeDetector.TickMs));
         try
         {
@@ -479,11 +501,20 @@ internal sealed class SpikeRecorder : IQualitySink
             _inMatch = true;
             _matchContext = context;
 
-            if (index % SpikeDetector.TicksPerSecond == 0) ReadAdapter(now, context.RelayAddress);
+            if (index % SpikeDetector.TicksPerSecond == 0)
+            {
+                ReadAdapter(now, context.RelayAddress);
+                PollRouter(now);
+            }
             // Every tick carries the latest reading, so a spike a quarter second long still says
             // whether the line was busy around it.
             tick.LineDownMbps = _lineDown;
             tick.LineUpMbps = _lineUp;
+            lock (_routerGate)
+            {
+                tick.OtherDownMbps = _otherDown;
+                tick.OtherUpMbps = _otherUp;
+            }
 
             SendProbes(tunnel, tick, context, now);
         }
@@ -889,6 +920,198 @@ internal sealed class SpikeRecorder : IQualitySink
         }
     }
 
+    // ------------------------------------------------------------------ the home router's counters
+
+    /// <summary>How long a router without counters is left before it is asked again: a player may turn UPnP on.</summary>
+    private static readonly long RouterAskAgainAfter = Stopwatch.Frequency * 1800;
+
+    /// <summary>Three seconds of readings, the window the rule was proven on: the router's counters and this PC's are read
+    /// a moment apart, and one second alone swung by 70 Mbps when this PC itself moved 300 (2026-10-20).</summary>
+    private static readonly long OtherWindow = Stopwatch.Frequency * 3;
+
+    /// <summary>
+    /// Once a second while a match runs: finds the router's counter service for this gateway (once per gateway, again after
+    /// half an hour when it had none), then reads the counters. Never more than one request in flight; a router too busy
+    /// to answer just leaves a gap.
+    /// </summary>
+    private void PollRouter(long now)
+    {
+        if (_routerTask is { IsCompleted: false }) return;
+        if (_gateway is not { } gateway || _nic is not { } nic) return;
+
+        if (!Equals(_routerFor, gateway))
+        {
+            lock (_routerGate)
+            {
+                _routerFor = gateway;
+                _routerCounters = null;
+                _routerModel = null;
+                _routerLast = null;
+                _otherWindow.Clear();
+                _otherDown = _otherUp = null;
+            }
+            _routerTask = DiscoverRouterAsync(gateway, LocalAddress(nic), now);
+            return;
+        }
+
+        if (_routerCounters == true) _routerTask = ReadRouterAsync(nic);
+        else if (_routerCounters == false && now - _routerAskedAt > RouterAskAgainAfter) _routerTask = DiscoverRouterAsync(gateway, LocalAddress(nic), now);
+    }
+
+    private async Task DiscoverRouterAsync(IPAddress gateway, IPAddress? local, long now)
+    {
+        _routerAskedAt = now;
+        var found = false;
+        try
+        {
+            found = await _router.DiscoverAsync(gateway, local, _stopping).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+        }
+        lock (_routerGate)
+        {
+            if (!Equals(_routerFor, gateway)) return;
+            var first = _routerCounters is null;
+            _routerCounters = found;
+            _routerModel = _router.Model;
+            if (first)
+            {
+                _log(found
+                    ? $"Home router: gives its WAN byte counters (UPnP, model \"{_routerModel}\") - spikes caused by other devices at home can be proven."
+                    : _routerModel is null
+                        ? "Home router: no UPnP answer - other devices at home cannot be measured; the panel only says what the router's ping shows."
+                        : $"Home router: UPnP (model \"{_routerModel}\") but no WAN byte counters - other devices at home cannot be measured.");
+            }
+        }
+    }
+
+    private async Task ReadRouterAsync(NetworkInterface nic)
+    {
+        (ulong Received, ulong Sent)? totals;
+        try
+        {
+            totals = await _router.ReadAsync(_stopping).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            totals = null;
+        }
+        var at = Stopwatch.GetTimestamp();
+        lock (_routerGate)
+        {
+            // Stale readings say nothing about now: a router that stopped answering clears the figure after the window.
+            while (_otherWindow.Count > 0 && at - _otherWindow.Peek().At > OtherWindow) _otherWindow.Dequeue();
+            if (totals is not { } t)
+            {
+                if (_otherWindow.Count == 0) _otherDown = _otherUp = null;
+                return;
+            }
+
+            IPv4InterfaceStatistics own;
+            try
+            {
+                // Read straight after the router's answer, so the two counters are as close in time as they can be.
+                own = nic.GetIPv4Statistics();
+            }
+            catch (NetworkInformationException)
+            {
+                return;
+            }
+
+            if (_routerLast is { } last)
+            {
+                var seconds = (at - last.At) / (double)Stopwatch.Frequency;
+                if (seconds is > 0.3 and <= 5 &&
+                    Delta(t.Received, last.Received) is { } wanDown && Delta(t.Sent, last.Sent) is { } wanUp)
+                {
+                    var down = Math.Max(0, (double)wanDown - Math.Max(0, own.BytesReceived - last.OwnReceived)) * 8 / seconds / 1e6;
+                    var up = Math.Max(0, (double)wanUp - Math.Max(0, own.BytesSent - last.OwnSent)) * 8 / seconds / 1e6;
+                    _otherWindow.Enqueue((at, down, up));
+                    _otherAt = at;
+                    _otherDown = _otherWindow.Average(w => w.Down);
+                    _otherUp = _otherWindow.Average(w => w.Up);
+                }
+            }
+            _routerLast = (at, t.Received, t.Sent, own.BytesReceived, own.BytesSent);
+        }
+    }
+
+    /// <summary>
+    /// How far a router counter moved. Many routers keep 32-bit counters (OpenWrt's wrapped at 4 GB on 2026-10-20), which
+    /// at 780 Mbps wrap every 44 seconds - read once a second, a wrap is one step back past 2^32. A counter that went back
+    /// any other way (a router restart) gives no figure.
+    /// </summary>
+    private static ulong? Delta(ulong now, ulong before)
+    {
+        if (now >= before) return now - before;
+        if (before <= uint.MaxValue) return now + (1UL << 32) - before;
+        return null;
+    }
+
+    private static IPAddress? LocalAddress(NetworkInterface nic)
+    {
+        try
+        {
+            return nic.GetIPProperties().UnicastAddresses
+                .Select(a => a.Address)
+                .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
+        }
+        catch (NetworkInformationException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// What the panel's "Mạng trong nhà" item reads: whether the router gives counters, and the last time another device at
+    /// home was proven to fill the line, or the router queued with no proof of why. Null until a match has been recorded.
+    /// </summary>
+    public HomeLineStatus? HomeLine
+    {
+        get
+        {
+            lock (_routerGate)
+            {
+                if (_homeLine is null && _routerCounters is null) return null;
+                var status = _homeLine is { } h ? h.Copy() : new HomeLineStatus();
+                status.RouterCounters = _routerCounters;
+                // Only a fresh figure: the router is polled while a match runs, so after it - or with a router that stopped
+                // answering - there is no "now".
+                status.OtherMbpsNow = _otherDown is { } down && _otherUp is { } up &&
+                                      Stopwatch.GetTimestamp() - _otherAt <= Stopwatch.Frequency * 5
+                    ? Math.Round(Math.Max(down, up))
+                    : null;
+                return status;
+            }
+        }
+    }
+
+    private void NoteHomeLine(SpikeEvent spike)
+    {
+        if (!spike.Household && !spike.Congested) return;
+        lock (_routerGate)
+        {
+            var status = _homeLine ??= new HomeLineStatus();
+            var end = spike.StartUtc.AddMilliseconds(spike.DurationMs).ToUnixTimeSeconds();
+            if (spike.Household)
+            {
+                status.HouseholdCount++;
+                status.HouseholdAt = end;
+                status.HouseholdSeconds = Math.Round(spike.DurationMs / 1000, 1);
+                status.HouseholdExcessMs = Math.Round(spike.PeakExcessMs);
+                status.HouseholdOtherMbps = spike.OtherMbps is { } other ? Math.Round(other) : null;
+            }
+            else
+            {
+                status.CongestedCount++;
+                status.CongestedAt = end;
+                status.CongestedSeconds = Math.Round(spike.DurationMs / 1000, 1);
+                status.CongestedGatewayMs = Math.Round(spike.GatewayExcessMs);
+            }
+        }
+    }
+
     /// <summary>
     /// The adapter the relay's traffic actually leaves by, and its router.
     ///
@@ -969,6 +1192,7 @@ internal sealed class SpikeRecorder : IQualitySink
     private void Report(SpikeEvent spike, Context context)
     {
         _file.WriteSpike(spike, Meta(context));
+        NoteHomeLine(spike);
 
         var now = DateTimeOffset.UtcNow;
         if (now - _windowStart >= LogWindow)
@@ -1022,7 +1246,9 @@ internal sealed class SpikeRecorder : IQualitySink
 
         if (_inMatch && summary is not null && summary.ActiveSeconds >= MinMatchSeconds)
         {
-            _file.WriteMatch(summary, Meta(context));
+            RouterInfo router;
+            lock (_routerGate) router = new RouterInfo(_routerCounters, _routerModel);
+            _file.WriteMatch(summary, Meta(context), router);
             _log(DescribeMatch(summary) + (context.Carried == "other"
                 ? $" Carried by {context.RelayName ?? context.RelayId} - region routing sent this match there, not home."
                 : ""));
