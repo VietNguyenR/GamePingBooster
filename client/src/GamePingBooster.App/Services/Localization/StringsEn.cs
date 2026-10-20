@@ -256,6 +256,8 @@ internal static class StringsEn
         ["licence.renewing"] =
             "Renewing the licence... If your plan has ended, renew it on the website and it is picked up here.",
         ["signedOut.elsewhere"] = "Your account just signed in on another computer{0}{1}, so this one was signed out and disconnected. Sign in again to keep using it here.",
+        // {0} is signedOut.elsewhere.at or "".
+        ["signedOut.removed"] = "This computer was removed from your account on the website{0}, so it was signed out and disconnected. Sign in again to keep using it here.",
         ["signedOut.elsewhere.device"] = " ({0})",
         ["signedOut.elsewhere.at"] = " at {0}",
         ["signedOut.elsewhere.title"] = "This computer was signed out",

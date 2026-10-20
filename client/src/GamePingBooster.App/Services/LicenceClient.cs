@@ -638,11 +638,16 @@ public sealed class LicenceException(string message, System.Net.HttpStatusCode? 
     /// <summary>With <see cref="SignedInElsewhere"/>: when this machine was signed out, when the server knows it.</summary>
     public DateTimeOffset? SignedOutAt { get; init; }
 
+    /// <summary>With <see cref="SignedInElsewhere"/>: this machine was removed from the account on the website rather
+    /// than signed out by a sign-in elsewhere (<c>reason: "removed"</c>).</summary>
+    public bool Removed { get; init; }
+
     internal static LicenceException From(string message, System.Net.HttpStatusCode status, ErrorResponse? error) =>
         new(message, status, error?.Code)
         {
             OtherDevice = error?.DeviceLabel,
             SignedOutAt = error?.At is { } at ? DateTimeOffset.FromUnixTimeSeconds(at) : null,
+            Removed = error?.Reason == SignInWatcher.RemovedReason,
         };
 }
 
@@ -772,6 +777,9 @@ public sealed class ErrorResponse
     /// <summary>signed_in_elsewhere only: the machine that signed in, and when (unix seconds). Either may be null.</summary>
     [JsonPropertyName("deviceLabel")] public string? DeviceLabel { get; set; }
     [JsonPropertyName("at")] public long? At { get; set; }
+
+    /// <summary>signed_in_elsewhere only: "removed" when the machine was removed on the website, else "elsewhere".</summary>
+    [JsonPropertyName("reason")] public string? Reason { get; set; }
 }
 
 /// <summary>
@@ -789,6 +797,7 @@ public sealed class WatchResult
     [JsonPropertyName("error")] public string? Error { get; set; }
     [JsonPropertyName("deviceLabel")] public string? DeviceLabel { get; set; }
     [JsonPropertyName("at")] public long? At { get; set; }
+    [JsonPropertyName("reason")] public string? Reason { get; set; }
 }
 
 // ------------------------------------------------------------------- buying a plan in the app

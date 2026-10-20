@@ -25,6 +25,9 @@ public sealed class SignInWatcher : IAsyncDisposable
     /// <summary>The <c>code</c> the licence server sends with a sign-in ended by one on another machine.</summary>
     public const string SignedInElsewhereCode = "signed_in_elsewhere";
 
+    /// <summary>The <c>reason</c> a signed_in_elsewhere answer carries when the machine was removed on the website.</summary>
+    public const string RemovedReason = "removed";
+
     /// <summary>
     /// Asked again at least this often while there is nothing to watch with - no licence server yet, or not signed
     /// in. A sign-in wakes the loop straight away (<see cref="Wake"/>); this is only the fallback.
@@ -109,7 +112,7 @@ public sealed class SignInWatcher : IAsyncDisposable
     public void Report(LicenceException ex)
     {
         if (!ex.SignedInElsewhere) return;
-        Fire(_refreshToken(), new SignedOutElsewhere(ex.OtherDevice, ex.SignedOutAt));
+        Fire(_refreshToken(), new SignedOutElsewhere(ex.OtherDevice, ex.SignedOutAt, ex.Removed));
     }
 
     private void Fire(string? token, SignedOutElsewhere what)
@@ -165,7 +168,8 @@ public sealed class SignInWatcher : IAsyncDisposable
                     {
                         case "signed_in_elsewhere":
                             Fire(token, new SignedOutElsewhere(result.DeviceLabel,
-                                result.At is { } at ? DateTimeOffset.FromUnixTimeSeconds(at) : null));
+                                result.At is { } at ? DateTimeOffset.FromUnixTimeSeconds(at) : null,
+                                result.Reason == RemovedReason));
                             pause = TimeSpan.Zero;
                             break;
                         case "signed_out":
@@ -237,8 +241,11 @@ public sealed class SignInWatcher : IAsyncDisposable
     }
 }
 
-/// <summary>Who signed this machine out, as far as the server knows: the other machine's label and the moment.</summary>
-public sealed record SignedOutElsewhere(string? OtherDevice, DateTimeOffset? At)
+/// <summary>
+/// Who signed this machine out, as far as the server knows: the other machine's label and the moment - or, with
+/// <paramref name="Removed"/>, that the machine was removed from the account on the website.
+/// </summary>
+public sealed record SignedOutElsewhere(string? OtherDevice, DateTimeOffset? At, bool Removed = false)
 {
     /// <summary>
     /// The sentence for the person, in the app's language. Built here rather than taken from the server's
@@ -251,6 +258,6 @@ public sealed record SignedOutElsewhere(string? OtherDevice, DateTimeOffset? At)
             ? Loc.F("signedOut.elsewhere.at",
                 when.ToLocalTime().ToString("HH:mm dd/MM", System.Globalization.CultureInfo.InvariantCulture))
             : "";
-        return Loc.F("signedOut.elsewhere", device, at);
+        return Removed ? Loc.F("signedOut.removed", at) : Loc.F("signedOut.elsewhere", device, at);
     }
 }

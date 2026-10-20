@@ -258,6 +258,8 @@ internal static class StringsVi
         // Last sign-in wins (2026-10-08): this machine was signed out by the account signing in on another one.
         // {0} is signedOut.elsewhere.device or "", {1} is signedOut.elsewhere.at or "".
         ["signedOut.elsewhere"] = "Tài khoản của bạn vừa đăng nhập trên máy khác{0}{1}, nên máy này đã bị đăng xuất và ngắt kết nối. Đăng nhập lại để dùng tiếp trên máy này.",
+        // {0} is signedOut.elsewhere.at or "".
+        ["signedOut.removed"] = "Máy này đã bị gỡ khỏi tài khoản trên trang web{0}, nên đã bị đăng xuất và ngắt kết nối. Đăng nhập lại để dùng tiếp trên máy này.",
         ["signedOut.elsewhere.device"] = " ({0})",
         ["signedOut.elsewhere.at"] = " lúc {0}",
         ["signedOut.elsewhere.title"] = "Máy này đã bị đăng xuất",
