@@ -72,6 +72,7 @@ internal static partial class Program
         ASlowRouteIsNeitherHouseholdNorCongested();
         ARouterThatDoesNotAnswerPingsIsNeverCongested();
         MatchSummaryCountsTheHomeLine();
+        HomeLineWatchChecks();
 
         Console.WriteLine();
         Console.WriteLine("Moving between ways into one relay:");

@@ -25,8 +25,9 @@ public sealed class QualityTick(long index, DateTimeOffset startUtc)
     /// <summary>
     /// The game was running with no match under way - the lobby, the agent select, a queue. Only relayd's pong
     /// (B) and the Probes down the other ways in were sent, for <see cref="DoorSwitchPolicy"/>, which may move a
-    /// player in the lobby as well as in a match. Not <see cref="Active"/>: nothing else reads these ticks, so
-    /// the lobby is never a match, a spike or a baseline.
+    /// player in the lobby as well as in a match. Not <see cref="Active"/>: the detector does not read these ticks, so
+    /// the lobby is never a match, a spike or a baseline. Every tick while connected, lobby or not, also carries A0 and
+    /// F/G for <see cref="HomeLineWatch"/>.
     /// </summary>
     public bool Lobby { get; set; }
 
@@ -882,6 +883,16 @@ public sealed class SpikeDetector
             {
                 toWire = Carried(spike, QualitySignal.RelayProcess, QualitySignal.RelayWire, baseline);
                 if (toWire is { } w) verdict = w >= 0.5 ? SpikeVerdicts.Relay : SpikeVerdicts.RelayProcess;
+                else if (baseline.RelayWireMs is null)
+                {
+                    // The relay's kernel does not answer pings at all (no normal for A): the wire cannot split the way
+                    // to the relay from the relay, so the router is held against relayd's pong instead. Only the router
+                    // - the one segment both share - can be named this way; without it the spike stays unclear. The
+                    // owner's Viettel match on sg-6, 2026-10-20 18:39 local: a phone speed test, the router's ping at
+                    // 15-550 ms, and all seven spikes "unclear" because sg-6 answered no ICMP that match.
+                    toGateway = Carried(spike, QualitySignal.RelayProcess, QualitySignal.Gateway, baseline);
+                    if (toGateway >= 0.5) verdict = SpikeVerdicts.Router;
+                }
             }
 
             if (verdict == SpikeVerdicts.Relay)

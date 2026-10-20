@@ -751,10 +751,27 @@ public sealed class HomeLineStatus
 
     /// <summary>
     /// What the other devices at home are moving through the router right now (3 s average, Mbps). Null without counters,
-    /// outside a match, or when the last reading is more than 5 s old - so the panel can tell a load that is still going
-    /// from one that has stopped.
+    /// while not connected, or when the last reading is more than 5 s old - so the panel can tell a load that is still
+    /// going from one that has stopped.
     /// </summary>
     [JsonPropertyName("otherMbpsNow")] public double? OtherMbpsNow { get; set; }
+
+    /// <summary>Whether the router answers pings: true, false (nothing to judge on), null = not known yet.</summary>
+    [JsonPropertyName("routerPings")] public bool? RouterPings { get; set; }
+
+    /// <summary>
+    /// The router is holding a queue right now while this PC is quiet - judged live from Connect on, in a match or not
+    /// (Core.Quality.HomeLineWatch). The Busy* fields describe the latest such stretch, this one while it lasts.
+    /// </summary>
+    [JsonPropertyName("busyNow")] public bool BusyNow { get; set; }
+    [JsonPropertyName("busyCount")] public int BusyCount { get; set; }
+    /// <summary>When the latest stretch ended (or, while it lasts, its last busy second), unix seconds.</summary>
+    [JsonPropertyName("busyAt")] public long? BusyAt { get; set; }
+    [JsonPropertyName("busySeconds")] public double? BusySeconds { get; set; }
+    /// <summary>How far the router's own ping went over normal at worst.</summary>
+    [JsonPropertyName("busyGatewayMs")] public double? BusyGatewayMs { get; set; }
+    /// <summary>What the other devices moved meanwhile (median), when the router gives counters.</summary>
+    [JsonPropertyName("busyOtherMbps")] public double? BusyOtherMbps { get; set; }
 
     [JsonPropertyName("householdCount")] public int HouseholdCount { get; set; }
     [JsonPropertyName("householdAt")] public long? HouseholdAt { get; set; }

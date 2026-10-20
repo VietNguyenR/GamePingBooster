@@ -182,7 +182,7 @@ internal sealed class SpikeRecorder : IQualitySink
     private double? _lineDown;
     private double? _lineUp;
 
-    // The home router's own counters (Network.RouterCounters), read once a second while a match runs. Everything below
+    // The home router's own counters (Network.RouterCounters), read once a second while connected. Everything below
     // is written by the router task and read by Step, so it goes under _routerGate.
     private readonly RouterCounters _router = new();
     private readonly object _routerGate = new();
@@ -200,6 +200,14 @@ internal sealed class SpikeRecorder : IQualitySink
 
     // What the panel's "Mạng trong nhà" item shows (HomeLine), from the spikes reported since the service started.
     private HomeLineStatus? _homeLine;
+
+    // The same item live, from Connect on: the router's ping floor (Core.Quality.HomeLineWatch). Fed on Step's thread; the
+    // snapshot below is what the status reads, under _routerGate.
+    private readonly HomeLineWatch _watch = new();
+    private HomeLineEpisode? _busy;
+    private int _busyCount;
+    private bool _busyNow;
+    private bool? _routerPings;
 
     private DateTimeOffset _windowStart;
     private int _windowLogged;
@@ -496,11 +504,10 @@ internal sealed class SpikeRecorder : IQualitySink
             _lastCreated = index;
         }
 
-        if (active && tunnel is not null)
+        if (tunnel is not null)
         {
-            _inMatch = true;
-            _matchContext = context;
-
+            // The home line is watched from Connect on, not only in a match (owner, 2026-10-21: "đo ngay khi bấm tăng tốc"):
+            // the adapter, the router's counters and the router's ping - all inside the house, nothing over the internet.
             if (index % SpikeDetector.TicksPerSecond == 0)
             {
                 ReadAdapter(now, context.RelayAddress);
@@ -515,14 +522,23 @@ internal sealed class SpikeRecorder : IQualitySink
                 tick.OtherDownMbps = _otherDown;
                 tick.OtherUpMbps = _otherUp;
             }
+        }
 
+        if (active && tunnel is not null)
+        {
+            _inMatch = true;
+            _matchContext = context;
             SendProbes(tunnel, tick, context, now);
         }
-        else if (lobby && tunnel is not null)
+        else if (tunnel is not null)
         {
-            tick.RelayProcessSent = true;
-            tunnel.SendQualityPing();
-            SendDoorProbes(tick, context);
+            PingGateway(tick);
+            if (lobby)
+            {
+                tick.RelayProcessSent = true;
+                tunnel.SendQualityPing();
+                SendDoorProbes(tick, context);
+            }
         }
 
         List<SpikeEvent>? closed = null;
@@ -571,6 +587,7 @@ internal sealed class SpikeRecorder : IQualitySink
                 }
                 if (Follow(settled) is { } done) (followed ??= []).Add(done);
                 TrackLobby(settled, context);
+                WatchHomeLine(settled);
             }
         }
         if (closed is not null)
@@ -628,11 +645,7 @@ internal sealed class SpikeRecorder : IQualitySink
 
     private void SendProbes(TunnelClient tunnel, QualityTick tick, Context context, long now)
     {
-        if (_gateway is { } gateway)
-        {
-            tick.GatewaySent = true;
-            _ = PingAsync(gateway, tick.Index, static (t, ms) => t.GatewayMs = ms);
-        }
+        PingGateway(tick);
 
         if (context.RelayAddress is { } relay)
         {
@@ -659,6 +672,14 @@ internal sealed class SpikeRecorder : IQualitySink
 
         SendDoorProbes(tick, context);
         WalkStep(tunnel, tick.Index, now);
+    }
+
+    /// <summary>A0, the router's ping: every quarter second while connected, in a match or not.</summary>
+    private void PingGateway(QualityTick tick)
+    {
+        if (_gateway is not { } gateway) return;
+        tick.GatewaySent = true;
+        _ = PingAsync(gateway, tick.Index, static (t, ms) => t.GatewayMs = ms);
     }
 
     /// <summary>The other ways into the relay, one Probe each, the same quarter second as the pong they are compared with.</summary>
@@ -888,7 +909,10 @@ internal sealed class SpikeRecorder : IQualitySink
         {
             if (_nic is null || now - _nicFoundAt > Stopwatch.Frequency * 60 || !Equals(relay, _nicFor))
             {
+                var wasGateway = _gateway;
                 (_nic, _gateway) = FindPhysicalAdapter(relay);
+                // Another router: its ping has another normal.
+                if (!Equals(wasGateway, _gateway)) _watch.Reset();
                 // The network a swing was seen on: this adapter and its router. Another one starts the memory again.
                 if (_nic is not null) _jitter?.OnNetwork($"{_nic.Id}|{_gateway}");
                 _nicFor = relay;
@@ -930,7 +954,7 @@ internal sealed class SpikeRecorder : IQualitySink
     private static readonly long OtherWindow = Stopwatch.Frequency * 3;
 
     /// <summary>
-    /// Once a second while a match runs: finds the router's counter service for this gateway (once per gateway, again after
+    /// Once a second while connected: finds the router's counter service for this gateway (once per gateway, again after
     /// half an hour when it had none), then reads the counters. Never more than one request in flight; a router too busy
     /// to answer just leaves a gap.
     /// </summary>
@@ -1073,11 +1097,21 @@ internal sealed class SpikeRecorder : IQualitySink
         {
             lock (_routerGate)
             {
-                if (_homeLine is null && _routerCounters is null) return null;
+                if (_homeLine is null && _routerCounters is null && _routerPings is null && _busy is null) return null;
                 var status = _homeLine is { } h ? h.Copy() : new HomeLineStatus();
                 status.RouterCounters = _routerCounters;
-                // Only a fresh figure: the router is polled while a match runs, so after it - or with a router that stopped
-                // answering - there is no "now".
+                status.RouterPings = _routerPings;
+                status.BusyNow = _busyNow;
+                if (_busy is { } busy)
+                {
+                    status.BusyCount = _busyCount;
+                    status.BusyAt = busy.StartUtc.AddSeconds(busy.Seconds).ToUnixTimeSeconds();
+                    status.BusySeconds = Math.Round(busy.Seconds, 1);
+                    status.BusyGatewayMs = Math.Round(busy.PeakGatewayExcessMs);
+                    status.BusyOtherMbps = busy.OtherMbps is { } other ? Math.Round(other) : null;
+                }
+                // Only a fresh figure: the router is polled while connected, so after Disconnect - or with a router that
+                // stopped answering - there is no "now".
                 status.OtherMbpsNow = _otherDown is { } down && _otherUp is { } up &&
                                       Stopwatch.GetTimestamp() - _otherAt <= Stopwatch.Frequency * 5
                     ? Math.Round(Math.Max(down, up))
@@ -1086,6 +1120,33 @@ internal sealed class SpikeRecorder : IQualitySink
             }
         }
     }
+
+    /// <summary>
+    /// One settled quarter second into <see cref="_watch"/>, and what it says into the status. An episode is logged once
+    /// when it starts to count and once when it ends - the owner's tests are read from the service log.
+    /// </summary>
+    private void WatchHomeLine(QualityTick tick)
+    {
+        var ended = _watch.Feed(tick);
+        var busy = _watch.Busy;
+        lock (_routerGate)
+        {
+            if (busy is not null && !_busyNow) _busyCount++;
+            if (busy is not null && !_busyNow) _log($"Home line: the router's ping floor rose {busy.FloorExcessMs:F0} ms over normal " +
+                                                    $"{_watch.NormalMs:F1} ms with this PC quiet{Others(busy)} - another device at home is using it.");
+            _busyNow = busy is not null;
+            if ((busy ?? ended) is { } latest) _busy = latest;
+            _routerPings = _watch.Answers;
+        }
+        if (ended is not null)
+        {
+            _log($"Home line: the router was busy {ended.Seconds:F0} s (floor +{ended.FloorExcessMs:F0} ms, peak " +
+                 $"+{ended.PeakGatewayExcessMs:F0} ms){Others(ended)}.");
+        }
+    }
+
+    private static string Others(HomeLineEpisode episode) =>
+        episode.OtherMbps is { } mbps ? $", other devices {mbps:F0} Mbps" : ", no router counters";
 
     private void NoteHomeLine(SpikeEvent spike)
     {

@@ -7,7 +7,12 @@ namespace GamePingBooster.App.ViewModels.Checklist;
 
 /// <summary>
 /// Item A "Mạng trong nhà": another device at home filling the line while the player plays - the one cause item 3 cannot
-/// see, because item 3 only sees this PC. Read from the spike recorder (StatusMessage.HomeLine), which judges each spike.
+/// see, because item 3 only sees this PC. Read from the spike recorder (StatusMessage.HomeLine) in two ways:
+/// - live, from Connect on - before the game is started, in the lobby, in a match (owner, 2026-10-21): the router's ping
+///   floor rising with this PC quiet (HomeLineStatus.BusyNow / Busy*, Core.Quality.HomeLineWatch). Only the router's ping,
+///   so it says "ping to the router rose", never "your ping rose".
+/// - in a match, per spike: the game's own ping rose with the router busy (Household* / Congested*). Only this one
+///   proves the game felt it, so only this one goes red while the game runs.
 ///
 /// Two levels, agreed with the owner on 2026-10-20, and the worst outcome is a false alarm:
 /// 1. The router gives its WAN byte counters (UPnP): a spike of three seconds or more while the OTHER devices moved at
@@ -69,15 +74,16 @@ public sealed class HomeLineCheck : CheckItem
 
         if (line is null)
         {
-            // Measured only while a match runs: nothing to say before the first one.
+            // Measured from Connect on; the first answers take a few seconds.
             Severity = CheckSeverity.Unknown;
-            Summary = T("check.home.pending");
+            Summary = T(Connected(status) ? "check.home.measuring" : "check.home.pending");
             Lines = [];
             return;
         }
 
         var household = line.HouseholdAt is { } h ? Entry(line, h) : null;
         var congested = line.CongestedAt is { } c ? CongestedEntry(line, c) : null;
+        var busy = line.BusyAt is { } b ? BusyEntry(line, b) : null;
 
         if (HouseholdNow(line, now))
         {
@@ -87,6 +93,23 @@ public sealed class HomeLineCheck : CheckItem
             if (line.OtherMbpsNow is { } nowMbps) lines.Add(new DetailLine(Loc.F("check.home.otherNow", Whole(nowMbps)), IsEntry: true));
             if (line.HouseholdCount > 1) lines.Add(new DetailLine(Loc.F("check.home.times", line.HouseholdCount), IsEntry: true));
             lines.Add(new DetailLine(T("check.home.householdAdvice")));
+            Lines = lines;
+            return;
+        }
+
+        if (BusyNow(line, now))
+        {
+            Severity = CheckSeverity.Warning;
+            var named = line.BusyOtherMbps >= LoadMbps;
+            Summary = T(named ? "check.home.household" : "check.home.congested");
+            var lines = new List<DetailLine> { new(busy!, IsEntry: true) };
+            if (named && !line.BusyNow && line.OtherMbpsNow is { } nowMbps)
+            {
+                lines.Add(new DetailLine(Loc.F("check.home.otherNow", Whole(nowMbps)), IsEntry: true));
+            }
+            if (line.BusyCount > 1) lines.Add(new DetailLine(Loc.F("check.home.times", line.BusyCount), IsEntry: true));
+            lines.Add(new DetailLine(T(named ? "check.home.householdAdvice" : "check.home.congestedAdvice")));
+            if (line.RouterCounters == false) lines.Add(new DetailLine(T("check.home.noCounters")));
             Lines = lines;
             return;
         }
@@ -103,27 +126,58 @@ public sealed class HomeLineCheck : CheckItem
             return;
         }
 
-        Severity = CheckSeverity.Good;
-        Summary = T("check.home.good");
-        var good = new List<DetailLine>();
-        // The latest of the two, as history: it is over, so it is a line, not a warning.
-        var latest = (line.HouseholdAt ?? 0) >= (line.CongestedAt ?? 0)
-            ? (At: line.HouseholdAt, Text: household)
-            : (At: line.CongestedAt, Text: congested);
+        var history = new List<DetailLine>();
+        // The latest of the three, as history: it is over, so it is a line, not a warning.
+        var latest = new[] { (At: line.HouseholdAt, Text: household), (At: line.CongestedAt, Text: congested), (At: line.BusyAt, Text: busy) }
+            .Where(e => e.At is not null && e.Text is not null)
+            .OrderByDescending(e => e.At)
+            .FirstOrDefault();
         if (latest is { At: { } at, Text: { } text } && Within(at, now, RememberFor))
         {
-            good.Add(new DetailLine(Loc.F("check.home.last", text), IsEntry: true));
+            history.Add(new DetailLine(Loc.F("check.home.last", text), IsEntry: true));
         }
-        if (line.RouterCounters is { } counters) good.Add(new DetailLine(T(counters ? "check.home.counters" : "check.home.noCounters")));
-        Lines = good;
+        if (line.OtherMbpsNow is { } otherNow) history.Add(new DetailLine(Loc.F("check.home.otherLive", Whole(otherNow)), IsEntry: true));
+        if (line.RouterCounters is { } counters) history.Add(new DetailLine(T(counters ? "check.home.counters" : "check.home.noCounters")));
+
+        if (line.RouterPings == false)
+        {
+            // Nothing live to judge on: the router ignores pings. Counters, if any, still name a load in a match.
+            Severity = CheckSeverity.Unknown;
+            Summary = T("check.home.noPing");
+            Lines = history;
+            return;
+        }
+        if (line.RouterPings is null && latest.At is null)
+        {
+            Severity = CheckSeverity.Unknown;
+            Summary = T(Connected(status) ? "check.home.measuring" : "check.home.pending");
+            Lines = history;
+            return;
+        }
+
+        Severity = CheckSeverity.Good;
+        Summary = T("check.home.good");
+        Lines = history;
     }
+
+    private static bool Connected(StatusMessage? status) =>
+        status is { State: TunnelState.Connected or TunnelState.Connecting or TunnelState.Reconnecting };
 
     /// <summary>
     /// Whether this card is warning right now: the router busy with another device at home. <see cref="NetworkCheck"/>
     /// reads it too, so the jitter to the router that the same queue causes is not also blamed on the Wi-Fi.
     /// </summary>
     internal static bool RouterBusy(HomeLineStatus? line, DateTimeOffset now) =>
-        line is not null && (HouseholdNow(line, now) || CongestedNow(line, now));
+        line is not null && (HouseholdNow(line, now) || BusyNow(line, now) || CongestedNow(line, now));
+
+    /// <summary>
+    /// The live watch: busy now, or within <see cref="HoldFor"/> of it ending, or - when it was another device by the
+    /// router's counters - while those devices still move as much, up to <see cref="LoadHoldsFor"/>.
+    /// </summary>
+    private static bool BusyNow(HomeLineStatus line, DateTimeOffset now) =>
+        line.BusyNow ||
+        line.BusyAt is { } at &&
+        (Within(at, now, HoldFor) || line.BusyOtherMbps >= LoadMbps && line.OtherMbpsNow >= LoadMbps && Within(at, now, LoadHoldsFor));
 
     private static bool HouseholdNow(HomeLineStatus line, DateTimeOffset now) =>
         line.HouseholdAt is { } at &&
@@ -138,6 +192,22 @@ public sealed class HomeLineCheck : CheckItem
 
     private static string CongestedEntry(HomeLineStatus line, long at) =>
         Loc.F("check.home.congestedEntry", Clock(at), Whole(line.CongestedGatewayMs), Whole(line.CongestedSeconds));
+
+    /// <summary>The live watch's stretch: going on ("since HH:mm") or over ("HH:mm ... for Y s").</summary>
+    private static string BusyEntry(HomeLineStatus line, long at)
+    {
+        if (line.BusyNow)
+        {
+            var since = at - (long)Math.Round(line.BusySeconds ?? 0);
+            // While it lasts, the live figure when there is one: the median so far lags a load that just grew.
+            return (line.BusyOtherMbps is not null ? line.OtherMbpsNow ?? line.BusyOtherMbps : null) is { } now
+                ? Loc.F("check.home.busyNowMbps", Clock(since), Whole(line.BusyGatewayMs), Whole(now))
+                : Loc.F("check.home.busyNowEntry", Clock(since), Whole(line.BusyGatewayMs));
+        }
+        return line.BusyOtherMbps is { } mbps
+            ? Loc.F("check.home.busyEntryMbps", Clock(at), Whole(line.BusyGatewayMs), Whole(line.BusySeconds), Whole(mbps))
+            : Loc.F("check.home.congestedEntry", Clock(at), Whole(line.BusyGatewayMs), Whole(line.BusySeconds));
+    }
 
     private static bool Within(long unixSeconds, DateTimeOffset now, TimeSpan within) =>
         now - DateTimeOffset.FromUnixTimeSeconds(unixSeconds) <= within;
