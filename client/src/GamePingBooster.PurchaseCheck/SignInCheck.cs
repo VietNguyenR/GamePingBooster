@@ -71,6 +71,12 @@ internal static class SignInCheck
         Check("401 signed_in_elsewhere", evicted.State, "signed_in_elsewhere");
         Check("names the other machine", evicted.DeviceLabel, "MAY-NET");
         Check("and when", evicted.At, 1_791_000_000L);
+        Check("not a removal", evicted.Reason == SignInWatcher.RemovedReason, false);
+
+        server.Watch = _ => (401, Removed(1_791_000_000));
+        var removed = await client.WatchSignInAsync("rt", default);
+        Check("removed on the website: still signed_in_elsewhere", removed.State, "signed_in_elsewhere");
+        Check("removed on the website: reason", removed.Reason, SignInWatcher.RemovedReason);
 
         server.Watch = _ => (401, """{"state":"signed_out","error":"x"}""");
         Check("401 signed_out", (await client.WatchSignInAsync("rt", default)).State, "signed_out");
@@ -91,6 +97,12 @@ internal static class SignInCheck
         Check("/auth/token 401: SignedInElsewhere", token?.SignedInElsewhere, true);
         Check("/auth/token 401: other machine", token?.OtherDevice, "MAY-NET");
         Check("/auth/token 401: when", token?.SignedOutAt?.ToUnixTimeSeconds(), 1_791_000_000L);
+        Check("/auth/token 401: not removed", token?.Removed, false);
+
+        server.Token = (401, Removed(1_791_000_000));
+        var tokenRemoved = await Catch(() => client.FetchTokenAsync("rt", "04ab", "ME", default)) as LicenceException;
+        Check("/auth/token 401 removed: SignedInElsewhere", tokenRemoved?.SignedInElsewhere, true);
+        Check("/auth/token 401 removed: Removed", tokenRemoved?.Removed, true);
 
         server.Account = (401, Evicted(null, null));
         var account = await Catch(() => client.FetchAccountAsync("rt", default)) as LicenceException;
@@ -285,9 +297,13 @@ internal static class SignInCheck
                 "Tài khoản của bạn vừa đăng nhập trên máy khác (MAY-NET) lúc 21:05 08/10, nên máy này đã bị đăng xuất và ngắt kết nối. Đăng nhập lại để dùng tiếp trên máy này.");
             Check("vi, nothing known", new SignedOutElsewhere(null, null).Text(),
                 "Tài khoản của bạn vừa đăng nhập trên máy khác, nên máy này đã bị đăng xuất và ngắt kết nối. Đăng nhập lại để dùng tiếp trên máy này.");
+            Check("vi, removed on the website", new SignedOutElsewhere(null, at, Removed: true).Text(),
+                "Máy này đã bị gỡ khỏi tài khoản trên trang web lúc 21:05 08/10, nên đã bị đăng xuất và ngắt kết nối. Đăng nhập lại để dùng tiếp trên máy này.");
             SetLanguage(AppLanguage.English);
             Check("en", new SignedOutElsewhere("  DESKTOP-1 ", at).Text(),
                 "Your account just signed in on another computer (DESKTOP-1) at 21:05 08/10, so this one was signed out and disconnected. Sign in again to keep using it here.");
+            Check("en, removed on the website", new SignedOutElsewhere(null, null, Removed: true).Text(),
+                "This computer was removed from your account on the website, so it was signed out and disconnected. Sign in again to keep using it here.");
         }
         finally
         {
@@ -314,6 +330,9 @@ internal static class SignInCheck
     {
         public LicenceException Evicted() => new("x", HttpStatusCode.Unauthorized, SignInWatcher.SignedInElsewhereCode);
     }
+
+    private static string Removed(long at) =>
+        $$"""{"state":"signed_in_elsewhere","code":"signed_in_elsewhere","reason":"removed","error":"Máy này...","deviceLabel":null,"at":{{at}}}""";
 
     private static string Evicted(string? label, long? at) =>
         $$"""{"state":"signed_in_elsewhere","code":"signed_in_elsewhere","error":"Tài khoản...","deviceLabel":{{(label is null ? "null" : $"\"{label}\"")}},"at":{{(at?.ToString() ?? "null")}}}""";

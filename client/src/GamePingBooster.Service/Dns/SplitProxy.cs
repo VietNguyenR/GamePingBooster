@@ -530,16 +530,19 @@ internal sealed class SplitProxy : IAsyncDisposable
     private async Task ProbeAsync(string name, CancellationToken ct)
     {
         var perUpstream = new List<IReadOnlyList<IPAddress>>();
-        foreach (var (_, reply) in await _doh.ResolveEachAsync(DnsWire.BuildQuery(0, name), ct).ConfigureAwait(false))
+        var playersNetwork = new HashSet<IPAddress>();
+        foreach (var (resolver, reply) in await _doh.ResolveEachAsync(DnsWire.BuildQuery(0, name), ct).ConfigureAwait(false))
         {
             try
             {
-                perUpstream.Add([.. DnsWire.Parse(reply, reply.Length).Addresses
-                    .Where(a => a.AddressFamily == AddressFamily.InterNetwork)]);
+                List<IPAddress> addresses = [.. DnsWire.Parse(reply, reply.Length).Addresses
+                    .Where(a => a.AddressFamily == AddressFamily.InterNetwork)];
+                perUpstream.Add(addresses);
+                if (DohUpstream.AnswersForPlayersNetwork(resolver)) playersNetwork.UnionWith(addresses);
             }
             catch (FormatException) { }
         }
-        await JudgeAsync(name, EdgeRanking.Interleave(perUpstream, ProbedEdges), ct).ConfigureAwait(false);
+        await JudgeAsync(name, EdgeRanking.Interleave(perUpstream, ProbedEdges), ct, playersNetwork).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -547,7 +550,8 @@ internal sealed class SplitProxy : IAsyncDisposable
     /// the line split only when the line cuts it whole (a reset or stall while the control is answered - the same test
     /// as WorkingEdges.IsCutAsync) and the split completes with a valid certificate. Internal for TunnelCheck.
     /// </summary>
-    internal async Task<Verdict> JudgeAsync(string name, IReadOnlyList<IPAddress> candidates, CancellationToken ct)
+    internal async Task<Verdict> JudgeAsync(string name, IReadOnlyList<IPAddress> candidates, CancellationToken ct,
+        IReadOnlySet<IPAddress>? playersNetwork = null)
     {
         var clock = Stopwatch.StartNew();
         var before = _verdicts.TryGetValue(name, out var old) ? old : null;
@@ -614,6 +618,17 @@ internal sealed class SplitProxy : IAsyncDisposable
                     : await WholeOrRelayAsync(wholePassing, source, seen, ct).ConfigureAwait(false);
         }
         verdict = verdict with { CutSeen = cutSeen };
+
+        // The edges Google named for the player's network first, the fastest handshake only within each group - as
+        // WorkingEdges does through the tunnel (EdgeRanking.PreferPlayersNetwork). Ranked by speed alone, prod-live-front
+        // went to Cloudflare's Tencent edges (43.174/43.175) on about half the starts on FPT and Viettel, 2026-10-13..21,
+        // though PUBG's DNS names Akamai for every Vietnamese network; a Tencent front had the game ask the .cn mirror
+        // at login every time, and .cn through the lobby proxy goes unanswered on ~5% of requests ("Initializing" 37-61 s).
+        // Tencent stays behind as the fallback; when Google did not answer, nothing changes.
+        if (playersNetwork is { Count: > 0 } && verdict.Edges.Length > 1)
+        {
+            verdict = verdict with { Edges = EdgeRanking.PlayersNetworkFirst(verdict.Edges, playersNetwork) };
+        }
 
         // A cut seen live is believed over a probe: the probe's hello is SChannel's, the game's is its own.
         if (before is not null && before.Held > DateTimeOffset.UtcNow)

@@ -145,6 +145,16 @@ internal static partial class Program
             Check("and it is remembered as cut, so it never goes whole", verdict.CutSeen != default, verdict.Why);
         }
 
+        // prod-live-front, 2026-10-21: the edge Google named for the player's network is tried first whatever the handshake
+        // order (Tencent from Cloudflare won about half the starts on speed), and the other stays behind it as a fallback.
+        foreach (var named in edges)
+        {
+            await using var ranked = Proxy(_ => false);
+            var verdict = await ranked.JudgeAsync(SplitBlocked, edges, CancellationToken.None, new HashSet<IPAddress> { named });
+            Check($"the player's network's edge {named} is tried first, the other kept behind it",
+                verdict.Edges.Length == 2 && verdict.Edges[0].Equals(named), string.Join(", ", verdict.Edges.Select(e => e.ToString())));
+        }
+
         // The .cn mirror: a lobby-proxy name falls back to the relay, never to the line it hangs on - unchanged.
         await using (var cn = Proxy(_ => true))
         {

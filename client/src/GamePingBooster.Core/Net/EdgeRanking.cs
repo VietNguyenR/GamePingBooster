@@ -73,6 +73,13 @@ public static class EdgeRanking
     }
 
     /// <summary>
+    /// <see cref="PreferPlayersNetwork{T}"/> for a list that is tried in order: the player's network's edges first, each
+    /// group in its own order, and the others kept behind them as fallbacks rather than dropped.
+    /// </summary>
+    public static IPAddress[] PlayersNetworkFirst(IReadOnlyList<IPAddress> ordered, IReadOnlySet<IPAddress> playersNetwork) =>
+        [.. ordered.Where(playersNetwork.Contains), .. ordered.Where(a => !playersNetwork.Contains(a))];
+
+    /// <summary>
     /// The edges that completed a handshake, fastest first, without any that were clearly slower than
     /// the fastest. Never empty when <paramref name="survivors"/> is not.
     /// </summary>
