@@ -230,6 +230,18 @@ public sealed class LicenceClient : IDisposable
     // is a plan code and nothing else, and nothing here can make an order PAID. Only SePay's webhook
     // to the server does that.
 
+    /// <summary>
+    /// GET /app/conflict-apps: the boosters and VPNs the "Tối ưu máy" panel names (ConflictApps). No sign-in - the panel
+    /// shows before one and the list is no secret.
+    /// </summary>
+    public Task<ConflictAppsResult> FetchConflictAppsAsync(CancellationToken ct) =>
+        WithDeadline(RequestTimeout, ct, async t =>
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, "app/conflict-apps");
+            using var response = await _http.SendAsync(request, t).ConfigureAwait(false);
+            return await ReadAsync(response, LicenceJsonContext.Default.ConflictAppsResult, t).ConfigureAwait(false);
+        });
+
     /// <summary>The plans the upgrade screen offers, priced for this account.</summary>
     public Task<PlansResult> FetchPlansAsync(string refreshToken, string lang, CancellationToken ct) =>
         WithDeadline(RequestTimeout, ct, async t =>
@@ -911,6 +923,22 @@ public sealed class QualityUploadResult
     [JsonIgnore] public bool Limited { get; set; }
 }
 
+/// <summary>What GET /app/conflict-apps answers - see ConflictApps.</summary>
+public sealed class ConflictAppsResult
+{
+    [JsonPropertyName("apps")] public List<ConflictAppRow> Apps { get; set; } = [];
+}
+
+public sealed class ConflictAppRow
+{
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
+    [JsonPropertyName("name")] public string Name { get; set; } = "";
+    [JsonPropertyName("kind")] public string Kind { get; set; } = "";
+    [JsonPropertyName("processNames")] public List<string> ProcessNames { get; set; } = [];
+    [JsonPropertyName("adapterNames")] public List<string> AdapterNames { get; set; } = [];
+    [JsonPropertyName("active")] public bool Active { get; set; } = true;
+}
+
 /// <summary>Source-generated JSON: the App is published with Native AOT, like the service.</summary>
 [JsonSourceGenerationOptions(DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(ExchangeRequest))]
@@ -929,4 +957,5 @@ public sealed class QualityUploadResult
 [JsonSerializable(typeof(PlansResult))]
 [JsonSerializable(typeof(OrderRequest))]
 [JsonSerializable(typeof(OrderResult))]
+[JsonSerializable(typeof(ConflictAppsResult))]
 public partial class LicenceJsonContext : JsonSerializerContext;
