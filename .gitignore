@@ -128,3 +128,7 @@ profiles/aion2-vn.json
 profiles/apex-vn.json.bak-20261015-r6
 profiles/r6-vn.json
 profiles/r6-vn.json.bak-20261018-sg
+
+# Local UIAccess build of the overlay prototype (install-uiaccess-test.ps1)
+client/src/GamePingBooster.OverlayCheck/publish-uiaccess/
+client/src/GamePingBooster.OverlayCheck/install-uiaccess-test.ps1

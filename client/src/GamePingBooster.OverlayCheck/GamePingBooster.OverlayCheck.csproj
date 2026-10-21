@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- WinExe: no console window popping up over the game. Everything it has to say goes to its log. -->
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>gpb-overlaycheck</AssemblyName>
+    <!-- A developer tool, never shipped, like PathCheck and QualityCheck: no packages, no Core reference. -->
+    <IsAotCompatible>false</IsAotCompatible>
+    <!--
+      Two builds of the same code. The default asks for nothing and runs from anywhere: a plain
+      topmost window. `-p:UiAccess=true` puts uiAccess="true" in the manifest, which Windows honours
+      only for a signed exe in a secure folder (Program Files) - install-uiaccess-test.ps1 does that.
+      Started from anywhere else, the UIAccess build fails to launch at all (0x8007202B).
+    -->
+    <ApplicationManifest Condition="'$(UiAccess)' != 'true'">app.manifest</ApplicationManifest>
+    <ApplicationManifest Condition="'$(UiAccess)' == 'true'">app.uiaccess.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+</Project>
