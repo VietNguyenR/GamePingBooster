@@ -39,9 +39,15 @@ public partial class MainWindow : SurfaceWindow
 
     private ChecklistViewModel? _checklist;
 
+    private MainViewModel? _main;
+
     protected override void OnDataContextChanged(EventArgs e)
     {
         base.OnDataContextChanged(e);
+
+        if (_main is not null) _main.PropertyChanged -= OnMainChanged;
+        _main = DataContext as MainViewModel;
+        if (_main is not null) _main.PropertyChanged += OnMainChanged;
 
         if (_checklist is not null) _checklist.PropertyChanged -= OnChecklistChanged;
         _checklist = (DataContext as MainViewModel)?.Checklist;
@@ -53,6 +59,76 @@ public partial class MainWindow : SurfaceWindow
             if (!_plansOpen) _ = ShowPlansAsync(null);
         };
         ApplyPanelWidth();
+    }
+
+    /// <summary>A notice under the details card came up: once the window has grown to it, scroll down to it in case
+    /// the screen was too short for all of it.</summary>
+    private void OnMainChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (_main is null) return;
+        var shown = e.PropertyName switch
+        {
+            nameof(MainViewModel.HasError) => _main.HasError,
+            nameof(MainViewModel.HasSeveralGamesWarning) => _main.HasSeveralGamesWarning,
+            nameof(MainViewModel.HasUnblockProblem) => _main.HasUnblockProblem,
+            _ => false,
+        };
+        // Background twice: after the layout that counts the notice and FitDetails' resize, then after that layout.
+        if (shown) Dispatcher.UIThread.Post(() => Dispatcher.UIThread.Post(
+            () => this.FindControl<ScrollViewer>("DetailsScroll")?.ScrollToEnd(), DispatcherPriority.Background),
+            DispatcherPriority.Background);
+    }
+
+    /// <summary>The status card, the details (card and notices) or the area under them (server picker, button, licence
+    /// and update lines) got taller or shorter - every part of the window but the fixed header: a line or a notice came
+    /// or went. The details' own height, not the ScrollViewer's extent: that one is never less than the viewport, so it
+    /// grew with the window until it filled the screen.</summary>
+    private void OnContentSizeChanged(object? sender, SizeChangedEventArgs e)
+    {
+        if (e.HeightChanged) Dispatcher.UIThread.Post(FitDetails, DispatcherPriority.Background);
+    }
+
+    /// <summary>The height FitDetails last asked for, until the window has taken it (OnDetailsScrollSizeChanged).</summary>
+    private double? _fitPending;
+
+    /// <summary>
+    /// The window has taken a height FitDetails asked for: fit again, now against the viewport that height gave. The
+    /// platform resizes a moment after Height is set, so a fit in that gap - a notice coming up just after the fit on
+    /// open - read the old viewport, came out short, and left the notice cut off under a scrollbar (owner, 10-22).
+    /// Only after a resize of ours: one the player drags is left alone.
+    /// </summary>
+    private void OnDetailsScrollSizeChanged(object? sender, SizeChangedEventArgs e)
+    {
+        if (!e.HeightChanged || _fitPending is null) return;
+        _fitPending = null;
+        Dispatcher.UIThread.Post(FitDetails, DispatcherPriority.Background);
+    }
+
+    /// <summary>
+    /// Sizes the window's height to its content: the details fit exactly, nothing spare under them and nothing
+    /// scrolled. Done on open and whenever the content changes height, so the window follows it both ways; a height
+    /// the player drags to stays until the next change. Grows downwards and slides up only as far as it must to stay
+    /// on the screen. A screen too short for all of it, or a maximised window, scrolls instead.
+    /// </summary>
+    private void FitDetails()
+    {
+        if (WindowState != WindowState.Normal || !IsVisible || Screens.ScreenFromWindow(this) is not { } screen) return;
+        if (this.FindControl<ScrollViewer>("DetailsScroll") is not { } scroll
+            || this.FindControl<Control>("DetailsContent") is not { } content) return;
+        // Before the first layout there is nothing to fit to.
+        if (content.Bounds.Height <= 0 || scroll.Viewport.Height <= 0) return;
+
+        var height = double.IsNaN(Height) ? Bounds.Height : Height;
+        var scale = screen.Scaling;
+        var area = screen.WorkingArea;
+        var target = Math.Clamp(height + content.Bounds.Height - scroll.Viewport.Height, MinHeight, area.Height / scale);
+        // Half a pixel either way is rounding, not a change - and stops a resize from chasing itself.
+        if (Math.Abs(target - height) < 0.5) return;
+
+        _fitPending = target;
+        Height = target;
+        var below = Position.Y + (int)Math.Ceiling(Height * scale) - area.Bottom;
+        if (below > 0) Position = new PixelPoint(Position.X, Math.Max(area.Y, Position.Y - below));
     }
 
     private void OnChecklistChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
@@ -562,6 +638,8 @@ public partial class MainWindow : SurfaceWindow
         _hasOpened = true;
         // The decorations are built by now, but laid out a moment later: posted, so the buttons move before anyone sees them.
         Dispatcher.UIThread.Post(PlaceCaptionButtons, DispatcherPriority.Loaded);
+        // The markup's Height is only a first guess: from here on the window is as tall as its content.
+        Dispatcher.UIThread.Post(FitDetails, DispatcherPriority.Background);
         Dispatcher.UIThread.Post(OfferSignIn);
         if (!_offerWhenOpened) return;
         _offerWhenOpened = false;

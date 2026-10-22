@@ -8,7 +8,7 @@
         Title="Game Ping Booster"
         Icon="/favicon.ico"
         Width="420" Height="620"
-        MinWidth="380" MinHeight="580"
+        MinWidth="380" MinHeight="400"
         WindowStartupLocation="CenterScreen">
 
   <views:SurfaceWindow.Styles>
@@ -200,7 +200,9 @@
     </Grid>
 
     <!-- Primary status -->
-    <Border Grid.Row="1" Classes="card" Margin="0,20,0,0">
+    <!-- Watched too (OnContentSizeChanged): the detail line here goes from one line to two as the connection settles
+         - "Đã kết nối tới ... không dùng cho PUBG" - and that height comes out of the details below. -->
+    <Border Grid.Row="1" Classes="card" Margin="0,20,0,0" SizeChanged="OnContentSizeChanged">
       <StackPanel Spacing="8" HorizontalAlignment="Center">
         <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Center">
           <Ellipse Width="12" Height="12" VerticalAlignment="Center"
@@ -222,8 +224,15 @@
       </StackPanel>
     </Border>
 
-    <!-- Details -->
-    <StackPanel Grid.Row="2" Spacing="12" Margin="0,16,0,0">
+    <!-- Details. Scrolls: this row only gets the height left over in a fixed-size window, and a notice or two under
+         the card (unblock problem, several games, error) used to spill out of it and be drawn under the server
+         picker and the button. The window is sized to it (FitDetails); scrolling is only for a screen too
+         short. The same 16 below as above, so a notice does not sit against the server picker.
+         VerticalAlignment Top: stretched to the viewport, the content's height followed the window's, and growing the
+         window to it grew it again until it filled the screen. -->
+    <ScrollViewer x:Name="DetailsScroll" Grid.Row="2" Margin="0,16,0,16" SizeChanged="OnDetailsScrollSizeChanged"
+                  HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+    <StackPanel x:Name="DetailsContent" Spacing="12" VerticalAlignment="Top" SizeChanged="OnContentSizeChanged">
       <Border Classes="card">
         <!-- Ping in game first, ping to the relay under it. The order is the point: the relay
              figure is the one a tester read as his game ping, saw 23 ms, and then played at
@@ -318,9 +327,11 @@
                    FontSize="12" TextWrapping="Wrap" />
       </Border>
     </StackPanel>
+    </ScrollViewer>
 
     <!-- Primary action -->
-    <Grid Grid.Row="3" ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto">
+    <Grid Grid.Row="3" ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto"
+          SizeChanged="OnContentSizeChanged">
 
       <!-- First run: there is no relay yet, so say so instead of offering a button that
            could only fail. -->
