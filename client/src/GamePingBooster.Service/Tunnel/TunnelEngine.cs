@@ -728,8 +728,9 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             ForgetUnblockRoutes();
             phases.Mark("routing");
 
-            // Watch EVERY game in the profile, so routes come and go with whichever one is opened.
-            _watcher = new GameProcessWatcher(_profile!.Games.SelectMany(g => g.ProcessNames));
+            // Watch EVERY game in the profile, so routes come and go with whichever one is opened - the last one opened
+            // when there are several, except that a live match keeps its routes until it ends.
+            _watcher = new GameProcessWatcher(_profile!.Games, () => _recorder?.InMatch ?? false, _log);
             _watcher.GameStateChanged += OnGameStateChanged;
             _watcher.Start();
 
@@ -739,6 +740,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                 InstallRoutes();
             }
 
+            NoteSessionLicence();
             StartSupervisor(token);
             StartGamePingProbe(token);
             StartSpikeRecorder(token);
@@ -2164,6 +2166,9 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
                 tick = null;
                 if (!ticked) break;
 
+                // Before the Connected test: a tunnel already dropped must not sit reconnecting on a licence that is over.
+                if (DisconnectIfLicenceRanOut()) return;
+
                 if (_state != TunnelState.Connected) continue;
 
                 var tunnel = _tunnel;
@@ -3126,6 +3131,8 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             foreach (var relay in holding ? [previous] : candidates)
             {
                 if (ct.IsCancellationRequested) return;
+                // Every handshake from here is refused: say why and stop, rather than sweep the relays for ever.
+                if (DisconnectIfLicenceRanOut()) return;
 
                 SetState(TunnelState.Reconnecting, holding
                     ? new StatusText("svc.reconnectingHeld",
@@ -3849,6 +3856,7 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             // nobody made; the UI says how many instead of listing them all.
             GameName = (_watcher?.IsGameRunning ?? false) ? _game?.Name : OnlyGameName,
             GameCount = _profile?.Games.Count ?? 0,
+            SeveralGamesOpen = _watcher?.SeveralGamesOpen is { } several ? [.. several.Select(g => g.Name)] : null,
             RelayChoice = RelayChoice,
             RelayChoiceNote = choiceNote?.English,
             RelayChoiceNoteCode = choiceNote?.Key,

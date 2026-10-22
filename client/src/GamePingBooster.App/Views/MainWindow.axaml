@@ -303,6 +303,14 @@
                              FontSize="12" TextWrapping="Wrap" />
       </Border>
 
+      <!-- Several games open at once: routes follow the one opened last. A line, not a dialog - a dialog would come
+           up over a game played full screen. Once per connect (the service decides). Amber: nothing is broken. -->
+      <Border Background="#422006" CornerRadius="8" Padding="12"
+              IsVisible="{Binding HasSeveralGamesWarning}">
+        <TextBlock Text="{Binding SeveralGamesWarning}" Foreground="#FDE68A"
+                   FontSize="12" TextWrapping="Wrap" />
+      </Border>
+
       <!-- Error banner, only shown when something went wrong -->
       <Border Background="#7F1D1D" CornerRadius="8" Padding="12"
               IsVisible="{Binding HasError}">

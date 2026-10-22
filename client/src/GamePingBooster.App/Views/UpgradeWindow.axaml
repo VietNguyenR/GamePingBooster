@@ -24,6 +24,10 @@
       <Setter Property="FontSize" Value="11" />
       <Setter Property="TextWrapping" Value="Wrap" />
     </Style>
+    <Style Selector="TextBlock.hint.switching">
+      <Setter Property="Foreground" Value="#D97706" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
     <Style Selector="Button">
       <Setter Property="CornerRadius" Value="8" />
       <Setter Property="Padding" Value="16,8" />
@@ -159,7 +163,7 @@
         </Grid>
 
 
-        <TextBlock Classes="hint" Text="{DynamicResource upgrade.terms}" />
+        <TextBlock Classes="hint" Classes.switching="{Binding IsSwitching}" Text="{Binding CarryText}" IsVisible="{Binding HasCarryText}" />
       </StackPanel>
 
       <!-- ============================================================ pay -->

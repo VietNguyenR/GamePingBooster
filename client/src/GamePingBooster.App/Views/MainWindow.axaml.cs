@@ -281,6 +281,18 @@ public partial class MainWindow : SurfaceWindow
         _ = ShowPlansAsync(notice);
     }
 
+    /// <summary>
+    /// The connection was ended because the licence ran out (App.OnLicenceExpired). Offered again even when the plans
+    /// were offered and closed earlier this run - that was "not now" at start; this is the booster stopping - but on
+    /// OfferPlans' conditions, so it waits for the window to be on screen. Its sentence replaces a 402's waiting offer.
+    /// </summary>
+    public void OfferPlansAfterExpiry(string notice)
+    {
+        if (_plansOpen) return;
+        _offeredPlans = false;
+        OfferPlans(notice);
+    }
+
     private async Task ShowPlansAsync(string? notice)
     {
         if (_purchases is null || DataContext is not MainViewModel vm || string.IsNullOrWhiteSpace(vm.LicenceUrl)) return;

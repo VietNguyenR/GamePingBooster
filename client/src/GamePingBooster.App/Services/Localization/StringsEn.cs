@@ -402,6 +402,9 @@ internal static class StringsEn
         ["svc.notConnected"] = "Not connected",
         ["svc.idleDisconnect"] =
             "Disconnected automatically - no game was open for {0} minutes. Press Start boosting before you play.",
+        ["svc.licenceExpired"] = "Your trial has expired - please upgrade to VIP to keep using the app.",
+        ["svc.licenceExpired.title"] = "Disconnected",
+        ["main.severalGames"] = "Several games are open at once ({0}) - run just one for the app to work best.",
 
         ["choiceNote.nextConnect"] = "Applies the next time you connect.",
         ["choiceNote.notForGame"] = "{0} is not used for {1} - using {2}.",
@@ -489,7 +492,8 @@ internal static class StringsEn
         ["upgrade.discount"] = "Referral code {1}: {0} off your first payment - already taken off the prices.",
         ["upgrade.total"] = "Total",
         ["upgrade.pay"] = "Pay",
-        ["upgrade.terms"] = "Time left on your current plan is carried over to the new one.",
+        ["upgrade.terms.carry"] = "Time left on your current plan is carried over to the new one.",
+        ["upgrade.terms.reset"] = "Note: switching to a different plan type ends your current plan as soon as you pay. Time left is not carried over and not refunded; only the newest plan counts, from the payment.",
         ["upgrade.agree.pre"] = "I have read and agree to the ",
         ["upgrade.agree.terms"] = "Terms of Service",
         ["upgrade.agree.and"] = " and the ",

@@ -130,6 +130,20 @@ public sealed class UpgradeViewModel : INotifyPropertyChanged
     private int _months;
     private string? _selectedCode;
 
+    /// <summary>The tier of the plan somebody is on now, null on the trial or with none.</summary>
+    private string? _currentTier;
+
+    /// <summary>
+    /// What happens to the time left, which the server decides by tier: the same tier carries it
+    /// over, another tier starts from the payment and drops it. Said before paying, because
+    /// somebody who bought standard yesterday and picks dual loses those days.
+    /// </summary>
+    public string? CarryText => _currentTier is null || Selected is null
+        ? null
+        : Loc.T(Selected.Tier == _currentTier ? "upgrade.terms.carry" : "upgrade.terms.reset");
+    public bool HasCarryText => CarryText is not null;
+    public bool IsSwitching => _currentTier is not null && Selected is not null && Selected.Tier != _currentTier;
+
     public PlanCard? Selected => Cards.FirstOrDefault(c => c.Code == _selectedCode);
     public string TotalText => Selected is { } c ? Money(c.AmountMinor) : "-";
     public bool CanPay => Selected is not null && !Busy && Agreed;
@@ -244,6 +258,7 @@ public sealed class UpgradeViewModel : INotifyPropertyChanged
 
             // Start where somebody is: the length and tier of the plan they have, else the cheapest.
             var current = _groups.SelectMany(g => g.Plans).FirstOrDefault(p => p.Code == plans.CurrentPlanCode);
+            _currentTier = current?.Tier;
             var start = current ?? _groups[0].Plans[0];
             _months = start.Months;
             _selectedCode = start.Code;
@@ -502,6 +517,9 @@ public sealed class UpgradeViewModel : INotifyPropertyChanged
         Raise(nameof(Selected));
         Raise(nameof(TotalText));
         Raise(nameof(CanPay));
+        Raise(nameof(CarryText));
+        Raise(nameof(HasCarryText));
+        Raise(nameof(IsSwitching));
     }
 
     private void Fail(string message)

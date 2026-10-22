@@ -164,6 +164,17 @@ public partial class App : Application
                 if (status.UpdateState == "ready") Dispatcher.UIThread.Post(OnUpdateReady);
             };
 
+            // The service disconnected because the licence ran out (TunnelEngine.LicenceEnd). Once per time it happens,
+            // not once per status: every push after it carries the same line until the next connect. Seen at start too,
+            // when it happened with the app closed - the status line still says so, and the notice and plans follow.
+            string? lastDetail = null;
+            _pipe.StatusReceived += status =>
+            {
+                var ended = status.DetailCode == LicenceExpiredCode && lastDetail != LicenceExpiredCode;
+                lastDetail = status.DetailCode;
+                if (ended) Dispatcher.UIThread.Post(() => OnLicenceExpired(window));
+            };
+
             _pipe.Start();
             _refresher.Start();
             signIn.Start();
@@ -298,6 +309,21 @@ public partial class App : Application
 
     /// <summary>Set while <see cref="SignedOutElsewhereAsync"/> runs, so a report from the watch and one from a renewal do it once.</summary>
     private bool _signingOut;
+
+    /// <summary>The service's line for a connection it ended because the licence ran out (TunnelEngine.LicenceExpiredText).</summary>
+    private const string LicenceExpiredCode = "svc.licenceExpired";
+
+    /// <summary>
+    /// The service has disconnected because the trial (or plan) ran out: the status line already says so; a tray
+    /// notification says it to somebody in a game, and the plans open with the same sentence - under OfferPlans' rules,
+    /// so not over a full-screen game: when the window is next on screen.
+    /// </summary>
+    private void OnLicenceExpired(MainWindow window)
+    {
+        var text = Loc.T(LicenceExpiredCode);
+        if (!window.IsVisible || !window.IsActive) _tray?.Notify(Loc.T("svc.licenceExpired.title"), text);
+        window.OfferPlansAfterExpiry(text);
+    }
 
     /// <summary>
     /// This machine was signed out because the account signed in on another one. In the owner's order (2026-10-08):

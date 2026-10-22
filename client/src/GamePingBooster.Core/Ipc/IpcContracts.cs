@@ -442,6 +442,12 @@ public sealed class StatusMessage
     /// <summary>How many games the loaded profile supports. 0 without a profile.</summary>
     [JsonPropertyName("gameCount")] public int GameCount { get; set; }
 
+    /// <summary>
+    /// The games open at once, by name, while the app should say so; null otherwise. Routes follow the one opened last,
+    /// and the UI asks for one game at a time. Once per connect - see GameProcessWatcher.SeveralGamesOpen.
+    /// </summary>
+    [JsonPropertyName("severalGamesOpen")] public List<string>? SeveralGamesOpen { get; set; }
+
     /// <summary>Number of routes currently installed in the Windows routing table.</summary>
     [JsonPropertyName("activeRoutes")] public int ActiveRoutes { get; set; }
 

@@ -105,6 +105,8 @@ internal static partial class Program
             ("Split: a reset while the game waits sends the name to the relay", AResetWhileTheGameWaitsSendsTheNameToTheRelay),
             ("A move closes what rode the old relay", ConnectionsFromTheOldAddressAreFoundAndClosed),
             ("The log seals names and addresses", NamesAndAddressesAreSealed),
+            ("Several games open: the one opened last is routed for", TheGameOpenedLastIsRoutedFor),
+            ("A licence that runs out ends the connection", ALicenceThatRunsOutEndsTheConnection),
         };
 
         foreach (var (title, run) in scenarios)

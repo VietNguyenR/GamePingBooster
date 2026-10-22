@@ -57,6 +57,13 @@ public sealed class TokenRefresher : IAsyncDisposable
     /// </summary>
     private static readonly TimeSpan MinRefreshGap = TimeSpan.FromMinutes(5);
 
+    /// <summary>
+    /// How soon to ask again after a renewal that came back already spent - the token's own expiry, at the end of a
+    /// subscription. Inside the service's LicenceRenewalGrace (30 s), so the 402 that follows clears the token before
+    /// the grace runs out and the disconnect says why straight away.
+    /// </summary>
+    private static readonly TimeSpan RetryAfterExpiry = TimeSpan.FromSeconds(10);
+
     private readonly PipeClient _pipe;
     private readonly Action<string?> _report;
     private readonly Action? _upgradeRequired;
@@ -366,8 +373,15 @@ public sealed class TokenRefresher : IAsyncDisposable
             // expiry it returned last time, because both are clamped to the same period end;
             // OnStatus would see no change, leave the deadline where the loop armed it, and turn
             // the last hour of every subscription into a request every five minutes.
+            //
+            // Not sooner than RetryAfterExpiry, though. In the second a subscription ends the server still answers
+            // with that same expiry, DueFor of a token already spent is "now", and the loop asked again at once:
+            // about twenty renewals in half a second at every trial's end (local test, 2026-10-22), until the
+            // server's clock passed it and the 402 came. One more ask a little later gets that 402.
             var renewed = DateTimeOffset.FromUnixTimeSeconds(result.ExpiresAt);
-            _due = DueFor(renewed);
+            var next = DueFor(renewed);
+            var soonest = DateTimeOffset.UtcNow + RetryAfterExpiry;
+            _due = next < soonest ? soonest : next;
 
             // Cleared, not "valid until": see the constructor. Whatever a failed attempt said is no
             // longer true either.

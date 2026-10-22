@@ -895,6 +895,30 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public bool HasUnblockProblem => UnblockProblemCode is not null;
 
+    private List<string> _severalGamesOpen = [];
+
+    /// <summary>
+    /// The games open at once while the service says to mention it (StatusMessage.SeveralGamesOpen) - once per connect,
+    /// and a line rather than a dialog, which would come up over a game played full screen. Kept as names so a language
+    /// switch re-reads the sentence.
+    /// </summary>
+    private List<string> SeveralGamesOpen
+    {
+        get => _severalGamesOpen;
+        set
+        {
+            if (_severalGamesOpen.SequenceEqual(value)) return;
+            _severalGamesOpen = value;
+            Raise(nameof(SeveralGamesWarning));
+            Raise(nameof(HasSeveralGamesWarning));
+        }
+    }
+
+    public string? SeveralGamesWarning =>
+        _severalGamesOpen.Count >= 2 ? Loc.F("main.severalGames", string.Join(", ", _severalGamesOpen)) : null;
+
+    public bool HasSeveralGamesWarning => _severalGamesOpen.Count >= 2;
+
     private long _packetsSent;
     public long PacketsSent
     {
@@ -1300,6 +1324,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(UnblockText));
         Raise(nameof(UnblockTip));
         Raise(nameof(UnblockProblem));
+        Raise(nameof(SeveralGamesWarning));
         Raise(nameof(GameText));
         Raise(nameof(PacketsText));
 
@@ -1443,6 +1468,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         GameRunning = status.GameRunning;
         GameName = status.GameName;
         GameCount = status.GameCount;
+        SeveralGamesOpen = status.SeveralGamesOpen ?? [];
         RelayName = status.RelayName;
         HomeRelayName = status.HomeRelayName;
         if (status.ListRelayId is { } listed && status.ListRelayPingMs is { } listedMs)
@@ -1503,6 +1529,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         UnblockDetail = null;
         UnblockServices = [];
         UnblockProblemCode = null;
+        SeveralGamesOpen = [];
 
         PacketsSent = 0;
         PacketsReceived = 0;

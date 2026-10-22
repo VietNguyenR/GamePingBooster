@@ -402,6 +402,9 @@ internal static class StringsVi
         ["svc.notConnected"] = "Chưa kết nối",
         ["svc.idleDisconnect"] =
             "Đã tự ngắt kết nối - {0} phút không mở game nào. Bấm Bắt đầu tăng tốc trước khi chơi.",
+        ["svc.licenceExpired"] = "Tài khoản dùng thử đã hết hạn, vui lòng nâng cấp VIP để tiếp tục sử dụng.",
+        ["svc.licenceExpired.title"] = "Đã ngắt kết nối",
+        ["main.severalGames"] = "Bạn đang mở nhiều game cùng lúc ({0}) - nên chỉ chạy 1 game để app hoạt động tốt nhất.",
 
         ["choiceNote.nextConnect"] = "Sẽ áp dụng từ lần kết nối sau.",
         ["choiceNote.notForGame"] = "{0} không dùng cho {1} - đang dùng {2}.",
@@ -489,7 +492,8 @@ internal static class StringsVi
         ["upgrade.discount"] = "Mã giới thiệu {1}: giảm {0} cho lần thanh toán đầu tiên - giá trên đã trừ.",
         ["upgrade.total"] = "Tổng thanh toán",
         ["upgrade.pay"] = "Thanh toán",
-        ["upgrade.terms"] = "Thời gian còn lại của gói hiện tại được cộng dồn sang gói mới.",
+        ["upgrade.terms.carry"] = "Thời gian còn lại của gói hiện tại được cộng dồn sang gói mới.",
+        ["upgrade.terms.reset"] = "Lưu ý: đổi sang loại gói khác thì gói hiện tại mất hiệu lực ngay khi thanh toán. Thời gian còn lại không được cộng dồn và không được hoàn tiền; chỉ tính theo gói mới nhất, từ lúc thanh toán.",
         ["upgrade.agree.pre"] = "Tôi đã đọc và đồng ý với ",
         ["upgrade.agree.terms"] = "Điều khoản sử dụng",
         ["upgrade.agree.and"] = " và ",
