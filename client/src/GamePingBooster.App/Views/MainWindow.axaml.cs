@@ -47,6 +47,11 @@ public partial class MainWindow : SurfaceWindow
         _checklist = (DataContext as MainViewModel)?.Checklist;
         if (_checklist is null) return;
         _checklist.PropertyChanged += OnChecklistChanged;
+        // The paid items' "Xem gói VIP": the same plans window as Account → Upgrade.
+        _checklist.OpenPlans = () =>
+        {
+            if (!_plansOpen) _ = ShowPlansAsync(null);
+        };
         ApplyPanelWidth();
     }
 

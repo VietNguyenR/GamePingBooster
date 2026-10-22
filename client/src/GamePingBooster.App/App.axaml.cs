@@ -75,7 +75,11 @@ public partial class App : Application
                 // surface much later and somewhere else.
                 message => Dispatcher.UIThread.Post(() => vm.LicenceNotice = message),
                 OnUpgradeRequired,
-                notice => Dispatcher.UIThread.Post(() => window.OfferPlans(notice)),
+                notice => Dispatcher.UIThread.Post(() =>
+                {
+                    vm.Checklist.SetNeedsPlan(true);
+                    window.OfferPlans(notice);
+                }),
                 signIn.Report);
             _pipe.StatusReceived += _refresher.OnStatus;
             // Coming back to the app - typically from the payment page - asks again at once when
@@ -321,6 +325,7 @@ public partial class App : Application
     private void OnLicenceExpired(MainWindow window)
     {
         var text = Loc.T(LicenceExpiredCode);
+        (window.DataContext as MainViewModel)?.Checklist.SetNeedsPlan(true);
         if (!window.IsVisible || !window.IsActive) _tray?.Notify(Loc.T("svc.licenceExpired.title"), text);
         window.OfferPlansAfterExpiry(text);
     }

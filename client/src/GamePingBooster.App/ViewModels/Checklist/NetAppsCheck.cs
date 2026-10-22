@@ -16,7 +16,7 @@ namespace GamePingBooster.App.ViewModels.Checklist;
 /// the game's packets queue behind it - ping climbs and spikes for as long as it runs.
 ///
 /// Two stages, so nothing per-process ever runs all the time (the 2026-10-17 resource audit's rule):
-/// 1. Always while connected, every <see cref="Every"/>: the adapter's own byte counters (one GetIfEntry2 per adapter,
+/// 1. Always, connected or not (the panel measures as the app opens - owner, 2026-10-22), every <see cref="Every"/>: the adapter's own byte counters (one GetIfEntry2 per adapter,
 ///    nothing per process), minus what the tunnel carries - the game's traffic, counted on the Wintun adapter and
 ///    grossed up by the tunnel's per-packet overhead. What is left is background.
 /// 2. Only while a game runs and background is over the bar: the service counts TCP bytes per app for a few seconds
@@ -57,6 +57,9 @@ public sealed class NetAppsCheck : CheckItem
     private CancellationTokenSource? _loop;
     private bool _gameRunning;
 
+    /// <summary>The relay while connected, so the line its traffic leaves by is the one counted; null before that.</summary>
+    private volatile IPAddress? _relay;
+
     /// <summary>The service's last answer, or null when none applies now. UI thread.</summary>
     private List<NetAppUsage>? _apps;
     private DateTime _askedAt = DateTime.MinValue;
@@ -89,19 +92,12 @@ public sealed class NetAppsCheck : CheckItem
         _gameRunning = status.GameRunning;
         if (!_gameRunning) _pauseError = null;
 
-        if (status.State == TunnelState.Connected)
+        _relay = status.State == TunnelState.Connected && IPAddress.TryParse(status.RelayAddress, out var a) ? a : null;
+        if (_loop is null)
         {
-            if (_loop is null)
-            {
-                _loop = new CancellationTokenSource();
-                var token = _loop.Token;
-                var relay = IPAddress.TryParse(status.RelayAddress, out var a) ? a : null;
-                _ = Task.Run(() => MeasureAsync(relay, token));
-            }
-        }
-        else if (status.State is TunnelState.Disconnected or TunnelState.Faulted)
-        {
-            Stop();
+            _loop = new CancellationTokenSource();
+            var token = _loop.Token;
+            _ = Task.Run(() => MeasureAsync(token));
         }
         Evaluate();
     }
@@ -144,10 +140,11 @@ public sealed class NetAppsCheck : CheckItem
 
     private sealed record Counts(long In, long Out, long PacketsIn, long PacketsOut);
 
-    private async Task MeasureAsync(IPAddress? relay, CancellationToken token)
+    private async Task MeasureAsync(CancellationToken token)
     {
         NetworkInterface? line = null, tunnel = null;
         var adapterAt = DateTime.MinValue;
+        IPAddress? relayAt = null;
         (Counts Line, Counts Tunnel, long At)? previous = null;
         var rates = new Queue<(double Down, double Up)>();
 
@@ -156,11 +153,15 @@ public sealed class NetAppsCheck : CheckItem
         {
             do
             {
-                if (DateTime.UtcNow - adapterAt >= AdapterEvery)
+                // Looked up again at once on Connect and Disconnect: the Wintun adapter comes and goes with the tunnel.
+                var relay = _relay;
+                if (DateTime.UtcNow - adapterAt >= AdapterEvery || !Equals(relay, relayAt))
                 {
                     adapterAt = DateTime.UtcNow;
+                    relayAt = relay;
                     var (foundLine, foundTunnel) = FindAdapters(relay);
-                    if (foundLine?.Id != line?.Id)
+                    // A tunnel that appeared or went between two readings would count its whole total as traffic.
+                    if (foundLine?.Id != line?.Id || foundTunnel?.Id != tunnel?.Id)
                     {
                         previous = null;
                         rates.Clear();
@@ -251,7 +252,7 @@ public sealed class NetAppsCheck : CheckItem
         if (r is null)
         {
             Severity = CheckSeverity.Unknown;
-            Summary = _loop is null ? T("check.pending") : T("check.apps.measuring");
+            Summary = T("check.apps.measuring");
             Lines = [];
             return;
         }

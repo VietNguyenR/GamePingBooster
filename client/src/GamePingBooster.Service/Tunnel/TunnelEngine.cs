@@ -3793,6 +3793,11 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
         var choiceNote = RelayChoiceNote();
         var refusal = LicenceRefusal();
 
+        // While connected the watcher says which game is open; before that, a look of our own (IdleGame).
+        var watcher = _watcher;
+        var idleGame = watcher is null ? IdleGame() : null;
+        var gameRunning = watcher?.IsGameRunning ?? idleGame is not null;
+
         return new StatusMessage
         {
             State = _state,
@@ -3849,12 +3854,12 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
             // The last minute, as relay comparisons read it (RelayLoss): since connect, an hour of clean play hid
             // loss that had just started, and loss that had stopped stayed on screen for the rest of the evening.
             LossRatio = carrier?.RecentLoss() is { Sent: >= 5 } recent ? recent.Share : null,
-            GameRunning = _watcher?.IsGameRunning ?? false,
+            GameRunning = gameRunning,
             HomeLine = _recorder?.HomeLine,
             // The game being played, or - when none is - the only one there is. With several there is
             // no selector, so naming the one relays happened to be measured for would read as a choice
             // nobody made; the UI says how many instead of listing them all.
-            GameName = (_watcher?.IsGameRunning ?? false) ? _game?.Name : OnlyGameName,
+            GameName = watcher is { IsGameRunning: true } ? _game?.Name : idleGame?.Name ?? OnlyGameName,
             GameCount = _profile?.Games.Count ?? 0,
             SeveralGamesOpen = _watcher?.SeveralGamesOpen is { } several ? [.. several.Select(g => g.Name)] : null,
             RelayChoice = RelayChoice,
@@ -4257,6 +4262,27 @@ internal sealed partial class TunnelEngine : IAsyncDisposable
     /// </summary>
     public bool AnyGameRunning() =>
         _profile is { } profile && GameProcessWatcher.FindRunning(profile.Games.SelectMany(g => g.ProcessNames)) is not null;
+
+    private sealed record IdleLook(long At, GameEntry? Game);
+
+    private volatile IdleLook? _idleLook;
+
+    /// <summary>
+    /// The game open while nothing is connected, for the status: the panel measures from the moment the app opens, not
+    /// from Connect (owner, 2026-10-22), and judges the PC and the line against a game that is running. The watcher only
+    /// exists while connected. One process list at most every 2 s - the heartbeat asks every second. The first game in
+    /// profile order wins, as the watcher does with games already open at its first look.
+    /// </summary>
+    private GameEntry? IdleGame()
+    {
+        if (_profile is not { } profile) return null;
+        var now = Environment.TickCount64;
+        if (_idleLook is { } last && now - last.At < 2000) return last.Game;
+        var running = GameProcessWatcher.RunningNames();
+        var game = profile.Games.FirstOrDefault(g => GameProcessWatcher.FindRunning(g.ProcessNames, running) is not null);
+        _idleLook = new IdleLook(now, game);
+        return game;
+    }
 
     /// <summary>Every game's process names, as the profile lists them ("TslGame.exe"). Empty with no profile.</summary>
     public List<string> GameProcessNames() => _profile is { } profile ? [.. profile.Games.SelectMany(g => g.ProcessNames)] : [];

@@ -101,18 +101,12 @@ public sealed class ResourceCheck : CheckItem
             _askedFor = null;
         }
 
-        if (status.State == TunnelState.Connected)
+        // Connected or not: the panel measures as the app opens (owner, 2026-10-22).
+        if (_loop is null)
         {
-            if (_loop is null)
-            {
-                _loop = new CancellationTokenSource();
-                var token = _loop.Token;
-                _ = Task.Run(() => MeasureAsync(token));
-            }
-        }
-        else if (status.State is TunnelState.Disconnected or TunnelState.Faulted)
-        {
-            Stop();
+            _loop = new CancellationTokenSource();
+            var token = _loop.Token;
+            _ = Task.Run(() => MeasureAsync(token));
         }
         Evaluate();
     }
@@ -305,7 +299,7 @@ public sealed class ResourceCheck : CheckItem
         if (r is null)
         {
             Severity = CheckSeverity.Unknown;
-            Summary = _loop is null ? T("check.pending") : T("check.res.measuring");
+            Summary = T("check.res.measuring");
             Detail = null;
             Lines = [];
             return;

@@ -40,9 +40,12 @@ public sealed class DnsCheck : CheckItem
         Evaluate();
     }
 
+    protected override void OnPlanChanged() => Evaluate();
+
     private void Evaluate()
     {
         var status = _status;
+        var session = status is { State: TunnelState.Connected or TunnelState.Connecting or TunnelState.Reconnecting };
 
         if (status is { UnblockProblemCode: { } problem })
         {
@@ -50,10 +53,21 @@ public sealed class DnsCheck : CheckItem
             Severity = CheckSeverity.Warning;
             Summary = T("check.dns.problem");
             Detail = T(problem);
+            Lines = [];
             return;
         }
 
         Detail = null;
+
+        // Paid: the fix runs through Connect, which an account with no plan cannot press.
+        if (NeedsPlan && !session)
+        {
+            Severity = CheckSeverity.Unknown;
+            Summary = T("check.plan.summary");
+            Lines = [PlanLine("check.dns.plan")];
+            return;
+        }
+        Lines = [];
 
         if (status is { Unblock: true })
         {
@@ -66,8 +80,6 @@ public sealed class DnsCheck : CheckItem
         // simply not checked yet, and right after it the service is still turning it on. Never shown as a problem: a
         // service too old to report it sends nothing at all, and that is not the player's fault either.
         Severity = CheckSeverity.Unknown;
-        Summary = status is { State: TunnelState.Connected or TunnelState.Connecting or TunnelState.Reconnecting }
-            ? T("check.dns.starting")
-            : T("check.pending");
+        Summary = session ? T("check.dns.starting") : T("check.pending");
     }
 }

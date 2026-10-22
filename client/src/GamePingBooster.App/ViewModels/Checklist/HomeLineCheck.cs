@@ -66,11 +66,22 @@ public sealed class HomeLineCheck : CheckItem
         Evaluate();
     }
 
+    protected override void OnPlanChanged() => Evaluate();
+
     private void Evaluate()
     {
         var status = _status;
         var line = status?.HomeLine;
         var now = DateTimeOffset.UtcNow;
+
+        // Paid: measured through the tunnel (the spike recorder), so from Connect on - which needs a plan.
+        if (line is null && NeedsPlan && !Connected(status))
+        {
+            Severity = CheckSeverity.Unknown;
+            Summary = T("check.plan.summary");
+            Lines = [PlanLine("check.home.plan")];
+            return;
+        }
 
         if (line is null)
         {

@@ -203,6 +203,34 @@ public abstract class CheckItem : INotifyPropertyChanged
 
     protected static string T(string key) => Loc.T(key);
 
+    // ------------------------------------------------------------ paid items
+
+    /// <summary>
+    /// The account has no plan (the licence server said 402, or the plan ran out mid-session) - Connect will be refused.
+    /// Items 2-5 and 7 are free and do not read this; the ones measured or fixed through the tunnel (DNS, Mạng trong
+    /// nhà) say they come with a plan instead of "press Start boosting" (owner, 2026-10-22).
+    /// </summary>
+    protected bool NeedsPlan { get; private set; }
+
+    /// <summary>Opens the plans window. Set by the panel; null until the main window is up.</summary>
+    internal Action? OpenPlans { get; set; }
+
+    internal void SetNeedsPlan(bool value)
+    {
+        if (NeedsPlan == value) return;
+        NeedsPlan = value;
+        OnPlanChanged();
+    }
+
+    /// <summary>Re-evaluate when <see cref="NeedsPlan"/> changes.</summary>
+    protected virtual void OnPlanChanged()
+    {
+    }
+
+    /// <summary>The line under a paid item for an account with no plan: what it does, and the plans button.</summary>
+    protected DetailLine PlanLine(string key) =>
+        new(T(key), Buttons: OpenPlans is { } open ? [new LineButton(T("check.plan.open"), open)] : null);
+
     // --------------------------------------------------- INotifyPropertyChanged
 
     public event PropertyChangedEventHandler? PropertyChanged;

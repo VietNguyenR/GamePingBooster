@@ -42,6 +42,10 @@ public sealed class ChecklistViewModel : INotifyPropertyChanged
 
         pipe.StatusReceived += status => Dispatcher.UIThread.Post(() =>
         {
+            // A licence came in: the plan was bought or renewed. Not just "a token is stored": the last one of a plan
+            // that ran out stays stored for a moment after the session ends, already expired.
+            if (status is { HasToken: true, TokenExpiresAt: { } until } && until > DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+                SetNeedsPlan(false);
             foreach (var item in _items) item.OnStatus(status);
         });
         pipe.Disconnected += _ => Dispatcher.UIThread.Post(() =>
@@ -50,8 +54,7 @@ public sealed class ChecklistViewModel : INotifyPropertyChanged
         });
         Loc.Changed += OnLanguageChanged;
 
-        Resort();
-    }
+        Resort();    }
 
     // ------------------------------------------------------------ open / collapsed
 
@@ -72,6 +75,26 @@ public sealed class ChecklistViewModel : INotifyPropertyChanged
     public bool IsCollapsed => !IsOpen;
 
     public void Toggle() => IsOpen = !IsOpen;
+
+    // ------------------------------------------------------------ free and paid items
+
+    /// <summary>
+    /// The account has no plan: told by the licence server (402) or by the service ending a session whose plan ran out,
+    /// and cleared by the next status that carries a licence. The paid items read it (<see cref="CheckItem.NeedsPlan"/>).
+    /// </summary>
+    public void SetNeedsPlan(bool value)
+    {
+        foreach (var item in _items) item.SetNeedsPlan(value);
+    }
+
+    /// <summary>What the paid items' "Xem gói VIP" button does - the main window's plans dialog.</summary>
+    public Action? OpenPlans
+    {
+        set
+        {
+            foreach (var item in _items) item.OpenPlans = value;
+        }
+    }
 
     private bool _isGoodExpanded;
 

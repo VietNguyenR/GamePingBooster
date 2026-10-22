@@ -26,8 +26,9 @@ namespace GamePingBooster.App.ViewModels.Checklist;
 /// the player is not told to move closer to the router for a phone's download (owner, Viettel, 2026-10-20). A weak
 /// signal is still judged.
 ///
-/// Runs only while connected, off the connect path: the adapter is looked up after Connect has finished, from this
-/// user process, never in the service's route path (slow-connect-was-netsh-and-adapter-enumeration).
+/// Runs from the first status on, connected or not (owner, 2026-10-22: the panel is free and measures as the app opens).
+/// The adapter is looked up from this user process, never in the service's route path
+/// (slow-connect-was-netsh-and-adapter-enumeration).
 /// </summary>
 public sealed class NetworkCheck : CheckItem
 {
@@ -57,22 +58,18 @@ public sealed class NetworkCheck : CheckItem
     private CancellationTokenSource? _loop;
     private HomeLineStatus? _homeLine;
 
+    /// <summary>The relay while connected, so the line its traffic leaves by is the one measured; null before that.</summary>
+    private volatile IPAddress? _relay;
+
     public override void OnStatus(StatusMessage status)
     {
         _homeLine = status.HomeLine;
-        if (status.State == TunnelState.Connected)
+        _relay = status.State == TunnelState.Connected && IPAddress.TryParse(status.RelayAddress, out var a) ? a : null;
+        if (_loop is null)
         {
-            if (_loop is null)
-            {
-                _loop = new CancellationTokenSource();
-                var token = _loop.Token;
-                var relay = IPAddress.TryParse(status.RelayAddress, out var a) ? a : null;
-                _ = Task.Run(() => MeasureAsync(relay, token));
-            }
-        }
-        else if (status.State is TunnelState.Disconnected or TunnelState.Faulted)
-        {
-            Stop();
+            _loop = new CancellationTokenSource();
+            var token = _loop.Token;
+            _ = Task.Run(() => MeasureAsync(token));
         }
         Evaluate();
     }
@@ -102,22 +99,26 @@ public sealed class NetworkCheck : CheckItem
 
     private sealed record Finding(bool Wireless, WifiLink? Wifi, double? JitterMs);
 
-    private async Task MeasureAsync(IPAddress? relay, CancellationToken token)
+    private async Task MeasureAsync(CancellationToken token)
     {
         var rtts = new Queue<double?>();
         IPAddress? gateway = null;
         string? nicId = null;
         bool wireless = false;
         var adapterAt = DateTime.MinValue;
+        IPAddress? relayAt = null;
 
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
         try
         {
             do
             {
-                if (DateTime.UtcNow - adapterAt >= AdapterEvery)
+                // Looked up again at once when Connect names a relay: it may leave by another line than the default.
+                var relay = _relay;
+                if (DateTime.UtcNow - adapterAt >= AdapterEvery || !Equals(relay, relayAt))
                 {
                     adapterAt = DateTime.UtcNow;
+                    relayAt = relay;
                     var found = FindAdapter(relay);
                     if (found?.Id != nicId || !Equals(found?.Gateway, gateway)) rtts.Clear(); // another network
                     nicId = found?.Id;
@@ -225,7 +226,7 @@ public sealed class NetworkCheck : CheckItem
         if (f is null)
         {
             Severity = CheckSeverity.Unknown;
-            Summary = _loop is null ? T("check.pending") : T("check.net.measuring");
+            Summary = T("check.net.measuring");
             Detail = null;
             return;
         }
