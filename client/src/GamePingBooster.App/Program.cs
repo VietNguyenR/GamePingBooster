@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Threading;
 using Avalonia;
 
@@ -33,18 +34,81 @@ internal static class Program
     {
         if (!TryTakeInstanceLock())
         {
-            // Silence is the specified behaviour: a second launch does nothing. Nothing is
-            // written to a log either, because there is no log on this side and popping a
-            // message box would be its own kind of noise.
+            // A second launch asks the running app to show its window and leaves (owner,
+            // 2026-10-23): opening the app from the desktop while it sits in the tray used to do
+            // nothing at all, which reads as a broken app. No log and no message box: there is no
+            // log on this side, and the window coming up is the answer.
             //
             // Exit code 0, not an error: being already open is a normal outcome of double
             // clicking an icon, and a non-zero code would make a shortcut or a script think
             // something went wrong.
+            SignalRunningInstance();
             return 0;
         }
 
+        _showRequest = CreateShowRequest();
         return BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
+
+    /// <summary>
+    /// Set by a second launch, waited on by the first. Auto-reset: one launch, one show. A launch
+    /// that comes before the app has started listening stays set until it does, so it is not lost.
+    /// </summary>
+    private const string ShowRequestName = @"Local\GamePingBooster.ShowWindow";
+
+    /// <summary>Held for the life of the process, like the mutex: the name only exists while something holds it.</summary>
+    private static EventWaitHandle? _showRequest;
+
+    private static EventWaitHandle? CreateShowRequest()
+    {
+        try { return new EventWaitHandle(false, EventResetMode.AutoReset, ShowRequestName); }
+        catch (Exception) { return null; }
+    }
+
+    /// <summary>
+    /// Calls <paramref name="onShowRequested"/> on a background thread each time another launch
+    /// asks for the window. Nothing happens when the handle could not be created: a second launch
+    /// then does nothing, as it did before.
+    /// </summary>
+    public static void ListenForShowRequests(Action onShowRequested)
+    {
+        if (_showRequest is not { } handle) return;
+        // Background: it must not keep the process alive once the app has shut down.
+        new Thread(() =>
+        {
+            while (true)
+            {
+                handle.WaitOne();
+                onShowRequested();
+            }
+        }) { IsBackground = true, Name = "show-request" }.Start();
+    }
+
+    private static void SignalRunningInstance()
+    {
+        try
+        {
+            if (!EventWaitHandle.TryOpenExisting(ShowRequestName, out var handle)) return; // an older build, which does not listen
+            using (handle)
+            {
+                // This process was just started by the user and may take the foreground; the
+                // running one, sitting in the tray, may not. Without passing it on, Activate()
+                // there only flashes the taskbar button instead of bringing the window to front.
+                AllowSetForegroundWindow(AsfwAny);
+                handle.Set();
+            }
+        }
+        catch (Exception)
+        {
+            // Nothing to fall back to: the app is open, just not brought forward.
+        }
+    }
+
+    private const uint AsfwAny = unchecked((uint)-1);
+
+    // DllImport rather than LibraryImport, as elsewhere in this app: see Loc.cs.
+    [DllImport("user32.dll")]
+    private static extern bool AllowSetForegroundWindow(uint processId);
 
     /// <summary>
     /// True when this process is the first one. False when another instance already holds it.

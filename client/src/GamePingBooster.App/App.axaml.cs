@@ -165,6 +165,9 @@ public partial class App : Application
             else if (desktop.Args?.Contains("--after-update") == true) OpenGate();
             else StartUpdateGate();
 
+            // The app opened again from the desktop or the Start menu while already running: bring the window back.
+            Program.ListenForShowRequests(() => Dispatcher.UIThread.Post(OnShowRequested));
+
             // Start listening to the service. Bringing the tunnel up waits for the user to press
             // the button - the app never rearranges the machine's routing on its own at startup.
             // The service is about to install an update and offers it ("ready"): show the updater window, which asks
@@ -283,6 +286,23 @@ public partial class App : Application
         var desktop = _desktop;
         var window = _window;
         Dispatcher.UIThread.Post(() => desktop.MainWindow = window);
+    }
+
+    /// <summary>
+    /// A second launch asked for the window (see Program). From the tray, behind other windows or minimised, it comes
+    /// back. While the updater window is open it waits for that to close, the way a window that was on screen does;
+    /// before the check at start is over, the check is cut short - the person has asked for the app twice now.
+    /// </summary>
+    private void OnShowRequested()
+    {
+        if (_shuttingDown || _window is null) return;
+        if (_updater is not null)
+        {
+            _windowWasVisible = true;
+            return;
+        }
+        if (!_gateOpen) OpenGate();
+        _window.RestoreFromTray();
     }
 
     private void OnUpdateReady()
