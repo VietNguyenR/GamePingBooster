@@ -192,6 +192,24 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
     }
 
+    // ------------------------------------------------------------------ starting with Windows
+    //
+    // The same again (StartupStore). Read back after every write, so a write that failed, or Task Manager having
+    // the last word, shows as it really is.
+
+    private bool? _startWithWindows;
+    public bool StartWithWindows
+    {
+        get => _startWithWindows ??= StartupStore.IsEnabled();
+        set
+        {
+            if (value == StartWithWindows) return;
+            StartupStore.Set(value);
+            _startWithWindows = StartupStore.IsEnabled();
+            Raise(nameof(StartWithWindows));
+        }
+    }
+
     /// <summary>
     /// Saving needs SOMETHING to save, and a key only when there are self-hosted addresses to
     /// use it with.

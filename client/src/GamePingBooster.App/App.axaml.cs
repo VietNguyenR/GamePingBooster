@@ -50,11 +50,6 @@ public partial class App : Application
             var window = new MainWindow { DataContext = vm };
             window.Attach(_pipe);
             _window = window;
-            // Shown at once only when the updater window has just started this app after an update. Otherwise the
-            // updater window checks for a release first, and the main window follows when there is nothing to install
-            // (see StartUpdateGate) - it must not appear and then vanish when setup closes the app a second later.
-            if (desktop.Args?.Contains("--after-update") == true) OpenGate();
-            else StartUpdateGate();
             // Renews the licence token on its own, at half of its remaining life. It takes the
             // licence URL and device key from the status push directly, not from the view model,
             // which only sees a status once the UI thread gets round to it - see TokenRefresher.
@@ -158,6 +153,17 @@ public partial class App : Application
             {
                 _tray = null;
             }
+
+            // Started with Windows (StartupStore): straight to the tray, with no window and no update check on screen -
+            // the service installs updates by itself. Without a tray icon there would be no way back to a hidden
+            // window, so then it opens as usual.
+            // Otherwise shown at once only when the updater window has just started this app after an update. Otherwise
+            // the updater window checks for a release first, and the main window follows when there is nothing to
+            // install (see StartUpdateGate) - it must not appear and then vanish when setup closes the app a second later.
+            StartupStore.ApplyAtStart();
+            if (desktop.Args?.Contains(StartupStore.Argument) == true && _tray is not null) OpenGateInTray();
+            else if (desktop.Args?.Contains("--after-update") == true) OpenGate();
+            else StartUpdateGate();
 
             // Start listening to the service. Bringing the tunnel up waits for the user to press
             // the button - the app never rearranges the machine's routing on its own at startup.
@@ -266,6 +272,17 @@ public partial class App : Application
         _gateOpen = true;
         _desktop.MainWindow = _window;
         _window.Show();
+    }
+
+    /// <summary>Like <see cref="OpenGate"/>, but the window stays in the tray until the icon is clicked.</summary>
+    private void OpenGateInTray()
+    {
+        if (_gateOpen || _desktop is null || _window is null) return;
+        _gateOpen = true;
+        // Posted: the lifetime shows whatever MainWindow is once this method has returned, and only then.
+        var desktop = _desktop;
+        var window = _window;
+        Dispatcher.UIThread.Post(() => desktop.MainWindow = window);
     }
 
     private void OnUpdateReady()

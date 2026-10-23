@@ -31,6 +31,7 @@ internal sealed class PipeServer
 {
     private readonly TunnelEngine _engine;
     private readonly UnblockDns _unblock;
+    private readonly LineBlockWatch _lineBlocks;
     private readonly AutoUpdater _updater;
     private readonly Network.NetworkApps _netApps;
     private readonly Network.PowerTune _power;
@@ -40,10 +41,11 @@ internal sealed class PipeServer
     private readonly SemaphoreSlim _writeLock = new(1, 1);
 
     public PipeServer(TunnelEngine engine, UnblockDns unblock, AutoUpdater updater, Network.NetworkApps netApps,
-        Network.PowerTune power, Action<string> log)
+        Network.PowerTune power, LineBlockWatch lineBlocks, Action<string> log)
     {
         _engine = engine;
         _unblock = unblock;
+        _lineBlocks = lineBlocks;
         _updater = updater;
         _netApps = netApps;
         _power = power;
@@ -51,6 +53,7 @@ internal sealed class PipeServer
         _engine.StatusChanged += status => _ = PushAsync(status);
         _netApps.Changed += () => _ = PushAsync(_engine.Snapshot());
         _power.Changed += () => _ = PushAsync(_engine.Snapshot());
+        _lineBlocks.Changed += () => _ = PushAsync(_engine.Snapshot());
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -549,6 +552,7 @@ internal sealed class PipeServer
         status.UnblockDetail = _unblock.Detail;
         status.UnblockServices = [.. _unblock.Services];
         status.UnblockProblemCode = _unblock.ProblemCode;
+        status.LineBlocks = [.. _lineBlocks.Blocked];
         status.UpdatesPaused = _netApps.UpdatesPaused;
         status.PowerBoosted = _power.Boosted;
         status.NicPowerChanged = _power.NicChanged;

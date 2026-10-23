@@ -121,6 +121,12 @@
       <TextBlock Classes="hint" Text="{DynamicResource settings.close.hint}" />
     </StackPanel>
 
+    <StackPanel>
+      <CheckBox IsChecked="{Binding StartWithWindows}" Foreground="#ababab" FontSize="13"
+                Content="{DynamicResource settings.startup}" />
+      <TextBlock Classes="hint" Text="{DynamicResource settings.startup.hint}" />
+    </StackPanel>
+
     <Grid ColumnDefinitions="*,Auto,Auto">
       <Button Grid.Column="1" Content="{DynamicResource settings.cancel}" Click="OnCancelClick"
               Height="38" Width="92" Margin="0,0,8,0"

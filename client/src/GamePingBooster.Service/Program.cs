@@ -281,7 +281,14 @@ public static class Program
                 "It will be tried again on the next connect.");
         }
 
-        pipe = new PipeServer(engine, unblock, updater, netApps, power, log);
+        // Whether the line itself breaks PUBG/Steam, for the PC tune-up panel - measured while the app is open and nothing
+        // is connected, so it sees the ISP's own answers and not the fix above (block-detect-handoff.md).
+        await using var lineBlocks = new LineBlockWatch(
+            () => engine.UnblockPolicy, () => engine.State, () => unblock.Enabled, engine.AnyGameRunning,
+            () => pipe?.UiSession is not null, log);
+
+        pipe = new PipeServer(engine, unblock, updater, netApps, power, lineBlocks, log);
+        lineBlocks.Start();
 
         log($"Listening on pipe \\\\.\\pipe\\{Core.Ipc.IpcConstants.PipeName}");
         await pipe.RunAsync(ct).ConfigureAwait(false);

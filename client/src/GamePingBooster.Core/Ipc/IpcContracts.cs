@@ -513,6 +513,13 @@ public sealed class StatusMessage
     [JsonPropertyName("unblockProblemCode")] public string? UnblockProblemCode { get; set; }
 
     /// <summary>
+    /// The services the player's own line was last found breaking (DNS lie, or handshakes cut by name), by display name -
+    /// measured by the service while nothing is connected (LineBlockWatch). Empty when clean, not measured yet, or from a
+    /// service too old to measure; the panel shows nothing then (block-detect-handoff.md). Additive.
+    /// </summary>
+    [JsonPropertyName("lineBlocks")] public List<string> LineBlocks { get; set; } = [];
+
+    /// <summary>
     /// This machine's device public key, 65 bytes as lowercase hex, or null on a service too old
     /// to have one.
     ///

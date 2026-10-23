@@ -52,6 +52,18 @@ public abstract class CheckItem : INotifyPropertyChanged
         }
     }
 
+    private bool _hidden;
+
+    /// <summary>
+    /// Left off the panel altogether - not listed, not counted. For an item that only has something to say when
+    /// something is wrong (the line breaking a game): "all fine" from it would read as a reason to stop paying.
+    /// </summary>
+    public bool Hidden
+    {
+        get => _hidden;
+        protected set => Set(ref _hidden, value);
+    }
+
     /// <summary>A warning or worse: counted in the header and the badge, listed above the fold.</summary>
     public bool IsProblem => Severity is CheckSeverity.Critical or CheckSeverity.Warning;
 

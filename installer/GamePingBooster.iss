@@ -434,6 +434,23 @@ begin
   end;
 end;
 
+// "Start with Windows" (StartupStore in the app) is a value in each person's HKCU, which this elevated
+// uninstaller does not see as its own when somebody else typed the admin password. So every profile
+// that is loaded - everybody signed in - is cleaned through HKEY_USERS. A profile that is not loaded
+// keeps a value pointing at a missing exe, which Windows skips without a word.
+procedure RemoveStartWithWindows();
+var
+  users: TArrayOfString;
+  i: Integer;
+begin
+  if RegGetSubkeyNames(HKEY_USERS, '', users) then
+    for i := 0 to GetArrayLength(users) - 1 do
+    begin
+      RegDeleteValue(HKEY_USERS, users[i] + '\Software\Microsoft\Windows\CurrentVersion\Run', 'GamePingBooster');
+      RegDeleteValue(HKEY_USERS, users[i] + '\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run', 'GamePingBooster');
+    end;
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   code: Integer;
@@ -443,5 +460,6 @@ begin
     Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#UiExe}', '',
          SW_HIDE, ewWaitUntilTerminated, code);
     StopServiceAndWait();
+    RemoveStartWithWindows();
   end;
 end;

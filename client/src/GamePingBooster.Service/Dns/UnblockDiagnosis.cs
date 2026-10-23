@@ -284,7 +284,7 @@ internal static class UnblockDiagnosis
     /// One A query straight to a resolver, past the name resolution policy - the ISP's own answer, which is what
     /// the line says before anything of ours touches it.
     /// </summary>
-    private static async Task<(string Answer, List<IPAddress> Addresses, bool NxDomain)> AskDirectAsync(
+    internal static async Task<(string Answer, List<IPAddress> Addresses, bool NxDomain)> AskDirectAsync(
         IPAddress server, string name, CancellationToken ct)
     {
         try
@@ -321,7 +321,7 @@ internal static class UnblockDiagnosis
         EdgeProber.HandshakeAsync(address, sni, ConnectTimeout, HandshakeTimeout, ct);
 
     /// <summary>Loopback, unspecified or private: the shape of a resolver's lie, as UnblockDns judges it.</summary>
-    private static bool Sinkhole(IReadOnlyCollection<IPAddress> addresses)
+    internal static bool Sinkhole(IReadOnlyCollection<IPAddress> addresses)
     {
         if (addresses.Count == 0) return true;
         foreach (var address in addresses)

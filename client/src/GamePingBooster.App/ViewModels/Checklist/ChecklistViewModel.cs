@@ -28,6 +28,7 @@ public sealed class ChecklistViewModel : INotifyPropertyChanged
     {
         _items =
         [
+            new LineBlockCheck(),
             new DnsCheck(),
             new NetworkCheck(),
             new HomeLineCheck(),
@@ -136,7 +137,7 @@ public sealed class ChecklistViewModel : INotifyPropertyChanged
 
     public string HeaderText => ProblemCount > 0
         ? Loc.F("check.panel.attention", ProblemCount)
-        : _items.All(i => i.Severity == CheckSeverity.Good)
+        : _items.Where(i => !i.Hidden).All(i => i.Severity == CheckSeverity.Good)
             ? T("check.panel.allGood")
             : "";
 
@@ -144,7 +145,7 @@ public sealed class ChecklistViewModel : INotifyPropertyChanged
 
     /// <summary>Red when anything is red, amber for warnings, green when all is well.</summary>
     public IBrush HeaderBrush =>
-        _items.Any(i => i.Severity == CheckSeverity.Critical) ? CheckItem.CriticalBrush
+        _items.Any(i => !i.Hidden && i.Severity == CheckSeverity.Critical) ? CheckItem.CriticalBrush
         : ProblemCount > 0 ? CheckItem.WarningBrush
         : CheckItem.GoodBrush;
 
@@ -171,15 +172,16 @@ public sealed class ChecklistViewModel : INotifyPropertyChanged
 
     private void OnItemChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName is nameof(CheckItem.Severity)) Resort();
+        if (e.PropertyName is nameof(CheckItem.Severity) or nameof(CheckItem.Hidden)) Resort();
         if (e.PropertyName is nameof(CheckItem.CanRestore)) Raise(nameof(CanRestoreAll));
     }
 
     private void Resort()
     {
         // Stable within a severity: build order, so lines do not swap places when nothing about them changed.
-        var attention = _items.Where(i => i.Severity != CheckSeverity.Good).OrderBy(i => i.Severity).ToList();
-        var good = _items.Where(i => i.Severity == CheckSeverity.Good).ToList();
+        var shown = _items.Where(i => !i.Hidden).ToList();
+        var attention = shown.Where(i => i.Severity != CheckSeverity.Good).OrderBy(i => i.Severity).ToList();
+        var good = shown.Where(i => i.Severity == CheckSeverity.Good).ToList();
 
         Replace(Attention, attention);
         Replace(Good, good);
