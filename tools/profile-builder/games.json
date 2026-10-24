@@ -426,6 +426,22 @@
       "azureRegions": [],
       "asns": [],
       "note": "Captured 2026-10-14 from Hanoi (FPT), one session of ~27 min, two matches. Process bf6.exe. Gameplay is UDP to AWS EC2 ap-southeast-1 (Singapore), about 62 packets/s:\n  18.99.35.86   104850 / 1682 s = 62/s   match\n  18.99.35.7     59944 /  945 s = 63/s   match\nBoth sit in 18.99.32.0/19 (published ap-southeast-1 EC2, announced by AS16509 as that /19); the builder clamps to 18.99.32.0/20. 47.129.123.115 (47.128.0.0/14, also Singapore) ran 4.3/s on two ports for the WHOLE session, in and out of matches - a lobby/QoS beacon, never a match - so it is commented out of observed-bf6.txt and not routed: if it is what the game measures its Singapore ping against, routing it would make the game compare a tunnelled datacentre against direct ones. TCP is EA backend only (us-east-1, eu-west-1, Global Accelerator, VN CDN 118.68/118.69.x) - never routed.\n\nREGIONS: Asian players report Singapore, Japan and Korea servers, and a Hong Kong one that may have been withdrawn (EA forums, 2026). Only Singapore has been played. asia-hk/asia-jp/asia-kr are declared with landmarks and NO cidrs, like goosegooseduck: discovery or a later capture fills them. Never add a region to explain a measurement.\n\nNothing answers ICMP, UDP probes or traceroute (servers and the beacon). LANDMARKS for asia-sg are other EC2 hosts in the servers' own announced /19 but OUTSIDE the routed /20, found by an ICMP sweep of 18.99.32.0/19 from sg-2: 18.99.59.120 + 18.99.48.36. 18.99.38.38 (inside the /20, so never a landmark) is the stand-in for the servers. Each neighbour keeps a fixed per-address path (ECMP), so the pair was picked so its MIN tracks 18.99.38.38. Min RTT 2026-10-14, stand-in vs landmark min: hk 32.9/33.5, hk-2 40.4/40.4, hk-3 35.2/31.7, sg-2 1.5/0.85, vn 42.5/42.2, vn-3 31.2/29.2, vn-4 48/40 (3 of 5 neighbours read 39-40 from vn-4, so the server may be either), vn-5 38.2/37.7, PC (FPT) 40/40. DynamoDB 35.71.118.x / GameLift 47.128.5.225 / EC2 reachability 46.51.216.14 (wardogs/GGD landmarks) read LOW for this /19: vn 32-34 vs 42, vn-5 21 vs 38 - do not use them for bf6 asia-sg. These are customer EC2 instances and can disappear: if one goes silent, re-sweep 18.99.48.0/20 (alternates 18.99.58.113, 18.99.48.16, 18.99.59.120 neighbours) and re-check against 18.99.38.38. HK/JP/KR landmarks are the AWS API endpoints validated for goosegooseduck (Photon on EC2), NOT checked against a BF6 server - re-check when a match there is observed."
+    },
+
+    "wwm": {
+      "name": "Where Winds Meet",
+      "watchProcess": "wwm",
+      "probePort": null,
+      "observedPath": "observed-wwm.txt",
+      "landmarkPath": null,
+      "tcpSessionsPath": "tcp-sessions-wwm.txt",
+      "unverifiedPath": "observed-wwm-unverified.txt",
+      "manualCidrPath": "manual-cidrs-wwm.txt",
+      "profilePath": "../../profiles/wwm-vn.json",
+      "awsRegions": [],
+      "azureRegions": [],
+      "asns": [],
+      "note": "Added 2026-10-23 for a first capture, nothing observed yet. Process wwm.exe. Regions, ASNs and probePort are empty until a capture shows where gameplay goes and over which protocol - fill them from the capture, never from a guess."
     }
   }
 }

@@ -36,6 +36,7 @@ internal static partial class Program
         if (args.Length > 0 && args[0] == "powerread") return PowerReadMain(args[1..]);
         if (args.Length > 0 && args[0] == "powertune") return PowerTuneMain(args[1..]);
         if (args.Length > 0 && args[0] == "cardrestart") return CardRestartMain(args[1..]);
+        if (args.Length > 0 && args[0] == "audioread") return AudioReadMain(args[1..]);
         return AllScenarios();
     }
 

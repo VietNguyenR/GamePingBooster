@@ -209,6 +209,9 @@ public static class Program
         unblock.Trouble = unblockReports.Trouble;
         engine.AfterMatchTrouble = unblockReports.Trouble;
 
+        // While PUBG runs: its playback devices, APOs and Loudness Equalization, for /admin/audio-survey.
+        using var audioSurvey = engine.CreateAudioSurvey(log);
+
         // When it runs. A self-hosted installation - no licence server - unblocks for as long as the service runs,
         // as every installation did until 2026-10-02. A licensed one unblocks while it is CONNECTED, by the owner's
         // decision that day: running with the service meant installing the app once, never paying, and keeping the

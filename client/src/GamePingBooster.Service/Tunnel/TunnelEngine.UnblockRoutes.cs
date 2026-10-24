@@ -132,6 +132,10 @@ internal sealed partial class TunnelEngine : IUnblockRoutes
                   Network.GameProcessWatcher.FindRunning(profile.Games.SelectMany(g => g.ProcessNames)) is not null,
             logPath);
 
+    /// <summary>PUBG players' playback devices, counted before a sound feature is built - see AudioSurvey.</summary>
+    public Discovery.AudioSurvey CreateAudioSurvey(Action<string> log) =>
+        new(() => _config.LicenceUrl, () => _token, _device.Key, () => _config.ShareQuality, log);
+
     /// <summary>On a disconnect: the next connection starts with none, and asks again as names are resolved.</summary>
     private void ForgetUnblockRoutes()
     {
